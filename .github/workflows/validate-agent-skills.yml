@@ -1,0 +1,24 @@
+name: Validate Agent Skills
+
+on:
+  pull_request:
+    paths:
+      - 'AGENTS.md'
+      - '.agents/**'
+      - '.github/workflows/validate-agent-skills.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'AGENTS.md'
+      - '.agents/**'
+
+jobs:
+  verify-skills:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Validate Agent Skills frontmatter and directory names
+        run: node .agents/scripts/validate-skills.mjs
