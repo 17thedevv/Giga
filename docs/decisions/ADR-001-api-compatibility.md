@@ -23,7 +23,7 @@
 
 - Shared TS DTO/schema definitions in `packages/contracts` (planned); backend validates inputs; frontend uses the approved typed contract.
 - Contract tests and snapshots run on CI, with a fixture suite for normal/error/stream/authorization flows.
-- Both developers sign off on exact endpoint definitions during Week 01. Code reviews must check for protocol changes.
+- Both developers review the proposed endpoints during W1 and record unresolved questions. Final `API v1.0 — FROZEN` status is granted only after deployed W2 browser authentication/SSE tests and the compatibility fixture suite pass. Code reviews check every protocol change.
 - First approved contract commit will be recorded in an API changelog; until then the current document remains explicitly **DRAFT**.
 
 ## Consequences
