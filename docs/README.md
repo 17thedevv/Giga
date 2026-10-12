@@ -8,6 +8,8 @@
 |---|---|---|
 | [Project Plan v0.1](01-project-plan-v0.1.md) | Goals, scope, team responsibilities, cloud split, roadmap, report requirements, Definition of Done | Baseline / review |
 | [API Contract v0.1](contracts/API_CONTRACT_V0.1.md) | Proposed frontend–backend endpoints, DTOs, SSE, agent tools, approvals and error semantics | **Draft: requires joint review** |
+| [Architecture Invariants v0.1](architecture/INVARIANTS_V0.1.md) | Stable architecture policies, exceptions and design-gate checklist | Policy baseline |
+| [ADR-001: API Stability](decisions/ADR-001-api-compatibility.md) | Backward compatibility rules, `/api/v2` migration and freeze gate | Policy accepted, concrete API pending |
 | [Week 01 Daily Plan](planning/W01-daily-plan.md) | Day-by-day activities for 12–18 Oct 2026, tasks and evidence | Proposed schedule |
 | [Team Workflow](TEAM-WORKFLOW.md) | How GitHub, Linear, pull requests and cross-training are used | Baseline / review |
 
