@@ -2,7 +2,7 @@
 
 > **Baseline:** 2026-10-12 · **Status:** Planning/approved direction · **Team:** Trà + Thư · **Subject:** Điện toán đám mây
 > **Canonical document:** GitHub repository. **Tracking:** [Linear — Giga Cloud Mini-Project](https://linear.app/17thedev/project/giga-cloud-mini-project-0656a578ee3b).
-> **Companion specs:** [API Contract v0.1 — draft](contracts/API_CONTRACT_V0.1.md) · [Architecture Invariants](architecture/INVARIANTS_V0.1.md) · [ADR-001](decisions/ADR-001-api-compatibility.md) · [Week 01 daily tasks](planning/W01-daily-plan.md) · [Team workflow](TEAM-WORKFLOW.md).
+> **Companion specs:** [API Contract v0.1 — draft](contracts/API_CONTRACT_V0.1.md) · [Architecture Invariants](architecture/INVARIANTS_V0.1.md) · [ADR-001](decisions/ADR-001-api-compatibility.md) · [Week 01 daily tasks](planning/W01-daily-plan.md) · [Team workflow](TEAM-WORKFLOW.md) · [Shared Agent Skills](../.agents/README.md).
 
 ## 1. Problem statement
 
