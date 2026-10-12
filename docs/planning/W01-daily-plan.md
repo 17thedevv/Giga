@@ -96,6 +96,13 @@
 | [17T-13](https://linear.app/17thedev/issue/17T-13/w1-public-cloud-preflight-frontend-managed-db) Frontend + DB cloud | Thư | 17/10 |
 | [17T-14](https://linear.app/17thedev/issue/17T-14/w1-cross-training-and-architecture-stage-gate) Review + cross-training | Both | 18/10 |
 
+## Shared development-agent onboarding (added 12/10)
+
+- Read `AGENTS.md` and [the shared skills handbook](../../.agents/README.md); both developers must use the same checked-out Git revision.
+- Run `node .agents/scripts/validate-skills.mjs` and record the result; run one contract-change scenario and one cloud handoff scenario in each developer's chosen agent.
+- Review whether the agent selects appropriate skills without unnecessary context loading; log mismatches before declaring the pack adopted.
+- Track in Linear [Agent Skills adoption](https://linear.app/17thedev/project/giga-cloud-mini-project-0656a578ee3b) until a dedicated issue link is available.
+
 ## W1 evidence minimum
 
 - Link to signed-off architecture and the contract with resolved/open questions.
