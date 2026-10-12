@@ -12,6 +12,7 @@ This file governs **development coding agents** operating inside Giga (Codex, An
 ## Every task
 
 - Inspect the actual checkout, branch and relevant files before work. Never assume a documented component is implemented. If the workspace differs from the task's cited revision, report the divergence.
+- **For every Git mutation** (branch, stage, commit, push, PR, sync, conflict resolution, merge or deletion), load `giga-git-workflow` and obey `docs/engineering/GIT_WORKFLOW_V0.1.md`. One issue, an issue-based branch, Conventional Commits and peer review; no direct `main` push.
 - Identify task owner/reviewer and acceptance criteria from its Linear issue (if available); otherwise use the user-provided task. Do not assign tasks or claim colleague approval without evidence.
 - Keep code changes within the requested area (`apps/api`, `apps/web`, `packages/contracts`, `infra`, or `docs`). Cross-boundary edits require a documented integration reason and review.
 - If changing **any public API, DTO, event name/order, authentication semantics, errors or persistence contract**, read `giga-contract-guardian` BEFORE edits. Compatibility takes precedence over convenience.
@@ -38,6 +39,7 @@ This file governs **development coding agents** operating inside Giga (Codex, An
 | Giga product's coding-agent runtime | `giga-agent-runtime` (+ contract guardian for run APIs) |
 | Deploy, CI/CD, managed DB, secrets, observability | `giga-cloud-ops` |
 | Tests, regression, security acceptance | `giga-verification` |
+| Git branches, commits, pushes, PRs, history sync, merges | `giga-git-workflow` (**required before any Git mutation**) |
 | Linear/PR task delivery and cross-training | `giga-task-handoff` |
 
 **Team rules do not replace permission checks or human peer review.**
