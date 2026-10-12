@@ -1,7 +1,7 @@
 # Giga API Contract v0.1 — DRAFT
 
 > **Status:** PROPOSED / NOT IMPLEMENTED · **Date:** 2026-10-12 · **Primary:** Trà (backend) · **Reviewer:** Thư (frontend).
-> This document is a frontend–backend interface proposal, not evidence of implemented endpoints. Freeze only after both review the W1 contract gate.
+> This document is a frontend–backend interface proposal, not evidence of implemented endpoints. Review proposed routes and DTOs together at the W1 contract gate; mark the concrete v1 contract FROZEN only after W2 browser auth/SSE integration checks and compatibility tests pass.
 > **Compatibility policy:** [ADR-001](../decisions/ADR-001-api-compatibility.md) · [Architecture Invariants](../architecture/INVARIANTS_V0.1.md). The **policy** is locked; the exact v1 endpoint schema remains DRAFT until sign-off.
 > **References:** [Project Plan v0.1](../01-project-plan-v0.1.md) · [W1 daily plan](../planning/W01-daily-plan.md) · [Linear Giga](https://linear.app/17thedev/project/giga-cloud-mini-project-0656a578ee3b).
 
