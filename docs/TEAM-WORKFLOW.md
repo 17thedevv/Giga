@@ -21,9 +21,15 @@
 - Cloud evidence includes operator, reviewer, date, environment, sanitized logs/screenshots, runbook and pass/fail.
 - Track contributions by completed deliverables and actual effort, not by line count or commit count.
 
-## Proposed branch naming
+## Standard Git workflow (canonical)
 
-- `feat/17t-<issue>-<slug>` or `docs/17t-<issue>-<slug>`; follow stable, descriptive names.
+Follow [Git Workflow v0.1](engineering/GIT_WORKFLOW_V0.1.md); every development agent must load [giga-git-workflow](../.agents/skills/giga-git-workflow/SKILL.md) before Git writes.
+
+- **Branch:** `<type>/17t-<issue-number>-<short-kebab-slug>` — e.g. `feat/17t-21-login-api` (Trà) or `feat/17t-22-chat-screen` (Thư). No owner/agent names.
+- **Commit and PR title:** Conventional Commits `type(scope): imperative summary`, e.g. `feat(web): add chat message list`.
+- **PR:** one issue per branch/PR, reference matching `17T-N`, pass CI, request peer review, default squash merge.
+- **Safety:** no direct push to `main`, force push, automatic destructive cleanup, silent conflict resolution or unauthorized agent merge.
+- **Concurrency:** separate clones/worktrees per developer or coding agent. Coordinate `packages/contracts` and shared architecture changes.
 
 ## Do not include
 
