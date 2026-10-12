@@ -1,0 +1,33 @@
+# Node / TypeScript
+node_modules/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+*.log
+.npm/
+.pnpm-store/
+.cache/
+.turbo/
+.next/
+.vite/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.p12
+*.key
+
+# Local editors / system
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local infrastructure state
+.terraform/
+*.tfstate
+*.tfstate.*
