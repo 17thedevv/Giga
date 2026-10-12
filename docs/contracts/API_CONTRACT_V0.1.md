@@ -1,0 +1,141 @@
+# Giga API Contract v0.1 — DRAFT
+
+> **Status:** PROPOSED / NOT IMPLEMENTED · **Date:** 2026-10-12 · **Primary:** Trà (backend) · **Reviewer:** Thư (frontend).
+> This document is a frontend–backend interface proposal, not evidence of implemented endpoints. Freeze only after both review the W1 contract gate.
+> **References:** [Project Plan v0.1](../01-project-plan-v0.1.md) · [W1 daily plan](../planning/W01-daily-plan.md) · [Linear Giga](https://linear.app/17thedev/project/giga-cloud-mini-project-0656a578ee3b).
+
+## 1. Principles
+
+- Public API prefix: `/api/v1` (except `/health`). JSON properties use `camelCase`, timestamps use UTC ISO 8601, resource IDs are opaque strings (UUID initially).
+- HTTPS only on public cloud. All protected endpoints require an authenticated session. No API keys or GitHub tokens are sent to the browser.
+- Errors use a stable shape; validate all request bodies server-side; typed DTOs shared under `packages/contracts` after review.
+- Streaming uses standard Server-Sent Events (SSE). For POST chat streams, the browser uses `fetch()` + readable stream, NOT native `EventSource` (which only sends GET).
+- Routes and payloads below are tentative. Every change affecting compatibility must update this contract with a PR.
+
+## 2. Common types
+
+```ts
+type ID = string;
+type ISODateTime = string;
+type User = { id: ID; email: string; displayName: string };
+type Conversation = { id: ID; title: string; createdAt: ISODateTime; updatedAt: ISODateTime };
+type Message = { id: ID; conversationId: ID; role: 'user' | 'assistant'; content: string; createdAt: ISODateTime };
+type AgentRunStatus = 'queued' | 'running' | 'awaiting_approval' | 'applying' | 'completed' | 'failed' | 'cancelled';
+type AgentRun = { id: ID; status: AgentRunStatus; task: string; repository: string; createdAt: ISODateTime; updatedAt: ISODateTime; error?: ApiError };
+type ChangeProposal = { id: ID; runId: ID; baseCommitSha: string; files: Array<{ path: string; status: 'added' | 'modified' | 'deleted'; unifiedDiff: string }>; createdAt: ISODateTime };
+type ApiError = { code: string; message: string; details?: Record<string, unknown>; requestId?: string };
+```
+
+**JSON response convention:** one object for single-resource operations; collection responses contain `{ items: T[], nextCursor: string | null }`; failures contain `{ error: ApiError }`. HTTP status conveys success/failure.
+
+**Recommended error codes:** `VALIDATION_ERROR` (400/422), `UNAUTHENTICATED` (401), `FORBIDDEN` (403), `NOT_FOUND` (404), `CONFLICT` (409), `RATE_LIMITED` (429), `UPSTREAM_ERROR` (502), `INTERNAL_ERROR` (500). Do not expose upstream secrets, stack traces, or sensitive prompts in public errors.
+
+## 3. Auth & session
+
+| Method | Path | Input | Output |
+|---|---|---|---|
+| POST | `/api/v1/auth/register` | `{ email, password, displayName }` | `201 { user }` |
+| POST | `/api/v1/auth/login` | `{ email, password }` | `200 { user }` + session cookie |
+| POST | `/api/v1/auth/logout` | session | `204` + expired cookie |
+| GET | `/api/v1/auth/me` | session | `200 { user }` |
+
+- Passwords must be hashed with a current password hashing algorithm (Argon2id recommended). Do not log raw passwords.
+- **Proposed session:** server-managed session ID in `HttpOnly; Secure` cookie; browser sends credentials where necessary. All state-changing cookie-authenticated routes require CSRF protection and strict allowed origins.
+- **Cloud deployment decision gate:** Render static site and API may be cross-site; cookie `SameSite` and browser third-party restrictions require real-browser testing. Prefer a same-origin API proxy/custom domain; if separate cross-site origins are retained, document browser support and implement correct `SameSite=None; Secure`, CORS and CSRF measures. Do not claim this is solved until W2 cloud test passes.
+- Account registration may be restricted to demo users if public signups increase abuse risk.
+
+## 4. Conversations & Chat
+
+| Method | Path | Input | Output |
+|---|---|---|---|
+| GET | `/api/v1/conversations?cursor=&limit=20` | query pagination | `200 { items: Conversation[], nextCursor }` |
+| POST | `/api/v1/conversations` | `{ title?: string }` | `201 { conversation }` |
+| GET | `/api/v1/conversations/:id` | conversation ID | `200 { conversation, messages: Message[] }` |
+| DELETE | `/api/v1/conversations/:id` | conversation ID | `204` |
+| POST | `/api/v1/conversations/:id/messages:stream` | `{ content: string, modelId?: string }` | `200 text/event-stream` |
+
+**Streaming example** (each SSE `data:` is valid JSON):
+
+```text
+event: message.started
+data: {"messageId":"msg_1","conversationId":"conv_1"}
+
+event: message.delta
+data: {"messageId":"msg_1","text":"Hello"}
+
+event: message.completed
+data: {"messageId":"msg_1","createdAt":"2026-10-12T00:00:00.000Z"}
+
+```
+
+- Server persists the user message and completed assistant result; decide on partial-response persistence in W2 design. Errors after a stream starts use `event: stream.error` followed by a terminal event/close, not an HTTP status rewrite.
+- A single conversation must not initiate overlapping chat generations in v0.1 (`409 CONFLICT`). UI handles retry, abort, empty responses, rate limit and unauthenticated states.
+- `modelId` is an allowlisted alias exposed by backend, not arbitrary provider/model parameters. MVP may offer just one model.
+
+## 5. Agent runs & approvals
+
+| Method | Path | Input | Output |
+|---|---|---|---|
+| POST | `/api/v1/agent/runs` | `{ task: string, repository: string, baseRef?: string }` | `201 { run: AgentRun }` |
+| GET | `/api/v1/agent/runs/:id` | run ID | `200 { run: AgentRun }` |
+| GET | `/api/v1/agent/runs/:id/events` | run ID; optional `Last-Event-ID` | `200 text/event-stream` |
+| GET | `/api/v1/agent/runs/:id/proposal` | run ID | `200 { proposal: ChangeProposal }`; `404` if not ready |
+| POST | `/api/v1/agent/runs/:id/decision` | `{ proposalId: string, decision: "approve" | "reject" }` | `202 { run: AgentRun }` |
+| POST | `/api/v1/agent/runs/:id/cancel` | empty | `202 { run: AgentRun }` |
+
+### State machine
+
+```mermaid
+flowchart LR
+  Q["queued"] --> R["running"]
+  R --> A["awaiting_approval"]
+  A -->|approve| P["applying"]
+  P --> C["completed"]
+  A -->|reject| X["cancelled"]
+  Q --> X
+  R --> X
+  Q --> F["failed"]
+  R --> F
+  P --> F
+```
+
+**Agent event types (draft):** `run.status`, `tool.started`, `tool.completed`, `proposal.ready`, `run.completed`, `run.failed`, `heartbeat`. Server-side events have monotonically increasing `id`; frontend can reconnect and avoid duplicate rendering. Store enough event history to reconstruct a run after refresh.
+
+**Write policy and safety:**
+
+1. Read-only tool calls may run on the allowlisted demo GitHub repository before approval.
+2. The agent produces a stable proposal/diff tied to `baseCommitSha`; no write operation occurs yet.
+3. Only an authenticated owner can approve or reject the exact `proposalId`; server re-checks approval state and current commit to prevent stale writes.
+4. After approval, server may create a branch/commit/PR under least-privilege repository credentials. Never permit direct pushes to default branch or unreviewed actions.
+5. Approval is single-use and idempotent; duplicate submits must not create duplicate PRs. Prefer an `Idempotency-Key` request header for retryable write requests.
+6. Enforce per-run limits on steps, duration and model token budget. Never execute model-provided shell commands on the API host in v0.1.
+7. Cancel is best-effort while external GitHub writes are executing; communicate whether a write has already happened.
+
+## 6. HTTP status, security & UX acceptance tests
+
+- Every resource is scoped to the authenticated user; another user requesting its ID gets `403` or `404` without information leakage.
+- Unknown input fields rejected or stripped consistently; JSON body size/rate limits defined in config.
+- Login invalid password returns generic error; logout clears the session; browser refresh preserves authorized state.
+- Streaming works from deployed HTTPS web UI, including network abort and upstream error.
+- Chat delete denies cross-user data access and does not leave orphaned user-visible records.
+- Agent user cannot approve another user’s run; cannot approve mismatched proposal; duplicate approval does not duplicate commits/PRs.
+- CORS is origin-allowlisted; no wildcard with credentialed endpoints; CSRF policy tested from an unrelated origin.
+- Health checks never expose connection strings or credentials.
+
+## 7. Open questions — resolve at W1/W2 gate
+
+- Auth deployment topology: same-origin reverse proxy or explicit cross-site cookie policy?
+- Database schema details, message deletion semantics, TTL for run events?
+- LLM provider/model selection, provider failure recovery and configurable user quotas?
+- GitHub authentication: fine-grained token for a dedicated demo repository or GitHub App? Document exact permissions.
+- Event replay mechanism and persistence strategy during Render service restarts?
+- Whether agent proposals need a second confirmation when base branch changes?
+
+## 8. Contract sign-off checklist
+
+- [ ] Trà validates routes, persistence assumptions, run state machine and security.
+- [ ] Thư validates full UX states, typed payloads, SSE handling and error/empty cases.
+- [ ] Both validate authentication in deployed browser environment and cost limits.
+- [ ] Freeze accepted DTOs under `packages/contracts` with mock fixtures and integration tests.
+
+**Tracking:** [17T-8 API contract](https://linear.app/17thedev/issue/17T-8/w1-api-contract-va-database-design-v01).
