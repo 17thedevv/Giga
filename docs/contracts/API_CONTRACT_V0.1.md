@@ -2,6 +2,7 @@
 
 > **Status:** PROPOSED / NOT IMPLEMENTED · **Date:** 2026-10-12 · **Primary:** Trà (backend) · **Reviewer:** Thư (frontend).
 > This document is a frontend–backend interface proposal, not evidence of implemented endpoints. Freeze only after both review the W1 contract gate.
+> **Compatibility policy:** [ADR-001](../decisions/ADR-001-api-compatibility.md) · [Architecture Invariants](../architecture/INVARIANTS_V0.1.md). The **policy** is locked; the exact v1 endpoint schema remains DRAFT until sign-off.
 > **References:** [Project Plan v0.1](../01-project-plan-v0.1.md) · [W1 daily plan](../planning/W01-daily-plan.md) · [Linear Giga](https://linear.app/17thedev/project/giga-cloud-mini-project-0656a578ee3b).
 
 ## 1. Principles
