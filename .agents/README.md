@@ -19,6 +19,10 @@ Project directory `.agents/skills/<name>/SKILL.md` follows the open Agent Skills
 - `docs/` holds authoritative architecture/contract/runbooks and student-team plan, **not embedded duplicates in skills**.
 - `apps/` and `packages/` will hold implementation code after the design gate; these skills do not imply files/services already exist.
 
+## Validation
+
+Run `node .agents/scripts/validate-skills.mjs` from the repository checkout. GitHub Actions runs the same structural check on skill-related pull requests. This verifies skill metadata and file presence, **not** that any LLM agent actually follows the instructions. Functional adoption remains blocked until both developers test the scenarios below and record their results on Linear.
+
 ## Review scenarios (manual eval)
 
 1. **Backend request:** “Change login JSON field name” → agent invokes contract guardian, flags breaking change after freeze, requests compatible strategy; does not silently edit frontend.
