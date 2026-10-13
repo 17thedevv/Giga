@@ -172,7 +172,7 @@ export class SkillResolver {
       // Immutable Version selection with strict integrity checks (fail closed, no silent fallback)
       let version: SkillVersion | null = null;
       if (installation.selectedVersionId) {
-        version = await this.storage.getSkillVersion(installation.selectedVersionId);
+        version = await this.storage.getSkillVersion(installation.selectedVersionId, userId);
         if (!version || version.skillId !== skill.id) {
           throw new SkillResolutionError(
             'SKILL_NOT_FOUND',
@@ -180,7 +180,7 @@ export class SkillResolver {
           );
         }
       } else {
-        version = await this.storage.getLatestSkillVersion(skill.id);
+        version = await this.storage.getLatestSkillVersion(skill.id, userId);
         if (!version || version.skillId !== skill.id) {
           throw new SkillResolutionError(
             'SKILL_NOT_FOUND',

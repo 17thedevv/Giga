@@ -70,6 +70,9 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE UNIQUE INDEX IF NOT EXISTS uq_skill_definitions_owner_slug ON skill_definitions (owner_id, slug) WHERE owner_id IS NOT NULL;
       CREATE UNIQUE INDEX IF NOT EXISTS uq_skill_definitions_builtin_slug ON skill_definitions (slug) WHERE visibility = 'built_in';
 
+      -- 3. Skill Versions: immutable versioned instructions with content hash
+      -- Deletion policy: ON DELETE CASCADE from skill_definitions allows complete removal when an owner
+      -- deletes a skill definition or account. The trigger below strictly prevents any in-place UPDATE.
       CREATE TABLE IF NOT EXISTS skill_versions (
           id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
           skill_id UUID NOT NULL REFERENCES skill_definitions(id) ON DELETE CASCADE,
@@ -148,8 +151,12 @@ export async function getAppliedMigrationVersions(client: pg.PoolClient | pg.Poo
 /**
  * Executes pending forward migrations in transaction order.
  * Uses an advisory lock in real PostgreSQL to serialize concurrent migration runs.
+ * Accepts an optional migrations array, defaulting to canonical MIGRATIONS.
  */
-export async function runMigrations(pool: pg.Pool): Promise<string[]> {
+export async function runMigrations(
+  pool: pg.Pool,
+  migrations: readonly Migration[] = MIGRATIONS
+): Promise<string[]> {
   const client = await pool.connect();
   const appliedNow: string[] = [];
 
@@ -165,7 +172,7 @@ export async function runMigrations(pool: pg.Pool): Promise<string[]> {
     await ensureMigrationTable(client);
     const appliedVersions = await getAppliedMigrationVersions(client);
 
-    const sortedMigrations = [...MIGRATIONS].sort((a, b) => a.version - b.version);
+    const sortedMigrations = [...migrations].sort((a, b) => a.version - b.version);
     for (const migration of sortedMigrations) {
       if (appliedVersions.has(migration.version)) {
         continue;

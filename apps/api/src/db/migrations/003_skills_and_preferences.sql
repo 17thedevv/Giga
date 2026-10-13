@@ -34,6 +34,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_skill_definitions_owner_slug ON skill_defin
 CREATE UNIQUE INDEX IF NOT EXISTS uq_skill_definitions_builtin_slug ON skill_definitions (slug) WHERE visibility = 'built_in';
 
 -- 3. Skill Versions: immutable versioned instructions with content hash
+-- Deletion policy: ON DELETE CASCADE from skill_definitions allows complete removal when an owner
+-- deletes a skill definition or account. The trigger below strictly prevents any in-place UPDATE.
 CREATE TABLE IF NOT EXISTS skill_versions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     skill_id UUID NOT NULL REFERENCES skill_definitions(id) ON DELETE CASCADE,

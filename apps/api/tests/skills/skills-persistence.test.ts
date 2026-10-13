@@ -2,7 +2,7 @@ import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createTestDatabase, type TestDbInstance } from '../test-db-helper.js';
 import { UserRepository } from '../../src/db/repositories/user-repository.js';
-import { runMigrations, getAppliedMigrationVersions } from '../../src/db/migrate.js';
+import { runMigrations, getAppliedMigrationVersions, MIGRATIONS, type Migration } from '../../src/db/migrate.js';
 import {
   PostgresSkillStorage,
   PostgresUserPreferencesStorage,
@@ -74,6 +74,7 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
       description: 'Public built-in explanation skill',
       visibility: 'built_in',
       supportedProducts: ['chat', 'agent'],
+      actor: { isAdmin: true },
     });
     assert.strictEqual(builtinSkill.visibility, 'built_in');
     assert.strictEqual(builtinSkill.ownerId, null);
@@ -86,6 +87,7 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
       description: 'Private team QA workflow for User A',
       visibility: 'private',
       supportedProducts: ['chat', 'agent'],
+      actor: { userId: userAId },
     });
     assert.strictEqual(privateSkillA.visibility, 'private');
     assert.strictEqual(privateSkillA.ownerId, userAId);
@@ -121,6 +123,7 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
       description: 'Default platform code formatter',
       visibility: 'built_in',
       supportedProducts: ['chat', 'agent'],
+      actor: { isAdmin: true },
     });
 
     // User A creates a private skill with the identical slug "formatter"
@@ -131,6 +134,7 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
       description: 'Team specific formatting rules',
       visibility: 'private',
       supportedProducts: ['chat', 'agent'],
+      actor: { userId: userAId },
     });
 
     // 1. User A queries "formatter": gets their private skill (takes precedence)
@@ -159,6 +163,7 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
       description: 'Testing immutable version history',
       visibility: 'built_in',
       supportedProducts: ['chat', 'agent'],
+      actor: { isAdmin: true },
     });
 
     const hash1 = computeDeterministicHash('Instructions version 1');
@@ -167,6 +172,7 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
       versionNumber: 1,
       contentHash: hash1,
       instructions: 'Instructions version 1',
+      actor: { isAdmin: true },
     });
 
     const hash2 = computeDeterministicHash('Instructions version 2');
@@ -175,6 +181,7 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
       versionNumber: 2,
       contentHash: hash2,
       instructions: 'Instructions version 2',
+      actor: { isAdmin: true },
     });
 
     // getSkillVersion by ID
@@ -196,6 +203,7 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
           skillId: skill.id,
           versionNumber: 1,
           instructions: 'Mutated instructions attempt',
+          actor: { isAdmin: true },
         }),
       (err: Error) =>
         err instanceof SkillConflictError &&
@@ -211,12 +219,14 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
       description: 'First skill',
       visibility: 'built_in',
       supportedProducts: ['chat', 'agent'],
+      actor: { isAdmin: true },
     });
     const vA = await skillStorage.createVersion({
       skillId: skillA.id,
       versionNumber: 1,
       contentHash: computeDeterministicHash('Alpha v1'),
       instructions: 'Alpha v1',
+      actor: { isAdmin: true },
     });
 
     const skillB = await skillStorage.createSkill({
@@ -226,12 +236,14 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
       description: 'Second skill',
       visibility: 'built_in',
       supportedProducts: ['chat', 'agent'],
+      actor: { isAdmin: true },
     });
     const vB = await skillStorage.createVersion({
       skillId: skillB.id,
       versionNumber: 1,
       contentHash: computeDeterministicHash('Beta v1'),
       instructions: 'Beta v1',
+      actor: { isAdmin: true },
     });
 
     // 1. Valid installation of Skill A with Version A
@@ -277,12 +289,14 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
       description: 'Confidential workflow',
       visibility: 'private',
       supportedProducts: ['chat', 'agent'],
+      actor: { userId: userAId },
     });
     const vA = await skillStorage.createVersion({
       skillId: privateSkillA.id,
       versionNumber: 1,
       contentHash: computeDeterministicHash('Secret instructions'),
       instructions: 'Secret instructions',
+      actor: { userId: userAId },
     });
 
     // User B attempts to install User A's private skill
@@ -309,12 +323,14 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
       description: 'Testing enablement toggle',
       visibility: 'built_in',
       supportedProducts: ['chat', 'agent'],
+      actor: { isAdmin: true },
     });
     const ver = await skillStorage.createVersion({
       skillId: skill.id,
       versionNumber: 1,
       contentHash: computeDeterministicHash('Instructions toggle'),
       instructions: 'Instructions toggle',
+      actor: { isAdmin: true },
     });
 
     await skillStorage.createInstallation({
@@ -349,12 +365,14 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
       description: 'End-to-end resolution testing with real DB storage',
       visibility: 'built_in',
       supportedProducts: ['chat', 'agent'],
+      actor: { isAdmin: true },
     });
     const ver = await skillStorage.createVersion({
       skillId: skill.id,
       versionNumber: 1,
       contentHash: computeDeterministicHash('Solve problems step by step.'),
       instructions: 'Solve problems step by step.',
+      actor: { isAdmin: true },
     });
 
     await skillStorage.createInstallation({
@@ -488,6 +506,7 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
       description: 'Testing trigger/DB immutability',
       visibility: 'built_in',
       supportedProducts: ['chat', 'agent'],
+      actor: { isAdmin: true },
     });
 
     const originalInstructions = 'Strictly original instruction text';
@@ -495,6 +514,7 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
       skillId: skill.id,
       versionNumber: 1,
       instructions: originalInstructions,
+      actor: { isAdmin: true },
     });
 
     // Attempt direct SQL UPDATE on skill_versions
@@ -522,6 +542,7 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
       description: 'Testing content hash validation',
       visibility: 'built_in',
       supportedProducts: ['chat', 'agent'],
+      actor: { isAdmin: true },
     });
 
     const instructions = 'Instructions for deterministic hash test';
@@ -536,6 +557,7 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
           versionNumber: 1,
           contentHash: forgedHash,
           instructions,
+          actor: { isAdmin: true },
         }),
       (err: Error) =>
         err instanceof SkillValidationError &&
@@ -548,6 +570,7 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
       versionNumber: 1,
       contentHash: expectedHash,
       instructions,
+      actor: { isAdmin: true },
     });
     assert.strictEqual(validWithHash.contentHash, expectedHash);
 
@@ -557,11 +580,30 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
       skillId: skill.id,
       versionNumber: 2,
       instructions: instructionsV2,
+      actor: { isAdmin: true },
     });
     assert.strictEqual(validOmittedHash.contentHash, computeDeterministicHash(instructionsV2));
   });
 
   it('Publication Authorization: enforces boundaries for built-in and private skills', async () => {
+    // 0a. Missing actor rejects createSkill with SKILL_UNAUTHORIZED
+    await assert.rejects(
+      async () =>
+        // @ts-expect-error Testing missing actor runtime validation
+        skillStorage.createSkill({
+          ownerId: null,
+          slug: 'unauthorized-no-actor',
+          title: 'Unauthorized No Actor',
+          description: 'Testing missing actor context',
+          visibility: 'built_in',
+          supportedProducts: ['chat'],
+        }),
+      (err: Error) =>
+        err instanceof SkillValidationError &&
+        err.code === 'SKILL_UNAUTHORIZED' &&
+        /Actor authorization context is required to create a skill/i.test(err.message)
+    );
+
     // 1. Non-admin user cannot create built-in skill
     await assert.rejects(
       async () =>
@@ -620,7 +662,22 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
     });
     assert.strictEqual(privateSkillA.ownerId, userAId);
 
-    // 5. User B CANNOT publish new version for User A's private skill
+    // 5a. Missing actor rejects createVersion with SKILL_UNAUTHORIZED
+    await assert.rejects(
+      async () =>
+        // @ts-expect-error Testing missing actor runtime validation
+        skillStorage.createVersion({
+          skillId: privateSkillA.id,
+          versionNumber: 1,
+          instructions: 'Testing missing actor on version',
+        }),
+      (err: Error) =>
+        err instanceof SkillValidationError &&
+        err.code === 'SKILL_UNAUTHORIZED' &&
+        /Actor authorization context is required to publish a skill version/i.test(err.message)
+    );
+
+    // 5b. User B CANNOT publish new version for User A's private skill
     await assert.rejects(
       async () =>
         skillStorage.createVersion({
@@ -642,32 +699,162 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
       actor: { userId: userAId },
     });
     assert.strictEqual(versionA.versionNumber, 1);
+
+    // 7. Forged actor on createInstallation rejects
+    await assert.rejects(
+      async () =>
+        skillStorage.createInstallation({
+          userId: userAId,
+          skillId: privateSkillA.id,
+          selectedVersionId: versionA.id,
+          actor: { userId: userBId, isAdmin: false },
+        }),
+      (err: Error) =>
+        err instanceof SkillValidationError &&
+        err.code === 'SKILL_UNAUTHORIZED' &&
+        /Cannot install skill for another user/i.test(err.message)
+    );
+  });
+
+  it('Version Tenant Isolation: getSkillVersion and getLatestSkillVersion enforce viewer authorization', async () => {
+    // 1. Create a private skill with versions owned by User A
+    const privateSkill = await skillStorage.createSkill({
+      ownerId: userAId,
+      slug: 'version-isolation-skill',
+      title: 'Version Isolation Skill',
+      description: 'Testing version viewer scoping',
+      visibility: 'private',
+      supportedProducts: ['chat', 'agent'],
+      actor: { userId: userAId },
+    });
+
+    const v1 = await skillStorage.createVersion({
+      skillId: privateSkill.id,
+      versionNumber: 1,
+      instructions: 'Private instructions v1',
+      actor: { userId: userAId },
+    });
+    const v2 = await skillStorage.createVersion({
+      skillId: privateSkill.id,
+      versionNumber: 2,
+      instructions: 'Private instructions v2',
+      actor: { userId: userAId },
+    });
+
+    // 2. Owner User A can access specific version and latest version
+    const retrievedByOwner = await skillStorage.getSkillVersion(v1.id, userAId);
+    assert.ok(retrievedByOwner);
+    assert.strictEqual(retrievedByOwner.id, v1.id);
+
+    const latestByOwner = await skillStorage.getLatestSkillVersion(privateSkill.id, userAId);
+    assert.ok(latestByOwner);
+    assert.strictEqual(latestByOwner.id, v2.id);
+
+    // 3. User B (cross-tenant) CANNOT access User A's private versions (fails closed to null)
+    const retrievedByAttacker = await skillStorage.getSkillVersion(v1.id, userBId);
+    assert.strictEqual(retrievedByAttacker, null);
+
+    const latestByAttacker = await skillStorage.getLatestSkillVersion(privateSkill.id, userBId);
+    assert.strictEqual(latestByAttacker, null);
+
+    // 4. Unauthenticated viewer CANNOT access User A's private versions
+    const retrievedAnon = await skillStorage.getSkillVersion(v1.id);
+    assert.strictEqual(retrievedAnon, null);
+
+    const latestAnon = await skillStorage.getLatestSkillVersion(privateSkill.id);
+    assert.strictEqual(latestAnon, null);
   });
 
   it('Migration coordination: safely handles pending migration 002 landing out-of-order', async () => {
-    // Both migration 1 and 3 are already applied.
-    // Simulate pending migration 2 (17T-21 conversations) landing subsequently:
-    await testDb.pool.query(`
-      CREATE TABLE IF NOT EXISTS conversations_pending_test (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        title VARCHAR(255) NOT NULL,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    // Both migration 1 and 3 are already applied in testDb setup.
+    // Simulate pending migration 2 (17T-21 conversations) arriving late and being registered in the runner:
+    const migration002Conversations: Migration = {
+      version: 2,
+      name: '002_conversations_and_messages',
+      sql: `
+        CREATE TABLE IF NOT EXISTS conversations (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            title VARCHAR(255) NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_conversations_user_id ON conversations (user_id);
+
+        CREATE TABLE IF NOT EXISTS messages (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+            role VARCHAR(50) NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
+            content TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages (conversation_id);
+      `,
+    };
+
+    const [mig1, mig3] = MIGRATIONS;
+    assert.ok(mig1 && mig3, 'Canonical migrations 1 and 3 must exist');
+
+    const testSkill = await skillStorage.createSkill({
+      ownerId: userAId,
+      slug: 'coord-test-skill',
+      title: 'Coordination Test Skill',
+      description: 'Testing migration coordination',
+      visibility: 'private',
+      supportedProducts: ['chat'],
+      actor: { userId: userAId },
+    });
+
+    try {
+      // 1. Run migrations with version 2 registered between versions 1 and 3
+      const applied = await runMigrations(testDb.pool, [
+        mig1, // version 1 (already applied)
+        migration002Conversations, // version 2 (newly registered late arrival)
+        mig3, // version 3 (already applied)
+      ]);
+
+      // Exactly version 2 should be applied, version 1 and 3 are safely skipped
+      assert.strictEqual(applied.length, 1);
+      assert.strictEqual(applied[0], '002_conversations_and_messages');
+
+      // 2. Verify schema_migrations now records version 2 alongside 1 and 3
+      const checkVersions = await testDb.pool.query<{ version: number }>(
+        'SELECT version FROM schema_migrations ORDER BY version ASC;'
       );
-    `);
+      const versionNumbers = checkVersions.rows.map((r) => r.version);
+      assert.deepStrictEqual(versionNumbers, [1, 2, 3]);
 
-    // Verify foreign key relationship to users(id) works without conflicting with migration 3
-    const insertRes = await testDb.pool.query(
-      'INSERT INTO conversations_pending_test (user_id, title) VALUES ($1, $2) RETURNING id;',
-      [userAId, 'Test Conversation']
-    );
-    assert.ok(insertRes.rows[0]?.id);
+      // 3. Verify conversation and message tables function correctly with foreign keys to users(id)
+      const convRes = await testDb.pool.query(
+        'INSERT INTO conversations (user_id, title) VALUES ($1, $2) RETURNING id;',
+        [userAId, 'Test Out-of-Order Conversation']
+      );
+      const convId = convRes.rows[0]?.id;
+      assert.ok(convId);
 
-    // Verify that running migrations again remains idempotent
-    const rerun = await runMigrations(testDb.pool);
-    assert.strictEqual(rerun.length, 0);
+      const msgRes = await testDb.pool.query(
+        'INSERT INTO messages (conversation_id, role, content) VALUES ($1, $2, $3) RETURNING id;',
+        [convId, 'user', 'Hello from migration 002!']
+      );
+      assert.ok(msgRes.rows[0]?.id);
 
-    // Cleanup simulated table
-    await testDb.pool.query('DROP TABLE IF EXISTS conversations_pending_test CASCADE;');
+      // 4. Verify skills tables from migration 3 remain completely intact and functional
+      const skillCheck = await skillStorage.getSkillBySlug('coord-test-skill', userAId);
+      assert.ok(skillCheck);
+      assert.strictEqual(skillCheck.id, testSkill.id);
+
+      // 5. Verify rerun is fully idempotent
+      const rerun = await runMigrations(testDb.pool, [
+        mig1,
+        migration002Conversations,
+        mig3,
+      ]);
+      assert.strictEqual(rerun.length, 0);
+    } finally {
+      // Clean up simulated 17T-21 migration tables and schema_migrations entry
+      await testDb.pool.query('DROP TABLE IF EXISTS messages CASCADE;');
+      await testDb.pool.query('DROP TABLE IF EXISTS conversations CASCADE;');
+      await testDb.pool.query('DELETE FROM schema_migrations WHERE version = 2;');
+    }
   });
 });

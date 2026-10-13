@@ -45,7 +45,7 @@ export interface CreateSkillParams {
   description: string;
   visibility: SkillVisibility;
   supportedProducts: ProductTarget[];
-  actor?: SkillActorContext;
+  actor: SkillActorContext;
 }
 
 export interface CreateVersionParams {
@@ -54,7 +54,7 @@ export interface CreateVersionParams {
   versionNumber: number;
   contentHash?: string;
   instructions: string;
-  actor?: SkillActorContext;
+  actor: SkillActorContext;
 }
 
 export interface CreateInstallationParams {
@@ -63,6 +63,7 @@ export interface CreateInstallationParams {
   skillId: string;
   selectedVersionId: string;
   enabled?: boolean;
+  actor?: SkillActorContext;
 }
 
 const SLUG_REGEX = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -207,16 +208,34 @@ export class PostgresSkillStorage implements SkillStorage {
 
   /**
    * Retrieves an immutable skill version by version primary key ID.
+   * If viewerUserId is provided, ensures private skill versions are only visible to their owner.
+   * If viewerUserId is omitted, only versions of built-in skills are returned to prevent private data leakage.
    */
-  public async getSkillVersion(versionId: string): Promise<SkillVersion | null> {
+  public async getSkillVersion(versionId: string, viewerUserId?: string): Promise<SkillVersion | null> {
     if (!versionId || typeof versionId !== 'string') {
       return null;
     }
 
+    if (viewerUserId) {
+      const query = `
+        SELECT v.id, v.skill_id, v.version_number, v.content_hash, v.instructions, v.created_at
+        FROM skill_versions v
+        JOIN skill_definitions d ON d.id = v.skill_id
+        WHERE v.id = $1 AND (
+          d.visibility = 'built_in' OR (d.visibility = 'private' AND d.owner_id = $2)
+        )
+        LIMIT 1;
+      `;
+      const result = await this.pool.query<SkillVersionDbRow>(query, [versionId, viewerUserId]);
+      const row = result.rows[0];
+      return row ? mapRowToSkillVersion(row) : null;
+    }
+
     const query = `
-      SELECT id, skill_id, version_number, content_hash, instructions, created_at
-      FROM skill_versions
-      WHERE id = $1
+      SELECT v.id, v.skill_id, v.version_number, v.content_hash, v.instructions, v.created_at
+      FROM skill_versions v
+      JOIN skill_definitions d ON d.id = v.skill_id
+      WHERE v.id = $1 AND d.visibility = 'built_in'
       LIMIT 1;
     `;
     const result = await this.pool.query<SkillVersionDbRow>(query, [versionId]);
@@ -226,17 +245,36 @@ export class PostgresSkillStorage implements SkillStorage {
 
   /**
    * Deterministically retrieves the latest version of a skill (ordered by version_number DESC).
+   * If viewerUserId is provided, ensures private skill versions are only visible to their owner.
+   * If viewerUserId is omitted, only versions of built-in skills are returned.
    */
-  public async getLatestSkillVersion(skillId: string): Promise<SkillVersion | null> {
+  public async getLatestSkillVersion(skillId: string, viewerUserId?: string): Promise<SkillVersion | null> {
     if (!skillId || typeof skillId !== 'string') {
       return null;
     }
 
+    if (viewerUserId) {
+      const query = `
+        SELECT v.id, v.skill_id, v.version_number, v.content_hash, v.instructions, v.created_at
+        FROM skill_versions v
+        JOIN skill_definitions d ON d.id = v.skill_id
+        WHERE v.skill_id = $1 AND (
+          d.visibility = 'built_in' OR (d.visibility = 'private' AND d.owner_id = $2)
+        )
+        ORDER BY v.version_number DESC
+        LIMIT 1;
+      `;
+      const result = await this.pool.query<SkillVersionDbRow>(query, [skillId, viewerUserId]);
+      const row = result.rows[0];
+      return row ? mapRowToSkillVersion(row) : null;
+    }
+
     const query = `
-      SELECT id, skill_id, version_number, content_hash, instructions, created_at
-      FROM skill_versions
-      WHERE skill_id = $1
-      ORDER BY version_number DESC
+      SELECT v.id, v.skill_id, v.version_number, v.content_hash, v.instructions, v.created_at
+      FROM skill_versions v
+      JOIN skill_definitions d ON d.id = v.skill_id
+      WHERE v.skill_id = $1 AND d.visibility = 'built_in'
+      ORDER BY v.version_number DESC
       LIMIT 1;
     `;
     const result = await this.pool.query<SkillVersionDbRow>(query, [skillId]);
@@ -286,11 +324,15 @@ export class PostgresSkillStorage implements SkillStorage {
       throw new SkillValidationError('SKILL_VALIDATION_ERROR', 'Invalid skill description length');
     }
 
+    if (!params.actor) {
+      throw new SkillValidationError('SKILL_UNAUTHORIZED', 'Actor authorization context is required to create a skill');
+    }
+
     if (params.visibility === 'built_in') {
       if (params.ownerId !== null) {
         throw new SkillValidationError('SKILL_VALIDATION_ERROR', 'Built-in skills cannot have an ownerId');
       }
-      if (params.actor && !params.actor.isAdmin && !params.actor.isSystem) {
+      if (!params.actor.isAdmin && !params.actor.isSystem) {
         throw new SkillValidationError('SKILL_UNAUTHORIZED', 'Only system administrators can publish built-in skills');
       }
     }
@@ -298,7 +340,7 @@ export class PostgresSkillStorage implements SkillStorage {
       if (!params.ownerId || typeof params.ownerId !== 'string') {
         throw new SkillValidationError('SKILL_VALIDATION_ERROR', 'Private skills require an ownerId');
       }
-      if (params.actor?.userId && params.actor.userId !== params.ownerId && !params.actor.isAdmin) {
+      if (!params.actor.isAdmin && (!params.actor.userId || params.actor.userId !== params.ownerId)) {
         throw new SkillValidationError('SKILL_UNAUTHORIZED', 'Cannot create a private skill for another owner');
       }
     }
@@ -342,6 +384,10 @@ export class PostgresSkillStorage implements SkillStorage {
       throw new SkillValidationError('SKILL_VALIDATION_ERROR', 'Version number must be >= 1');
     }
 
+    if (!params.actor) {
+      throw new SkillValidationError('SKILL_UNAUTHORIZED', 'Actor authorization context is required to publish a skill version');
+    }
+
     // 1. Verify parent skill exists and enforce publication authorization
     const queryParent = `
       SELECT id, owner_id, slug, title, description, visibility, supported_products, created_at
@@ -357,11 +403,11 @@ export class PostgresSkillStorage implements SkillStorage {
     const parentSkill = mapRowToSkillDefinition(parentRow);
 
     if (parentSkill.visibility === 'built_in') {
-      if (params.actor && !params.actor.isAdmin && !params.actor.isSystem) {
+      if (!params.actor.isAdmin && !params.actor.isSystem) {
         throw new SkillValidationError('SKILL_UNAUTHORIZED', 'Only system administrators can publish versions for built-in skills');
       }
     } else if (parentSkill.visibility === 'private') {
-      if (params.actor?.userId && params.actor.userId !== parentSkill.ownerId && !params.actor.isAdmin) {
+      if (!params.actor.isAdmin && (!params.actor.userId || params.actor.userId !== parentSkill.ownerId)) {
         throw new SkillValidationError('SKILL_UNAUTHORIZED', 'Only the skill owner can publish versions for a private skill');
       }
     }
@@ -418,6 +464,10 @@ export class PostgresSkillStorage implements SkillStorage {
    * Rejects installation if the skill is another user's private skill.
    */
   public async createInstallation(params: CreateInstallationParams): Promise<SkillInstallation> {
+    if (params.actor && !params.actor.isAdmin && params.actor.userId !== params.userId) {
+      throw new SkillValidationError('SKILL_UNAUTHORIZED', 'Cannot install skill for another user');
+    }
+
     // 1. Verify skill exists and belongs to user or is built-in
     const skill = await this.getSkill(params.skillId, params.userId);
     if (!skill) {
