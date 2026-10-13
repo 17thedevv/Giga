@@ -1,5 +1,7 @@
 # Giga — Project Plan v0.1
 
+> **Agent scope update, 2026-10-13:** Historical v0.1 baseline. Its GitHub-first Agent/PR scope is SUPERSEDED by [Product Plan v0.2](01-project-plan-v0.2.md) and [Agent Architecture v0.2](architecture/GIGA_AGENT_ARCHITECTURE_V0.2.md). Cloud/course history and report requirements remain useful context.
+
 > **Baseline:** 2026-10-12 · **Status:** Planning/approved direction · **Team:** Trà + Thư · **Subject:** Điện toán đám mây
 > **Canonical document:** GitHub repository. **Tracking:** [Linear — Giga Cloud Mini-Project](https://linear.app/17thedev/project/giga-cloud-mini-project-0656a578ee3b).
 > **Companion specs:** [API Contract v0.1 — draft](contracts/API_CONTRACT_V0.1.md) · [Architecture Invariants](architecture/INVARIANTS_V0.1.md) · [ADR-001](decisions/ADR-001-api-compatibility.md) · [Week 01 daily tasks](planning/W01-daily-plan.md) · [Team workflow](TEAM-WORKFLOW.md) · [Shared Agent Skills](../.agents/README.md).

@@ -1,5 +1,7 @@
 # Giga — Frontend Wireframes Blueprint v0.1
 
+> **Agent scope update, 2026-10-13:** Agent repo/diff-only sketches are HISTORICAL; use [GigaAgent Workspace UX v0.2](GIGA_AGENT_UX_V0.2.md). Chat/Auth wireframes remain draft.
+
 > **Status:** DRAFT / PROPOSED · **Date:** 2026-10-13  
 > **Author:** Tráng A Thư (Frontend / UX)  
 > **Reviewer:** Trà (Backend / API)  

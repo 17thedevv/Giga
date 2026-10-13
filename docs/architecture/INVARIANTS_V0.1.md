@@ -22,13 +22,15 @@
 | INV-08 | Public deployment uses HTTPS, restricted origins, authenticated protected routes, health checks and actionable non-sensitive logs. | Cloud preflight, deployed security/E2E tests |
 | INV-09 | All significant architecture/API changes require a documented PR and review. Cloud changes require reproducible evidence, with at least one cross-training rehearsal. | GitHub PR + Linear acceptance checklist |
 
+**Agent v0.2 gate:** The existing INV-07 prohibition on model-generated command execution on the Hono/API host is unchanged. A separately isolated sandbox is a proposed new implementation requiring ADR-003 approval and security testing.
+
 ## 3. Pending decisions — must be closed before API freeze
 
 - Exact endpoint names, request/response JSON shapes, required versus optional fields, error codes and auth/session cookie behavior.
 - SSE event names, sequence, termination/error rules, event replay, compatibility strategy for unknown events.
 - Database entity/schema details, query contracts, migrations and retention rules.
 - Final frontend/backend framework, ORM, LLM provider(s), managed PostgreSQL and cloud vendor(s). These are replaceable implementations as long as the frozen contract and cloud acceptance gates hold.
-- Agent status enum, idempotency keys, failure recovery, approval expiry, GitHub permissions and rollback semantics.
+- Agent workspace ownership, isolated sandbox security, tool/network permissions, internal phases/status, idempotency, cancellation/recovery, artifact retention, and approvals for optional external effects. [ADR-003](../decisions/ADR-003-agentic-workspace-and-isolated-runtime.md) is PROPOSED and does not relax locked INV-07 before review.
 
 ## 4. API freeze checklist
 

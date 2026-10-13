@@ -1,5 +1,7 @@
 # Giga — Shared Development Agent Skills
 
+> **Agent runtime scope update 2026-10-13:** `giga-agent-runtime` designs a general-purpose workspace agent with a separate sandbox and OPTIONAL GitHub; read [Agent Architecture v0.2](../docs/architecture/GIGA_AGENT_ARCHITECTURE_V0.2.md) and [ADR-003 proposal](../docs/decisions/ADR-003-agentic-workspace-and-isolated-runtime.md). Development skills are not the product Agent's own runtime tools.
+
 These are **instructions for coding agents developing Giga**, not skill/tool definitions exposed to end users of Giga's own Coding Agent.
 
 Project directory `.agents/skills/<name>/SKILL.md` follows the open Agent Skills format. It is compatible with Codex and the current Antigravity project-skill location. Global agent settings are not required to participate.

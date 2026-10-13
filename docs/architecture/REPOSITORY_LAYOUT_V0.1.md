@@ -1,5 +1,7 @@
 # Giga — Repository Layout v0.1
 
+> **Agent scope update, 2026-10-13:** The github integration path is OPTIONAL, not the Agent runtime; [Agent Architecture v0.2](GIGA_AGENT_ARCHITECTURE_V0.2.md) adds separate sandbox/runner concepts. Existing .gitkeep placeholders are not implementation evidence.
+
 > **Status:** Proposed directory layout for the two-person TypeScript-first project. **Directories are scaffolding, not code readiness.** [Linear 17T-19](https://linear.app/17thedev/issue/17T-19/w1-scaffold-giga-monorepo-directory-structure).
 
 ## Directory tree
