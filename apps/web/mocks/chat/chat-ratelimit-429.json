@@ -1,0 +1,10 @@
+{
+  "error": {
+    "code": "RATE_LIMITED",
+    "message": "Too many requests. Please wait 15 seconds before sending another message.",
+    "details": {
+      "retryAfterSeconds": 15
+    },
+    "requestId": "req_chat_rate_101b"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "run": {
+    "id": "run_652c0011-88b9-4112-a002-990a1827ec31",
+    "status": "failed",
+    "task": "Perform automated refactor of authentication middleware",
+    "repository": "17thedevv/Giga",
+    "createdAt": "2026-10-12T16:00:00.000Z",
+    "updatedAt": "2026-10-12T16:02:15.000Z",
+    "error": {
+      "code": "AGENT_STEP_LIMIT_EXCEEDED",
+      "message": "Agent exceeded maximum permitted reasoning and tool execution steps (limit: 10 steps)",
+      "requestId": "req_run_fail_112c"
+    }
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "UNAUTHENTICATED",
+    "message": "Invalid email or password",
+    "requestId": "req_auth_err_01h8j"
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "conversation": {
+    "id": "conv_8f3a1d94-3201-44dc-98ef-c1192da0e521",
+    "title": "Refactor Database Pool Connection in Hono",
+    "createdAt": "2026-10-13T03:15:00.000Z",
+    "updatedAt": "2026-10-13T03:42:10.000Z"
+  },
+  "messages": [
+    {
+      "id": "msg_901a1c32-11a2-48fb-b289-56d019f2a001",
+      "conversationId": "conv_8f3a1d94-3201-44dc-98ef-c1192da0e521",
+      "role": "user",
+      "content": "How do we ensure Neon PostgreSQL connections don't leak during serverless cold starts in Hono?",
+      "createdAt": "2026-10-13T03:15:10.000Z"
+    },
+    {
+      "id": "msg_901a1c32-11a2-48fb-b289-56d019f2a002",
+      "conversationId": "conv_8f3a1d94-3201-44dc-98ef-c1192da0e521",
+      "role": "assistant",
+      "content": "In Hono with Neon serverless driver, you should use the `@neondatabase/serverless` connection pooler over WebSockets with explicit timeouts:\n\n```typescript\nimport { Pool } from '@neondatabase/serverless';\n\nexport const pool = new Pool({\n  connectionString: env.DATABASE_URL,\n  max: 10,\n  idleTimeoutMillis: 30000,\n});\n```\n\nThis prevents ephemeral instances from exhausting the server pool quota.",
+      "createdAt": "2026-10-13T03:15:25.000Z"
+    }
+  ]
+}

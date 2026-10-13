@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "NOT_FOUND",
+    "message": "Conversation conv_missing not found or access denied",
+    "requestId": "req_conv_404_09fe"
+  }
+}

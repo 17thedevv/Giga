@@ -1,0 +1,27 @@
+event: message.started
+data: {"messageId":"msg_901a1c32-11a2-48fb-b289-56d019f2a003","conversationId":"conv_8f3a1d94-3201-44dc-98ef-c1192da0e521"}
+
+event: message.delta
+data: {"messageId":"msg_901a1c32-11a2-48fb-b289-56d019f2a003","text":"The Giga coding agent enforces a strict **human-in-the-loop** gate "}
+
+event: message.delta
+data: {"messageId":"msg_901a1c32-11a2-48fb-b289-56d019f2a003","text":"governed by Architecture Invariant `INV-07`.\n\n"}
+
+event: message.delta
+data: {"messageId":"msg_901a1c32-11a2-48fb-b289-56d019f2a003","text":"Before any write action occurs on GitHub:\n"}
+
+event: message.delta
+data: {"messageId":"msg_901a1c32-11a2-48fb-b289-56d019f2a003","text":"1. The agent loop only executes read-only analysis tools.\n"}
+
+event: message.delta
+data: {"messageId":"msg_901a1c32-11a2-48fb-b289-56d019f2a003","text":"2. It generates a stable unified diff bound to `baseCommitSha`.\n"}
+
+event: message.delta
+data: {"messageId":"msg_901a1c32-11a2-48fb-b289-56d019f2a003","text":"3. The status transitions to `awaiting_approval`.\n"}
+
+event: message.delta
+data: {"messageId":"msg_901a1c32-11a2-48fb-b289-56d019f2a003","text":"4. Only when the authenticated owner submits an explicit approval does the server create a branch and Pull Request."}
+
+event: message.completed
+data: {"messageId":"msg_901a1c32-11a2-48fb-b289-56d019f2a003","createdAt":"2026-10-13T03:48:10.000Z"}
+

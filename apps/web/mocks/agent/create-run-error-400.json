@@ -1,0 +1,11 @@
+{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Repository not permitted or task too short",
+    "details": {
+      "repository": "Only allowlisted repositories permitted in demo v0.1 (e.g. 17thedevv/Giga)",
+      "task": "Task description must be at least 10 characters long"
+    },
+    "requestId": "req_run_val_098a"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "run": {
+    "id": "run_770b4412-009a-4122-bc01-11a2890cd122",
+    "status": "cancelled",
+    "task": "Scan repo for secret keys and remove them",
+    "repository": "17thedevv/Giga",
+    "createdAt": "2026-10-12T11:00:00.000Z",
+    "updatedAt": "2026-10-12T11:00:30.000Z"
+  }
+}

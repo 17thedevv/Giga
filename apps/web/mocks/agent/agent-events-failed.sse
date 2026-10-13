@@ -1,0 +1,24 @@
+id: 1
+event: heartbeat
+data: {"timestamp":"2026-10-13T03:50:01.000Z"}
+
+id: 2
+event: run.status
+data: {"status":"running"}
+
+id: 3
+event: tool.started
+data: {"tool":"github_read_file","path":"apps/api/src/server.ts","stepNumber":1}
+
+id: 4
+event: tool.completed
+data: {"tool":"github_read_file","status":"error","durationMs":320,"summary":"File not found in target repository"}
+
+id: 5
+event: run.failed
+data: {"code":"TOOL_EXECUTION_FAILED","message":"Target file apps/api/src/server.ts not found in target repository"}
+
+id: 6
+event: run.status
+data: {"status":"failed"}
+

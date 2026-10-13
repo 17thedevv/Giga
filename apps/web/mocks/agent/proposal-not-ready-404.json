@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "NOT_FOUND",
+    "message": "Change proposal is not ready yet. Current run status is running.",
+    "requestId": "req_prop_404_11ab"
+  }
+}

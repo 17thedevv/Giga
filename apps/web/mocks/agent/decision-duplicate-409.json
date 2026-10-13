@@ -1,0 +1,11 @@
+{
+  "error": {
+    "code": "CONFLICT",
+    "message": "Decision has already been recorded for this proposal. Current run status is applying.",
+    "details": {
+      "runId": "run_881a29f0-55b1-42e8-912a-33c8b1a9901e",
+      "currentStatus": "applying"
+    },
+    "requestId": "req_prop_dup_4410"
+  }
+}

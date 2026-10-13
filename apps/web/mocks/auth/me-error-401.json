@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "UNAUTHENTICATED",
+    "message": "Session has expired or is missing",
+    "requestId": "req_me_expired_02a9b"
+  }
+}
