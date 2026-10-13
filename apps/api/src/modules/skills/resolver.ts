@@ -123,8 +123,8 @@ export class SkillResolver {
     let totalInstructionBytes = 0;
 
     for (const candidate of candidateList) {
-      // Lookup skill definition by ID
-      let skill = await this.storage.getSkill(candidate.skillId);
+      // Lookup skill definition by ID with viewer tenant scoping
+      let skill = await this.storage.getSkill(candidate.skillId, userId);
       if (!skill) {
         // Fallback: try by slug ONLY within user's own skills or built-in skills (prevents tenant leakage)
         skill = await this.storage.getSkillBySlug(candidate.skillId, userId);

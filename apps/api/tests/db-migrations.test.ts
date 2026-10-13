@@ -17,13 +17,15 @@ describe('Database Migrations and Utilities', () => {
     const pool = new adapter.Pool() as unknown as pg.Pool;
 
     try {
-      // First run: applies migration 1
+      // First run: applies all pending migrations
       const firstRun = await runMigrations(pool);
-      assert.strictEqual(firstRun.length, 1);
+      assert.strictEqual(firstRun.length, 2);
       assert.strictEqual(firstRun[0], '001_initial_users_and_sessions');
+      assert.strictEqual(firstRun[1], '003_skills_and_preferences');
 
       const versions = await getAppliedMigrationVersions(pool);
       assert.ok(versions.has(1));
+      assert.ok(versions.has(3));
 
       // Second run: idempotent, applies 0 migrations
       const secondRun = await runMigrations(pool);

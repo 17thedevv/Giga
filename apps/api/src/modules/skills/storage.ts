@@ -15,7 +15,7 @@ import type {
 } from './types.js';
 
 export interface SkillStorage {
-  getSkill(skillId: string): Promise<SkillDefinition | null>;
+  getSkill(skillId: string, viewerUserId?: string): Promise<SkillDefinition | null>;
   getSkillBySlug(slug: string, viewerUserId?: string): Promise<SkillDefinition | null>;
   getSkillVersion(versionId: string): Promise<SkillVersion | null>;
   getLatestSkillVersion(skillId: string): Promise<SkillVersion | null>;
@@ -51,9 +51,13 @@ export class InMemorySkillStorage implements SkillStorage {
     this.workspaceDefaults.set(key, [...defaults]);
   }
 
-  public async getSkill(skillId: string): Promise<SkillDefinition | null> {
+  public async getSkill(skillId: string, viewerUserId?: string): Promise<SkillDefinition | null> {
     const skill = this.skills.get(skillId);
-    return skill ? { ...skill } : null;
+    if (!skill) return null;
+    if (viewerUserId && skill.visibility === 'private' && skill.ownerId !== viewerUserId) {
+      return null;
+    }
+    return { ...skill };
   }
 
   public async getSkillBySlug(

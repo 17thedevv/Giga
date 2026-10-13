@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import type pg from 'pg';
-import { newDb } from 'pg-mem';
+import { newDb, DataType } from 'pg-mem';
 import { createDatabasePool, redactDatabaseUrl } from '../src/db/client.js';
 import { runMigrations } from '../src/db/migrate.js';
 
@@ -132,7 +132,7 @@ export async function createTestDatabase(): Promise<TestDbInstance> {
       if (!check.safe) {
         throw new Error(`[test-db-safety] Refusing cleanup: ${check.reason}`);
       }
-      await pool.query('TRUNCATE users, sessions CASCADE;');
+      await pool.query('TRUNCATE users, sessions, user_preferences, skill_installations, skill_versions, skill_definitions, workspace_skill_defaults CASCADE;');
     };
 
     return { pool, cleanup, isMemory: false };
@@ -143,7 +143,30 @@ export async function createTestDatabase(): Promise<TestDbInstance> {
 
   db.public.registerFunction({
     name: 'gen_random_uuid',
+    returns: DataType.uuid,
+    impure: true,
     implementation: () => crypto.randomUUID(),
+  });
+
+  db.public.registerFunction({
+    name: 'length',
+    args: [DataType.text],
+    returns: DataType.integer,
+    implementation: (str: string) => (str ? str.length : 0),
+  });
+
+  db.public.registerFunction({
+    name: 'char_length',
+    args: [DataType.text],
+    returns: DataType.integer,
+    implementation: (str: string) => (str ? str.length : 0),
+  });
+
+  db.public.registerFunction({
+    name: 'octet_length',
+    args: [DataType.text],
+    returns: DataType.integer,
+    implementation: (str: string) => (str ? Buffer.byteLength(String(str), 'utf8') : 0),
   });
 
   const adapter = db.adapters.createPg();
@@ -152,6 +175,11 @@ export async function createTestDatabase(): Promise<TestDbInstance> {
   await runMigrations(pool);
 
   const cleanup = async (): Promise<void> => {
+    await pool.query('DELETE FROM workspace_skill_defaults;');
+    await pool.query('DELETE FROM skill_installations;');
+    await pool.query('DELETE FROM skill_versions;');
+    await pool.query('DELETE FROM skill_definitions;');
+    await pool.query('DELETE FROM user_preferences;');
     await pool.query('DELETE FROM sessions;');
     await pool.query('DELETE FROM users;');
   };
