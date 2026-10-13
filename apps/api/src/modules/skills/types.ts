@@ -93,23 +93,28 @@ export interface ResolvedSkillsResult {
   workspaceId?: string;
 }
 
+export const MAX_CUSTOM_INSTRUCTIONS_BYTES = 4096; // 4 KB
+export const MAX_CUSTOM_INSTRUCTIONS_CHARS = 2000;
+export const MAX_COMPOSED_OUTPUT_BYTES = 32768; // 32 KB
+export const MAX_TOTAL_INSTRUCTION_BYTES = 16384; // 16 KB
+
 export interface SkillActivationManifestItem {
-  skillId: string;
-  versionId: string;
-  contentHash: string;
-  source: SkillActivationSource;
-  position: number;
+  readonly skillId: string;
+  readonly versionId: string;
+  readonly contentHash: string;
+  readonly source: SkillActivationSource;
+  readonly position: number;
 }
 
 export interface SkillActivationManifest {
-  manifestId: string;
-  userId: string;
-  targetProduct: ProductTarget;
-  resolverVersion: 'v0.1';
-  activatedAt: string;
-  skills: SkillActivationManifestItem[];
-  totalEstimatedTokens: number;
-  preferencesRevision?: number;
+  readonly manifestId: string;
+  readonly userId: string;
+  readonly targetProduct: ProductTarget;
+  readonly resolverVersion: 'v0.1';
+  readonly activatedAt: string;
+  readonly skills: readonly SkillActivationManifestItem[];
+  readonly totalEstimatedTokens: number;
+  readonly preferencesRevision?: number;
 }
 
 export interface ComposeInstructionsRequest {

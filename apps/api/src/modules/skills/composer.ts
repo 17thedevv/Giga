@@ -15,8 +15,13 @@ import {
   type ComposedInstructionSegment,
   type SkillActivationManifest,
   type ResolvedSkillItem,
+  MAX_CUSTOM_INSTRUCTIONS_BYTES,
+  MAX_COMPOSED_OUTPUT_BYTES,
   SkillConflictError,
+  SkillValidationError,
+  SkillError,
 } from './types.js';
+import { MAX_INSTRUCTION_BYTES } from './parser.js';
 
 interface ConflictRule {
   type: string;
@@ -51,6 +56,29 @@ const CONFLICT_RULES: ConflictRule[] = [
     description: 'Mutually exclusive language constraints (only in English vs only in Vietnamese)',
   },
 ];
+
+/**
+ * Escapes context boundary tags inside untrusted text to prevent prompt breakout injection.
+ */
+function escapeContextDelimiters(text: string): string {
+  return text
+    .replace(/<\/giga_skills_context>/gi, '&lt;/giga_skills_context&gt;')
+    .replace(/<giga_skills_context>/gi, '&lt;giga_skills_context&gt;');
+}
+
+/**
+ * Recursively deep-freezes an object to guarantee immutability.
+ */
+function deepFreeze<T extends object>(obj: T): Readonly<T> {
+  Object.freeze(obj);
+  for (const key of Object.keys(obj) as Array<keyof T>) {
+    const val = obj[key];
+    if (val && typeof val === 'object' && !Object.isFrozen(val)) {
+      deepFreeze(val as object);
+    }
+  }
+  return obj;
+}
 
 export class InstructionComposer {
   /**
@@ -91,35 +119,80 @@ export class InstructionComposer {
   public composeInstructions(request: ComposeInstructionsRequest): ComposedInstructionSegment {
     const { resolvedSkills, product, userId, userPrompt, userPreferences } = request;
 
-    // 1. Detect conflicts across active skills
+    if (!userId || typeof userId !== 'string') {
+      throw new SkillValidationError('SKILL_VALIDATION_ERROR', 'User ID is required for instruction composition');
+    }
+    if (product !== 'chat' && product !== 'agent') {
+      throw new SkillValidationError(
+        'SKILL_INCOMPATIBLE_PRODUCT',
+        `Invalid product target '${product}': expected 'chat' or 'agent'`
+      );
+    }
+
+    // 1. Revalidate input bounds on resolvedSkills
+    if (resolvedSkills.length > 3) {
+      throw new SkillError(
+        'SKILL_BUDGET_EXCEEDED',
+        `Maximum 3 active skills allowed for composition (received: ${resolvedSkills.length})`
+      );
+    }
+
+    for (const skill of resolvedSkills) {
+      if (!skill.supportedProducts.includes(product)) {
+        throw new SkillError(
+          'SKILL_INCOMPATIBLE_PRODUCT',
+          `Resolved skill '${skill.slug}' is incompatible with target product '${product}'`
+        );
+      }
+      const skillBytes = Buffer.byteLength(skill.instructions, 'utf8');
+      if (skillBytes > MAX_INSTRUCTION_BYTES) {
+        throw new SkillError(
+          'SKILL_OVERSIZED',
+          `Skill '${skill.slug}' instructions (${skillBytes} bytes) exceed maximum allowed size`
+        );
+      }
+    }
+
+    // 2. Validate user preferences bounds
+    if (userPreferences?.customInstructions) {
+      const customBytes = Buffer.byteLength(userPreferences.customInstructions, 'utf8');
+      if (customBytes > MAX_CUSTOM_INSTRUCTIONS_BYTES) {
+        throw new SkillValidationError(
+          'SKILL_OVERSIZED',
+          `Custom instructions exceed maximum allowed limit of ${MAX_CUSTOM_INSTRUCTIONS_BYTES} bytes (actual: ${customBytes} bytes)`
+        );
+      }
+    }
+
+    // 3. Detect conflicts across active skills
     this.detectConflicts(resolvedSkills);
 
-    // 2. Build immutable activation manifest
+    // 4. Build immutable activation manifest
     const manifestId = randomUUID();
     const activatedAt = new Date().toISOString();
     let totalEstimatedTokens = 0;
 
     const manifestSkills = resolvedSkills.map((skill, index) => {
       totalEstimatedTokens += skill.estimatedTokens;
-      return {
+      return Object.freeze({
         skillId: skill.skillId,
         versionId: skill.versionId,
         contentHash: skill.contentHash,
         source: skill.source,
         position: index + 1,
-      };
+      });
     });
 
-    const manifest: SkillActivationManifest = {
+    const manifest: SkillActivationManifest = deepFreeze({
       manifestId,
       userId,
       targetProduct: product,
-      resolverVersion: 'v0.1',
+      resolverVersion: 'v0.1' as const,
       activatedAt,
-      skills: manifestSkills,
+      skills: Object.freeze(manifestSkills),
       totalEstimatedTokens,
       preferencesRevision: userPreferences?.revision,
-    };
+    });
 
     // If no skills and no preferences, return empty content with empty manifest
     if (resolvedSkills.length === 0 && !userPreferences) {
@@ -131,11 +204,11 @@ export class InstructionComposer {
       };
     }
 
-    // 3. Evaluate User Prompt Precedence for style / language preferences
+    // 5. Evaluate User Prompt Precedence for style / language preferences
     // Direct user prompt can override general style preferences (e.g. "answer in English")
     const promptOverrides = this.detectPromptOverrides(userPrompt);
 
-    // 4. Assemble bounded instruction segment
+    // 6. Assemble bounded instruction segment with delimiter breakout escaping
     const lines: string[] = [];
     lines.push('<giga_skills_context>');
     lines.push('### Task Guidance & Behavior Instructions');
@@ -147,7 +220,8 @@ export class InstructionComposer {
       lines.push('### Active Skills:');
       for (const skill of resolvedSkills) {
         lines.push(`#### [Skill: ${skill.slug} (v${skill.versionNumber})]`);
-        lines.push(skill.instructions.trim());
+        // Escape any delimiter injection attempts inside instructions
+        lines.push(escapeContextDelimiters(skill.instructions.trim()));
         lines.push('');
       }
     }
@@ -165,7 +239,7 @@ export class InstructionComposer {
         lines.push(`- Response Style: ${userPreferences.responseStyle}`);
       }
       if (userPreferences.customInstructions && userPreferences.customInstructions.trim()) {
-        lines.push(`- Custom Instructions: ${userPreferences.customInstructions.trim()}`);
+        lines.push(`- Custom Instructions: ${escapeContextDelimiters(userPreferences.customInstructions.trim())}`);
       }
       lines.push('');
     }
@@ -173,6 +247,15 @@ export class InstructionComposer {
     lines.push('</giga_skills_context>');
 
     const content = lines.join('\n');
+    const totalOutputBytes = Buffer.byteLength(content, 'utf8');
+
+    // 7. Enforce total output size budget
+    if (totalOutputBytes > MAX_COMPOSED_OUTPUT_BYTES) {
+      throw new SkillError(
+        'SKILL_OVERSIZED',
+        `Total composed context size (${totalOutputBytes} bytes) exceeds maximum allowed limit of ${MAX_COMPOSED_OUTPUT_BYTES} bytes`
+      );
+    }
 
     return {
       content,
@@ -188,11 +271,16 @@ export class InstructionComposer {
     }
 
     const trimmed = userPrompt.trim().toLowerCase();
-    // Common direct language overrides in user request
-    if (/\b(?:in\s+english|answer\s+in\s+english|respond\s+in\s+english|write\s+in\s+english)\b/i.test(trimmed)) {
+
+    // Check for negative/negated requests first to prevent incorrect overrides
+    const hasNegationEnglish = /\b(?:do not|don't|not|never|không|đừng)\s+(?:speak|answer|respond|write|talk)?\s*(?:in|bằng)?\s*english\b/i.test(trimmed);
+    const hasNegationVietnamese = /\b(?:do not|don't|not|never|không|đừng)\s+(?:speak|answer|respond|write|talk)?\s*(?:in|bằng)?\s*(?:vietnamese|tiếng việt)\b/i.test(trimmed);
+
+    // Positive, non-negated language overrides
+    if (!hasNegationEnglish && /\b(?:answer\s+in\s+english|respond\s+in\s+english|write\s+in\s+english|in\s+english\s+please)\b/i.test(trimmed)) {
       return { language: 'English' };
     }
-    if (/\b(?:bằng\s+tiếng\s+việt|trả\s+lời\s+tiếng\s+việt|in\s+vietnamese)\b/i.test(trimmed)) {
+    if (!hasNegationVietnamese && /\b(?:bằng\s+tiếng\s+việt|trả\s+lời\s+tiếng\s+việt|in\s+vietnamese)\b/i.test(trimmed)) {
       return { language: 'Vietnamese' };
     }
 
