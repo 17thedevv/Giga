@@ -54,5 +54,6 @@ jobs:
 
       - name: Run unit and integration tests (Real PostgreSQL)
         env:
-          DATABASE_URL: postgres://giga_ci:giga_ci_password@localhost:5432/giga_ci_test
+          NODE_ENV: test
+          TEST_DATABASE_URL: postgres://giga_ci:giga_ci_password@localhost:5432/giga_ci_test
         run: npm test
