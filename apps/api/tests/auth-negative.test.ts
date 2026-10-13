@@ -36,7 +36,7 @@ describe('Authentication Negative and Security Tests', () => {
     // First registration succeeds
     const res1 = await app.request('/api/v1/auth/register', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', Origin: 'https://giga.local' },
       body: JSON.stringify(payload),
     });
     assert.strictEqual(res1.status, 201);
@@ -44,7 +44,7 @@ describe('Authentication Negative and Security Tests', () => {
     // Duplicate registration (different case) fails with 409
     const res2 = await app.request('/api/v1/auth/register', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', Origin: 'https://giga.local' },
       body: JSON.stringify({
         ...payload,
         email: 'DUPLICATE@TEST.COM',
@@ -61,7 +61,7 @@ describe('Authentication Negative and Security Tests', () => {
     // Missing email
     const res1 = await app.request('/api/v1/auth/register', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', Origin: 'https://giga.local' },
       body: JSON.stringify({ password: 'password123', displayName: 'User' }),
     });
     assert.strictEqual(res1.status, 400);
@@ -69,7 +69,7 @@ describe('Authentication Negative and Security Tests', () => {
     // Invalid email format
     const res2 = await app.request('/api/v1/auth/register', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', Origin: 'https://giga.local' },
       body: JSON.stringify({ email: 'notanemail', password: 'password123', displayName: 'User' }),
     });
     assert.strictEqual(res2.status, 400);
@@ -77,7 +77,7 @@ describe('Authentication Negative and Security Tests', () => {
     // Password too short (< 8 chars)
     const res3 = await app.request('/api/v1/auth/register', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', Origin: 'https://giga.local' },
       body: JSON.stringify({ email: 'user@test.com', password: '123', displayName: 'User' }),
     });
     assert.strictEqual(res3.status, 400);
@@ -85,7 +85,7 @@ describe('Authentication Negative and Security Tests', () => {
     // Missing display name
     const res4 = await app.request('/api/v1/auth/register', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', Origin: 'https://giga.local' },
       body: JSON.stringify({ email: 'user@test.com', password: 'password123' }),
     });
     assert.strictEqual(res4.status, 400);
@@ -95,7 +95,7 @@ describe('Authentication Negative and Security Tests', () => {
     // Register test account
     await app.request('/api/v1/auth/register', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', Origin: 'https://giga.local' },
       body: JSON.stringify({
         email: 'known@test.com',
         password: 'correct-password',
@@ -106,7 +106,7 @@ describe('Authentication Negative and Security Tests', () => {
     // Wrong password
     const wrongPassRes = await app.request('/api/v1/auth/login', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', Origin: 'https://giga.local' },
       body: JSON.stringify({ email: 'known@test.com', password: 'wrong-password' }),
     });
     assert.strictEqual(wrongPassRes.status, 401);
@@ -115,7 +115,7 @@ describe('Authentication Negative and Security Tests', () => {
     // Unknown user
     const unknownUserRes = await app.request('/api/v1/auth/login', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', Origin: 'https://giga.local' },
       body: JSON.stringify({ email: 'unknown@test.com', password: 'correct-password' }),
     });
     assert.strictEqual(unknownUserRes.status, 401);
@@ -168,7 +168,7 @@ describe('Authentication Negative and Security Tests', () => {
   it('rejects malformed JSON payload with 400 VALIDATION_ERROR', async () => {
     const res = await app.request('/api/v1/auth/login', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', Origin: 'https://giga.local' },
       body: '{ not valid json',
     });
     assert.strictEqual(res.status, 400);
@@ -178,10 +178,16 @@ describe('Authentication Negative and Security Tests', () => {
   });
 
   it('handles repeated logout safely and idempotently', async () => {
-    const res1 = await app.request('/api/v1/auth/logout', { method: 'POST' });
+    const res1 = await app.request('/api/v1/auth/logout', {
+      method: 'POST',
+      headers: { Origin: 'https://giga.local' },
+    });
     assert.strictEqual(res1.status, 204);
 
-    const res2 = await app.request('/api/v1/auth/logout', { method: 'POST' });
+    const res2 = await app.request('/api/v1/auth/logout', {
+      method: 'POST',
+      headers: { Origin: 'https://giga.local' },
+    });
     assert.strictEqual(res2.status, 204);
   });
 
@@ -191,6 +197,21 @@ describe('Authentication Negative and Security Tests', () => {
       headers: {
         'Content-Type': 'application/json',
         Origin: 'https://evil-hacker-site.com',
+      },
+      body: JSON.stringify({ email: 'test@test.com', password: 'password123' }),
+    });
+
+    assert.strictEqual(res.status, 403);
+    const body = (await res.json()) as { error: { code: string; message: string } };
+    assert.strictEqual(body.error.code, 'FORBIDDEN');
+    assert.match(body.error.message, /Untrusted request origin/i);
+  });
+
+  it('rejects state-changing requests missing origin header (CSRF fail-closed)', async () => {
+    const res = await app.request('/api/v1/auth/login', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
       },
       body: JSON.stringify({ email: 'test@test.com', password: 'password123' }),
     });

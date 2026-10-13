@@ -70,11 +70,12 @@ cp .env.example .env
 | Variable | Type | Default | Description |
 |---|---|---|---|
 | `PORT` | Integer (1–65535) | `3000` | HTTP port. Fails fast at startup if invalid. |
-| `DATABASE_URL` | String | *(optional in dev/test)* | PostgreSQL connection URL. Required in production. |
+| `DATABASE_URL` | String | *(optional in dev/test)* | PostgreSQL connection URL for application runtime. Required in production. |
+| `TEST_DATABASE_URL` | String | *(optional)* | Dedicated test database URL. Required for running tests against real PostgreSQL. Never used for production. |
 | `NODE_ENV` | String | `development` | Environment mode (`development`, `production`, `test`). |
 | `COOKIE_SECURE` | Boolean | `false` in dev, `true` in prod | Sets `Secure` flag on session cookies (requires HTTPS in production). |
 | `COOKIE_SAME_SITE` | String | `lax` | Cookie `SameSite` policy (`lax`, `strict`, or `none`). |
-| `ALLOWED_ORIGINS` | String (csv) | *(empty)* | Trusted origins for CSRF origin validation. |
+| `ALLOWED_ORIGINS` | String (csv) | `localhost:5173, localhost:3000` (dev) | Trusted origins for CSRF origin validation. Required in production; wildcard `*` forbidden in production. |
 
 ---
 
@@ -88,7 +89,16 @@ docker compose -f ../../infra/docker/docker-compose.dev.yml up -d
 ```
 
 ### Option B: Automatic In-Memory Fallback for Tests
-Automated tests automatically fall back to an isolated in-memory PostgreSQL engine (`pg-mem`) when `DATABASE_URL` is not set, allowing instant test runs on any developer workstation without local Docker.
+Automated tests automatically fall back to an isolated in-memory PostgreSQL engine (`pg-mem`) when neither `TEST_DATABASE_URL` nor `DATABASE_URL` is set, allowing instant test runs on any developer workstation without local Docker.
+
+### Option C: Integration Tests with Real PostgreSQL (`TEST_DATABASE_URL`)
+To run integration tests against a real PostgreSQL instance:
+1. Ensure `NODE_ENV=test`.
+2. Provide a dedicated test database connection URL via `TEST_DATABASE_URL`:
+   ```bash
+   NODE_ENV=test TEST_DATABASE_URL="postgres://giga:giga_dev_password@localhost:5432/giga_test" npm test
+   ```
+   **Safety invariant:** Tests **fail fast** and strictly refuse to execute destructive table cleanup if `TEST_DATABASE_URL` is missing, if `NODE_ENV !== 'test'`, or if the database name/host matches forbidden environments (`prod`, `production`, `live`, `stage`, `main`, etc.). The test runner will **NEVER** run destructive cleanup against the primary application `DATABASE_URL`.
 
 ### Run Migrations
 Run forward database migrations against your configured database:
@@ -208,6 +218,9 @@ npm test
 
 - **Argon2id Password Hashing:** Passwords are never stored in plaintext and never returned in API responses.
 - **Session Token Hashing:** Raw session tokens are never stored in the database. PostgreSQL stores SHA-256 hashes only.
+- **Fail-Closed CSRF Protection:** State-changing HTTP methods (`POST`, `PUT`, `DELETE`, `PATCH`) to `/api/*` strictly enforce origin validation against `ALLOWED_ORIGINS`. Requests missing `Origin` (and `Referer`) are rejected with `403 FORBIDDEN`. Untrusted origins receive a static `Untrusted request origin` error message without reflecting untrusted input. Wildcard origins (`*`) are prohibited in production.
+- **Test Database Isolation & Guardrails:** Integration tests enforce strict database safety verification (`validateTestDatabaseSafety`). Destructive truncation is restricted exclusively to dedicated test databases designated via `TEST_DATABASE_URL` under `NODE_ENV=test`. Connection URLs are redacted in all logs and error messages. Tests never execute cleanup against `DATABASE_URL`.
 - **Account Enumeration Prevention:** Incorrect credentials and unknown email queries return an identical generic error message (`Invalid email or password`).
 - **No Leaked Stack Traces:** All errors follow canonical JSON error shape (`{"error":{"code":"...","message":"..."}}`).
 - **Cross-Origin / Cookie Deployment Gate:** The final decision between same-origin reverse proxy vs cross-site `SameSite=None; Secure` cookies remains pending real browser testing at the W2 cloud deployment gate.
+

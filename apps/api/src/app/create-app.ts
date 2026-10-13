@@ -6,7 +6,7 @@ import { AuthService } from '../modules/auth/auth-service.js';
 import { createAuthRoutes } from '../modules/auth/auth-routes.js';
 import { createCsrfMiddleware } from '../modules/auth/csrf-middleware.js';
 import { AppError } from '../modules/auth/auth-validation.js';
-import type { AppConfig } from './config.js';
+import { DEFAULT_DEV_ORIGINS, type AppConfig } from './config.js';
 
 export interface HealthResponse {
   readonly status: 'ok';
@@ -30,22 +30,25 @@ export interface AppDependencies {
 export function createApp(dependencies: AppDependencies = {}): Hono {
   const app = new Hono();
 
-  const isDev = dependencies.config?.nodeEnv !== 'production';
+  const isProduction = dependencies.config?.nodeEnv === 'production';
   const cookieConfig = {
-    secure: dependencies.config?.cookieSecure ?? !isDev,
+    secure: dependencies.config?.cookieSecure ?? isProduction,
     sameSite: dependencies.config?.cookieSameSite ?? 'lax',
   };
 
-  // CSRF validation on state-changing methods
-  if (dependencies.config?.allowedOrigins && dependencies.config.allowedOrigins.length > 0) {
-    app.use(
-      '/api/*',
-      createCsrfMiddleware({
-        allowedOrigins: dependencies.config.allowedOrigins,
-        isDevelopment: isDev,
-      })
-    );
-  }
+  // Determine active allowed origins: fail-closed in production if not explicitly set
+  const allowedOrigins = dependencies.config?.allowedOrigins ?? (
+    isProduction ? [] : DEFAULT_DEV_ORIGINS
+  );
+
+  // CSRF validation on all state-changing API routes (always active and fail-closed)
+  app.use(
+    '/api/*',
+    createCsrfMiddleware({
+      allowedOrigins,
+      isProduction,
+    })
+  );
 
   // Health check endpoint (lightweight, zero database access required)
   app.get('/health', (c) => {

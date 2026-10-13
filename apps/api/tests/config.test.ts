@@ -83,9 +83,11 @@ describe('PORT configuration and fail-fast validation', () => {
     const prodConfig = loadConfig({
       NODE_ENV: 'production',
       DATABASE_URL: 'postgres://user:pass@localhost:5432/db',
+      ALLOWED_ORIGINS: 'https://giga.local',
     });
     assert.strictEqual(prodConfig.nodeEnv, 'production');
     assert.strictEqual(prodConfig.cookieSecure, true);
+    assert.deepStrictEqual(prodConfig.allowedOrigins, ['https://giga.local']);
   });
 
   it('parseSameSite handles valid values and rejects invalid', () => {

@@ -34,6 +34,8 @@ export async function startServer(options: StartServerOptions = {}): Promise<{
         }
       } catch (err) {
         console.error('[giga-api] Database migration error on startup:', err);
+        // Ensure pool connections are properly closed on startup failure
+        await pool.end();
         throw err;
       }
     }
