@@ -1,0 +1,20 @@
+{
+  "proposal": {
+    "id": "prop_3b1a8f90-112c-4911-aa90-55e120bc7710",
+    "runId": "run_881a29f0-55b1-42e8-912a-33c8b1a9901e",
+    "baseCommitSha": "4aff64821a8109bfef210087cb1a4901e9121a10",
+    "files": [
+      {
+        "path": "apps/api/src/db/client.ts",
+        "status": "modified",
+        "unifiedDiff": "--- a/apps/api/src/db/client.ts\n+++ b/apps/api/src/db/client.ts\n@@ -32,8 +32,14 @@ export function createDbClient() {\n     const pool = new Pool({\n       connectionString: env.DATABASE_URL,\n-      max: 20,\n+      max: 10,\n+      idleTimeoutMillis: 30000,\n     });\n+\n+    pool.on('error', (err) => {\n+      console.error('Unexpected error on idle DB client', err);\n+    });\n+\n     return pool;\n }\n"
+      },
+      {
+        "path": "apps/api/tests/db.test.ts",
+        "status": "added",
+        "unifiedDiff": "--- /dev/null\n+++ b/apps/api/tests/db.test.ts\n@@ -0,0 +1,12 @@\n+import { describe, it, expect } from 'vitest';\n+import { createDbClient } from '../src/db/client';\n+\n+describe('createDbClient', () => {\n+  it('should initialize pool with 30s idle timeout', () => {\n+    const client = createDbClient();\n+    expect(client).toBeDefined();\n+  });\n+});\n"
+      }
+    ],
+    "createdAt": "2026-10-13T03:50:40.000Z"
+  }
+}

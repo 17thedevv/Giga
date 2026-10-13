@@ -1,0 +1,5 @@
+{
+  "task": "Refactor Neon database client pool initialization in apps/api/src/db/client.ts to handle connection error events and set idleTimeoutMillis.",
+  "repository": "17thedevv/Giga",
+  "baseRef": "main"
+}

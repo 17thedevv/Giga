@@ -1,0 +1,11 @@
+{
+  "error": {
+    "code": "STALE_PROPOSAL",
+    "message": "Change proposal is stale. The target repository HEAD has diverged from baseCommitSha 4aff64821a8109bfef210087cb1a4901e9121a10.",
+    "details": {
+      "baseCommitSha": "4aff64821a8109bfef210087cb1a4901e9121a10",
+      "currentHeadSha": "e1f98bc4019a28b894101cc8412fa09918bcda12"
+    },
+    "requestId": "req_prop_stale_9921"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Validation failed for provided registration fields",
+    "details": {
+      "email": "Must be a valid email format",
+      "password": "Password must be at least 8 characters"
+    },
+    "requestId": "req_reg_val_03b1c"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "CONFLICT",
+    "message": "Another message generation is already active in this conversation. Please wait for it to complete.",
+    "requestId": "req_chat_conf_8812"
+  }
+}

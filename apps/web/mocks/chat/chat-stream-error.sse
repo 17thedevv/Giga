@@ -1,0 +1,9 @@
+event: message.started
+data: {"messageId":"msg_err_901a1c32","conversationId":"conv_8f3a1d94-3201-44dc-98ef-c1192da0e521"}
+
+event: message.delta
+data: {"messageId":"msg_err_901a1c32","text":"I am analyzing your cloud architecture..."}
+
+event: stream.error
+data: {"code":"UPSTREAM_ERROR","message":"LLM provider timed out while generating completion"}
+
