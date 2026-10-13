@@ -9,6 +9,16 @@ import { redactDatabaseUrl, pingDatabase } from '../src/db/client.js';
 describe('Database Migrations and Utilities', () => {
   it('runs migrations deterministically and idempotently', async () => {
     const db = newDb({ noAstCoverageCheck: true });
+    db.public.interceptQueries((sql) => {
+      if (sql.includes('prevent_skill_versions_update') || sql.includes('CREATE TRIGGER')) {
+        const stripped = sql
+          .replace(/CREATE OR REPLACE FUNCTION[\s\S]*?LANGUAGE plpgsql;/gi, '')
+          .replace(/DROP TRIGGER[\s\S]*?;/gi, '')
+          .replace(/CREATE TRIGGER[\s\S]*?;/gi, '');
+        return db.public.many(stripped);
+      }
+      return null;
+    });
     db.public.registerFunction({
       name: 'gen_random_uuid',
       implementation: () => crypto.randomUUID(),

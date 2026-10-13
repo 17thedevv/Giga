@@ -132,7 +132,7 @@ export async function createTestDatabase(): Promise<TestDbInstance> {
       if (!check.safe) {
         throw new Error(`[test-db-safety] Refusing cleanup: ${check.reason}`);
       }
-      await pool.query('TRUNCATE users, sessions, user_preferences, skill_installations, skill_versions, skill_definitions, workspace_skill_defaults CASCADE;');
+      await pool.query('TRUNCATE users, sessions, user_preferences, skill_installations, skill_versions, skill_definitions CASCADE;');
     };
 
     return { pool, cleanup, isMemory: false };
@@ -140,6 +140,22 @@ export async function createTestDatabase(): Promise<TestDbInstance> {
 
   // Explicit in-memory fallback when no TEST_DATABASE_URL is provided
   const db = newDb({ noAstCoverageCheck: true });
+
+  db.public.interceptQueries((sql) => {
+    // Intercept and strip PostgreSQL triggers/plpgsql DDL that pg-mem does not support
+    if (sql.includes('prevent_skill_versions_update') || sql.includes('CREATE TRIGGER')) {
+      const stripped = sql
+        .replace(/CREATE OR REPLACE FUNCTION[\s\S]*?LANGUAGE plpgsql;/gi, '')
+        .replace(/DROP TRIGGER[\s\S]*?;/gi, '')
+        .replace(/CREATE TRIGGER[\s\S]*?;/gi, '');
+      return db.public.many(stripped);
+    }
+    // Emulate PostgreSQL trigger immutability enforcement on direct UPDATE in pg-mem
+    if (/UPDATE\s+skill_versions/i.test(sql)) {
+      throw new Error('skill_versions rows are strictly immutable and cannot be updated');
+    }
+    return null;
+  });
 
   db.public.registerFunction({
     name: 'gen_random_uuid',
@@ -175,7 +191,6 @@ export async function createTestDatabase(): Promise<TestDbInstance> {
   await runMigrations(pool);
 
   const cleanup = async (): Promise<void> => {
-    await pool.query('DELETE FROM workspace_skill_defaults;');
     await pool.query('DELETE FROM skill_installations;');
     await pool.query('DELETE FROM skill_versions;');
     await pool.query('DELETE FROM skill_definitions;');

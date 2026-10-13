@@ -63,16 +63,17 @@ CREATE TABLE IF NOT EXISTS skill_installations (
 CREATE INDEX IF NOT EXISTS idx_skill_installations_user_id ON skill_installations (user_id);
 CREATE INDEX IF NOT EXISTS idx_skill_installations_skill_id ON skill_installations (skill_id);
 
--- 5. Workspace Skill Defaults: agent workspace default activations
-CREATE TABLE IF NOT EXISTS workspace_skill_defaults (
-    workspace_id UUID NOT NULL,
-    owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    skill_id UUID NOT NULL REFERENCES skill_definitions(id) ON DELETE CASCADE,
-    position INTEGER NOT NULL DEFAULT 1,
-    enabled BOOLEAN NOT NULL DEFAULT true,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (workspace_id, owner_id, skill_id)
-);
+-- 5. Immutability enforcement: prevent any SQL UPDATE on skill_versions
+CREATE OR REPLACE FUNCTION prevent_skill_versions_update()
+RETURNS TRIGGER AS $$
+BEGIN
+    RAISE EXCEPTION 'skill_versions rows are strictly immutable and cannot be updated';
+END;
+$$ LANGUAGE plpgsql;
 
-CREATE INDEX IF NOT EXISTS idx_workspace_skill_defaults_workspace_owner ON workspace_skill_defaults (workspace_id, owner_id);
+DROP TRIGGER IF EXISTS trg_prevent_skill_versions_update ON skill_versions;
+
+CREATE TRIGGER trg_prevent_skill_versions_update
+BEFORE UPDATE ON skill_versions
+FOR EACH ROW
+EXECUTE FUNCTION prevent_skill_versions_update();

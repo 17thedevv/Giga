@@ -28,7 +28,14 @@ import {
   MAX_SLUG_LENGTH,
   MIN_SLUG_LENGTH,
   getUtf8ByteCount,
+  computeDeterministicHash,
 } from './parser.js';
+
+export interface SkillActorContext {
+  userId?: string;
+  isAdmin?: boolean;
+  isSystem?: boolean;
+}
 
 export interface CreateSkillParams {
   id?: string;
@@ -38,14 +45,16 @@ export interface CreateSkillParams {
   description: string;
   visibility: SkillVisibility;
   supportedProducts: ProductTarget[];
+  actor?: SkillActorContext;
 }
 
 export interface CreateVersionParams {
   id?: string;
   skillId: string;
   versionNumber: number;
-  contentHash: string;
+  contentHash?: string;
   instructions: string;
+  actor?: SkillActorContext;
 }
 
 export interface CreateInstallationParams {
@@ -87,13 +96,6 @@ interface SkillInstallationDbRow {
   installed_at: Date | string;
 }
 
-interface WorkspaceSkillDefaultDbRow {
-  workspace_id: string;
-  owner_id: string;
-  skill_id: string;
-  position: number;
-  enabled: boolean;
-}
 
 function mapRowToSkillDefinition(row: SkillDefinitionDbRow): SkillDefinition {
   return {
@@ -262,31 +264,16 @@ export class PostgresSkillStorage implements SkillStorage {
   }
 
   /**
-   * Retrieves agent workspace skill defaults for a workspace and its owner.
+   * Retrieves agent workspace skill defaults.
+   * Deferred until 17T-24 Agent Workspace schema is implemented.
    */
-  public async getWorkspaceDefaults(workspaceId: string, ownerId: string): Promise<WorkspaceSkillDefault[]> {
-    if (!workspaceId || !ownerId) {
-      return [];
-    }
-
-    const query = `
-      SELECT workspace_id, owner_id, skill_id, position, enabled
-      FROM workspace_skill_defaults
-      WHERE workspace_id = $1 AND owner_id = $2
-      ORDER BY position ASC;
-    `;
-    const result = await this.pool.query<WorkspaceSkillDefaultDbRow>(query, [workspaceId, ownerId]);
-    return result.rows.map((row) => ({
-      workspaceId: row.workspace_id,
-      ownerId: row.owner_id,
-      skillId: row.skill_id,
-      position: row.position,
-      enabled: Boolean(row.enabled),
-    }));
+  public async getWorkspaceDefaults(_workspaceId: string, _ownerId: string): Promise<WorkspaceSkillDefault[]> {
+    return [];
   }
 
   /**
    * Persists a new skill definition.
+   * Enforces actor authorization for built-in and private skills.
    */
   public async createSkill(params: CreateSkillParams): Promise<SkillDefinition> {
     const slug = params.slug.trim();
@@ -299,11 +286,21 @@ export class PostgresSkillStorage implements SkillStorage {
       throw new SkillValidationError('SKILL_VALIDATION_ERROR', 'Invalid skill description length');
     }
 
-    if (params.visibility === 'built_in' && params.ownerId !== null) {
-      throw new SkillValidationError('SKILL_VALIDATION_ERROR', 'Built-in skills cannot have an ownerId');
+    if (params.visibility === 'built_in') {
+      if (params.ownerId !== null) {
+        throw new SkillValidationError('SKILL_VALIDATION_ERROR', 'Built-in skills cannot have an ownerId');
+      }
+      if (params.actor && !params.actor.isAdmin && !params.actor.isSystem) {
+        throw new SkillValidationError('SKILL_UNAUTHORIZED', 'Only system administrators can publish built-in skills');
+      }
     }
-    if (params.visibility === 'private' && (!params.ownerId || typeof params.ownerId !== 'string')) {
-      throw new SkillValidationError('SKILL_VALIDATION_ERROR', 'Private skills require an ownerId');
+    if (params.visibility === 'private') {
+      if (!params.ownerId || typeof params.ownerId !== 'string') {
+        throw new SkillValidationError('SKILL_VALIDATION_ERROR', 'Private skills require an ownerId');
+      }
+      if (params.actor?.userId && params.actor.userId !== params.ownerId && !params.actor.isAdmin) {
+        throw new SkillValidationError('SKILL_UNAUTHORIZED', 'Cannot create a private skill for another owner');
+      }
     }
 
     const query = `
@@ -338,18 +335,52 @@ export class PostgresSkillStorage implements SkillStorage {
   /**
    * Persists an immutable skill version.
    * Versions cannot be updated once created.
+   * Validates parent skill existence, caller authorization, and content hash integrity.
    */
   public async createVersion(params: CreateVersionParams): Promise<SkillVersion> {
     if (params.versionNumber < 1) {
       throw new SkillValidationError('SKILL_VALIDATION_ERROR', 'Version number must be >= 1');
     }
-    if (params.contentHash.length !== 64) {
-      throw new SkillValidationError('SKILL_VALIDATION_ERROR', 'Content hash must be 64 characters SHA-256');
+
+    // 1. Verify parent skill exists and enforce publication authorization
+    const queryParent = `
+      SELECT id, owner_id, slug, title, description, visibility, supported_products, created_at
+      FROM skill_definitions
+      WHERE id = $1
+      LIMIT 1;
+    `;
+    const parentRes = await this.pool.query<SkillDefinitionDbRow>(queryParent, [params.skillId]);
+    const parentRow = parentRes.rows[0];
+    if (!parentRow) {
+      throw new SkillResolutionError('SKILL_NOT_FOUND', `Parent skill '${params.skillId}' not found`);
     }
+    const parentSkill = mapRowToSkillDefinition(parentRow);
+
+    if (parentSkill.visibility === 'built_in') {
+      if (params.actor && !params.actor.isAdmin && !params.actor.isSystem) {
+        throw new SkillValidationError('SKILL_UNAUTHORIZED', 'Only system administrators can publish versions for built-in skills');
+      }
+    } else if (parentSkill.visibility === 'private') {
+      if (params.actor?.userId && params.actor.userId !== parentSkill.ownerId && !params.actor.isAdmin) {
+        throw new SkillValidationError('SKILL_UNAUTHORIZED', 'Only the skill owner can publish versions for a private skill');
+      }
+    }
+
+    // 2. Validate instructions size
     const bytes = getUtf8ByteCount(params.instructions);
     if (bytes > MAX_INSTRUCTION_BYTES) {
       throw new SkillValidationError('SKILL_OVERSIZED', `Instructions exceed ${MAX_INSTRUCTION_BYTES} bytes`);
     }
+
+    // 3. Compute deterministic hash and verify against caller-provided hash if given
+    const expectedHash = computeDeterministicHash(params.instructions);
+    if (params.contentHash && params.contentHash !== expectedHash) {
+      throw new SkillValidationError(
+        'SKILL_VALIDATION_ERROR',
+        `Provided content hash '${params.contentHash}' does not match deterministic instruction hash '${expectedHash}'`
+      );
+    }
+    const finalContentHash = expectedHash;
 
     const query = `
       INSERT INTO skill_versions (id, skill_id, version_number, content_hash, instructions)
@@ -361,7 +392,7 @@ export class PostgresSkillStorage implements SkillStorage {
         params.id ?? null,
         params.skillId,
         params.versionNumber,
-        params.contentHash,
+        finalContentHash,
         params.instructions,
       ]);
       const row = result.rows[0];
@@ -486,36 +517,16 @@ export class PostgresSkillStorage implements SkillStorage {
   }
 
   /**
-   * Sets agent workspace defaults in a single atomic transaction.
+   * Sets agent workspace defaults.
+   * Deferred until 17T-24 Agent Workspace schema is implemented.
    */
   public async setWorkspaceDefaults(
-    workspaceId: string,
-    ownerId: string,
-    defaults: WorkspaceSkillDefault[]
+    _workspaceId: string,
+    _ownerId: string,
+    _defaults: WorkspaceSkillDefault[]
   ): Promise<void> {
-    const client = await this.pool.connect();
-    try {
-      await client.query('BEGIN');
-
-      await client.query(
-        'DELETE FROM workspace_skill_defaults WHERE workspace_id = $1 AND owner_id = $2;',
-        [workspaceId, ownerId]
-      );
-
-      for (const item of defaults) {
-        await client.query(
-          `INSERT INTO workspace_skill_defaults (workspace_id, owner_id, skill_id, position, enabled, updated_at)
-           VALUES ($1, $2, $3, $4, $5, NOW());`,
-          [workspaceId, ownerId, item.skillId, item.position, item.enabled]
-        );
-      }
-
-      await client.query('COMMIT');
-    } catch (err) {
-      await client.query('ROLLBACK');
-      throw err;
-    } finally {
-      client.release();
-    }
+    throw new Error(
+      'Agent Workspace defaults persistence is deferred until 17T-24 Agent Workspace schema is implemented'
+    );
   }
 }

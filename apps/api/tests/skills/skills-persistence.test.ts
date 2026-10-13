@@ -195,7 +195,6 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
         skillStorage.createVersion({
           skillId: skill.id,
           versionNumber: 1,
-          contentHash: hash1,
           instructions: 'Mutated instructions attempt',
         }),
       (err: Error) =>
@@ -463,41 +462,212 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
     );
   });
 
-  it('Workspace defaults: persists and retrieves agent workspace default activations', async () => {
+  it('Workspace defaults: validates deferral until 17T-24 Agent Workspace schema is implemented', async () => {
     const wsId = '00000000-0000-0000-0000-000000000099';
 
-    const skill1 = await skillStorage.createSkill({
+    // 1. Querying workspace defaults returns empty array without error
+    const defaults = await skillStorage.getWorkspaceDefaults(wsId, userAId);
+    assert.deepStrictEqual(defaults, []);
+
+    // 2. Attempting to set defaults explicitly throws deferral error rather than accepting dangling workspace IDs
+    await assert.rejects(
+      async () =>
+        skillStorage.setWorkspaceDefaults(wsId, userAId, [
+          { workspaceId: wsId, ownerId: userAId, skillId: '00000000-0000-0000-0000-000000000001', position: 1, enabled: true },
+        ]),
+      (err: Error) =>
+        /deferred until 17T-24 Agent Workspace/i.test(err.message)
+    );
+  });
+
+  it('Database-level Immutability: directly rejects SQL UPDATE on skill_versions', async () => {
+    const skill = await skillStorage.createSkill({
       ownerId: null,
-      slug: 'ws-skill-1',
-      title: 'Workspace Skill 1',
-      description: 'First default skill',
+      slug: 'immutable-sql-test',
+      title: 'Immutable SQL Test',
+      description: 'Testing trigger/DB immutability',
       visibility: 'built_in',
-      supportedProducts: ['agent'],
+      supportedProducts: ['chat', 'agent'],
     });
 
-    const skill2 = await skillStorage.createSkill({
-      ownerId: null,
-      slug: 'ws-skill-2',
-      title: 'Workspace Skill 2',
-      description: 'Second default skill',
-      visibility: 'built_in',
-      supportedProducts: ['agent'],
+    const originalInstructions = 'Strictly original instruction text';
+    const version = await skillStorage.createVersion({
+      skillId: skill.id,
+      versionNumber: 1,
+      instructions: originalInstructions,
     });
 
-    // Set defaults for User A
-    await skillStorage.setWorkspaceDefaults(wsId, userAId, [
-      { workspaceId: wsId, ownerId: userAId, skillId: skill1.id, position: 1, enabled: true },
-      { workspaceId: wsId, ownerId: userAId, skillId: skill2.id, position: 2, enabled: true },
-    ]);
+    // Attempt direct SQL UPDATE on skill_versions
+    await assert.rejects(
+      async () =>
+        testDb.pool.query(
+          'UPDATE skill_versions SET instructions = $1 WHERE id = $2;',
+          ['Maliciously updated instruction text', version.id]
+        ),
+      (err: Error) =>
+        /immutable|cannot be updated/i.test(err.message)
+    );
 
-    // Query defaults for User A
-    const defaultsA = await skillStorage.getWorkspaceDefaults(wsId, userAId);
-    assert.strictEqual(defaultsA.length, 2);
-    assert.strictEqual(defaultsA[0]?.skillId, skill1.id);
-    assert.strictEqual(defaultsA[1]?.skillId, skill2.id);
+    // Verify row was NOT mutated
+    const currentVersion = await skillStorage.getSkillVersion(version.id);
+    assert.ok(currentVersion);
+    assert.strictEqual(currentVersion.instructions, originalInstructions);
+  });
 
-    // Query defaults for User B on same workspace returns empty (owner-scoped)
-    const defaultsB = await skillStorage.getWorkspaceDefaults(wsId, userBId);
-    assert.strictEqual(defaultsB.length, 0);
+  it('Content Hash Verification: enforces that contentHash matches deterministic instruction hash', async () => {
+    const skill = await skillStorage.createSkill({
+      ownerId: null,
+      slug: 'hash-verification-test',
+      title: 'Hash Verification Test',
+      description: 'Testing content hash validation',
+      visibility: 'built_in',
+      supportedProducts: ['chat', 'agent'],
+    });
+
+    const instructions = 'Instructions for deterministic hash test';
+    const expectedHash = computeDeterministicHash(instructions);
+    const forgedHash = 'e'.repeat(64);
+
+    // 1. Rejects mismatched forged content hash
+    await assert.rejects(
+      async () =>
+        skillStorage.createVersion({
+          skillId: skill.id,
+          versionNumber: 1,
+          contentHash: forgedHash,
+          instructions,
+        }),
+      (err: Error) =>
+        err instanceof SkillValidationError &&
+        /does not match deterministic instruction hash/i.test(err.message)
+    );
+
+    // 2. Succeeds when contentHash matches expectedHash
+    const validWithHash = await skillStorage.createVersion({
+      skillId: skill.id,
+      versionNumber: 1,
+      contentHash: expectedHash,
+      instructions,
+    });
+    assert.strictEqual(validWithHash.contentHash, expectedHash);
+
+    // 3. Automatically computes deterministic hash when contentHash is omitted
+    const instructionsV2 = 'Instructions version 2';
+    const validOmittedHash = await skillStorage.createVersion({
+      skillId: skill.id,
+      versionNumber: 2,
+      instructions: instructionsV2,
+    });
+    assert.strictEqual(validOmittedHash.contentHash, computeDeterministicHash(instructionsV2));
+  });
+
+  it('Publication Authorization: enforces boundaries for built-in and private skills', async () => {
+    // 1. Non-admin user cannot create built-in skill
+    await assert.rejects(
+      async () =>
+        skillStorage.createSkill({
+          ownerId: null,
+          slug: 'unauthorized-builtin',
+          title: 'Unauthorized Built-in',
+          description: 'Ordinary user trying to publish built-in skill',
+          visibility: 'built_in',
+          supportedProducts: ['chat'],
+          actor: { userId: userAId, isAdmin: false },
+        }),
+      (err: Error) =>
+        err instanceof SkillValidationError &&
+        /Only system administrators can publish built-in skills/i.test(err.message)
+    );
+
+    // 2. System/admin CAN create built-in skill
+    const adminBuiltin = await skillStorage.createSkill({
+      ownerId: null,
+      slug: 'authorized-admin-builtin',
+      title: 'Authorized Admin Built-in',
+      description: 'Admin published built-in skill',
+      visibility: 'built_in',
+      supportedProducts: ['chat'],
+      actor: { isAdmin: true },
+    });
+    assert.strictEqual(adminBuiltin.visibility, 'built_in');
+
+    // 3. User cannot create private skill for another owner
+    await assert.rejects(
+      async () =>
+        skillStorage.createSkill({
+          ownerId: userBId, // attempting to create for userB
+          slug: 'forged-owner-skill',
+          title: 'Forged Owner Skill',
+          description: 'User A attempting to create skill owned by User B',
+          visibility: 'private',
+          supportedProducts: ['chat'],
+          actor: { userId: userAId, isAdmin: false },
+        }),
+      (err: Error) =>
+        err instanceof SkillValidationError &&
+        /Cannot create a private skill for another owner/i.test(err.message)
+    );
+
+    // 4. User A can create private skill for themselves
+    const privateSkillA = await skillStorage.createSkill({
+      ownerId: userAId,
+      slug: 'my-private-auth-skill',
+      title: 'User A Private Skill',
+      description: 'Owned by User A',
+      visibility: 'private',
+      supportedProducts: ['chat'],
+      actor: { userId: userAId },
+    });
+    assert.strictEqual(privateSkillA.ownerId, userAId);
+
+    // 5. User B CANNOT publish new version for User A's private skill
+    await assert.rejects(
+      async () =>
+        skillStorage.createVersion({
+          skillId: privateSkillA.id,
+          versionNumber: 1,
+          instructions: 'Attacker trying to add version to another user skill',
+          actor: { userId: userBId, isAdmin: false },
+        }),
+      (err: Error) =>
+        err instanceof SkillValidationError &&
+        /Only the skill owner can publish versions/i.test(err.message)
+    );
+
+    // 6. User A CAN publish version for their own private skill
+    const versionA = await skillStorage.createVersion({
+      skillId: privateSkillA.id,
+      versionNumber: 1,
+      instructions: 'Owner User A version 1',
+      actor: { userId: userAId },
+    });
+    assert.strictEqual(versionA.versionNumber, 1);
+  });
+
+  it('Migration coordination: safely handles pending migration 002 landing out-of-order', async () => {
+    // Both migration 1 and 3 are already applied.
+    // Simulate pending migration 2 (17T-21 conversations) landing subsequently:
+    await testDb.pool.query(`
+      CREATE TABLE IF NOT EXISTS conversations_pending_test (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        title VARCHAR(255) NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+
+    // Verify foreign key relationship to users(id) works without conflicting with migration 3
+    const insertRes = await testDb.pool.query(
+      'INSERT INTO conversations_pending_test (user_id, title) VALUES ($1, $2) RETURNING id;',
+      [userAId, 'Test Conversation']
+    );
+    assert.ok(insertRes.rows[0]?.id);
+
+    // Verify that running migrations again remains idempotent
+    const rerun = await runMigrations(testDb.pool);
+    assert.strictEqual(rerun.length, 0);
+
+    // Cleanup simulated table
+    await testDb.pool.query('DROP TABLE IF EXISTS conversations_pending_test CASCADE;');
   });
 });

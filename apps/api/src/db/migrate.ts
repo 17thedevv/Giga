@@ -98,18 +98,19 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_skill_installations_user_id ON skill_installations (user_id);
       CREATE INDEX IF NOT EXISTS idx_skill_installations_skill_id ON skill_installations (skill_id);
 
-      CREATE TABLE IF NOT EXISTS workspace_skill_defaults (
-          workspace_id UUID NOT NULL,
-          owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-          skill_id UUID NOT NULL REFERENCES skill_definitions(id) ON DELETE CASCADE,
-          position INTEGER NOT NULL DEFAULT 1,
-          enabled BOOLEAN NOT NULL DEFAULT true,
-          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          PRIMARY KEY (workspace_id, owner_id, skill_id)
-      );
+      CREATE OR REPLACE FUNCTION prevent_skill_versions_update()
+      RETURNS TRIGGER AS $$
+      BEGIN
+          RAISE EXCEPTION 'skill_versions rows are strictly immutable and cannot be updated';
+      END;
+      $$ LANGUAGE plpgsql;
 
-      CREATE INDEX IF NOT EXISTS idx_workspace_skill_defaults_workspace_owner ON workspace_skill_defaults (workspace_id, owner_id);
+      DROP TRIGGER IF EXISTS trg_prevent_skill_versions_update ON skill_versions;
+
+      CREATE TRIGGER trg_prevent_skill_versions_update
+      BEFORE UPDATE ON skill_versions
+      FOR EACH ROW
+      EXECUTE FUNCTION prevent_skill_versions_update();
     `,
   },
 ];
@@ -164,7 +165,8 @@ export async function runMigrations(pool: pg.Pool): Promise<string[]> {
     await ensureMigrationTable(client);
     const appliedVersions = await getAppliedMigrationVersions(client);
 
-    for (const migration of MIGRATIONS) {
+    const sortedMigrations = [...MIGRATIONS].sort((a, b) => a.version - b.version);
+    for (const migration of sortedMigrations) {
       if (appliedVersions.has(migration.version)) {
         continue;
       }
