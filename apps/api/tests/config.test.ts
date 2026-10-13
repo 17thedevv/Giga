@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { parsePort, loadConfig, DEFAULT_PORT } from '../src/app/config.js';
+import { parsePort, parseSameSite, loadConfig, DEFAULT_PORT } from '../src/app/config.js';
 
 describe('PORT configuration and fail-fast validation', () => {
   it('returns default port 3000 when PORT is undefined', () => {
@@ -62,12 +62,40 @@ describe('PORT configuration and fail-fast validation', () => {
 
     const defaultConfig = loadConfig({});
     assert.strictEqual(defaultConfig.port, DEFAULT_PORT);
+    assert.strictEqual(defaultConfig.nodeEnv, 'development');
+    assert.strictEqual(defaultConfig.cookieSecure, false);
+    assert.strictEqual(defaultConfig.cookieSameSite, 'lax');
   });
 
   it('loadConfig propagates fail-fast validation error from environment', () => {
     assert.throws(
       () => loadConfig({ PORT: 'not-a-port' }),
       /Invalid PORT configuration/
+    );
+  });
+
+  it('loadConfig requires DATABASE_URL in production mode', () => {
+    assert.throws(
+      () => loadConfig({ NODE_ENV: 'production' }),
+      /DATABASE_URL environment variable is required in production mode/
+    );
+
+    const prodConfig = loadConfig({
+      NODE_ENV: 'production',
+      DATABASE_URL: 'postgres://user:pass@localhost:5432/db',
+    });
+    assert.strictEqual(prodConfig.nodeEnv, 'production');
+    assert.strictEqual(prodConfig.cookieSecure, true);
+  });
+
+  it('parseSameSite handles valid values and rejects invalid', () => {
+    assert.strictEqual(parseSameSite(undefined), 'lax');
+    assert.strictEqual(parseSameSite('strict'), 'strict');
+    assert.strictEqual(parseSameSite('none'), 'none');
+    assert.strictEqual(parseSameSite('LAX'), 'lax');
+    assert.throws(
+      () => parseSameSite('invalid'),
+      /Invalid COOKIE_SAME_SITE configuration/
     );
   });
 });
