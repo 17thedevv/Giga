@@ -122,7 +122,7 @@ export function computeDeterministicHash(content: string): string {
  */
 function parseFrontmatterSubset(yamlText: string): Record<string, unknown> {
   const lines = yamlText.split(/\r?\n/);
-  const result: Record<string, unknown> = {};
+  const result: Record<string, unknown> = Object.create(null);
   const seenKeys = new Set<string>();
   let currentKey: string | null = null;
   let currentList: string[] | null = null;
@@ -177,6 +177,19 @@ function parseFrontmatterSubset(yamlText: string): Record<string, unknown> {
     }
 
     const normalizedKey = key.toLowerCase();
+
+    // Prevent prototype pollution or special object property attacks
+    if (
+      normalizedKey === '__proto__' ||
+      normalizedKey === 'constructor' ||
+      normalizedKey === 'prototype'
+    ) {
+      throw new SkillValidationError(
+        'SKILL_PARSE_ERROR',
+        `Forbidden frontmatter property '${key}' at line ${i + 1}`
+      );
+    }
+
     if (seenKeys.has(normalizedKey)) {
       throw new SkillValidationError(
         'SKILL_PARSE_ERROR',
@@ -184,6 +197,20 @@ function parseFrontmatterSubset(yamlText: string): Record<string, unknown> {
       );
     }
     seenKeys.add(normalizedKey);
+
+    // Validate key against forbidden and allowed frontmatter keys before assigning
+    if (FORBIDDEN_FRONTMATTER_KEYS.has(normalizedKey)) {
+      throw new SkillValidationError(
+        'SKILL_UNSAFE_CONTENT',
+        `Unsupported frontmatter field '${key}': skills in P0 cannot declare scripts, permissions, or tools`
+      );
+    }
+    if (!ALLOWED_FRONTMATTER_KEYS.has(normalizedKey)) {
+      throw new SkillValidationError(
+        'SKILL_PARSE_ERROR',
+        `Unsupported frontmatter key '${key}': only 'name', 'description', 'title', and 'supported_products' are permitted in P0`
+      );
+    }
 
     // Save preceding list if active
     if (currentKey && currentList) {

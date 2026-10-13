@@ -85,7 +85,7 @@ describe('Skills Core — Instruction Composer', () => {
     assert.strictEqual(manifest.resolverVersion, 'v0.1');
     assert.ok(Date.parse(manifest.activatedAt) > 0);
     assert.strictEqual(manifest.preferencesRevision, 3);
-    assert.strictEqual(manifest.totalEstimatedTokens, 20);
+    assert.strictEqual(manifest.totalEstimatedTokens, 16);
 
     assert.strictEqual(manifest.skills.length, 1);
     assert.strictEqual(manifest.skills[0]?.skillId, 's-explain');
@@ -240,5 +240,120 @@ describe('Skills Core — Instruction Composer', () => {
     assert.throws(() => {
       (manifest.skills[0] as any).contentHash = 'tampered-hash';
     }, TypeError);
+  });
+
+  it('Scenario: recomputes tokens and enforces aggregate byte limit on direct composer call with forged estimatedTokens', () => {
+    // 19,000 characters with forged estimatedTokens: 1
+    const forgedSkill: ResolvedSkillItem = {
+      skillId: 's-forged',
+      slug: 'forged-skill',
+      title: 'Forged Skill',
+      versionId: 'v-forged',
+      versionNumber: 1,
+      contentHash: 'hash-forged',
+      instructions: 'X'.repeat(19000),
+      source: 'manual',
+      supportedProducts: ['chat', 'agent'],
+      estimatedTokens: 1, // Forged fake estimate!
+    };
+
+    // Total bytes: 19,000 > MAX_TOTAL_INSTRUCTION_BYTES (16,384) -> throws SKILL_BUDGET_EXCEEDED
+    assert.throws(
+      () =>
+        composer.composeInstructions({
+          resolvedSkills: [forgedSkill],
+          product: 'chat',
+          userId: 'user-42',
+        }),
+      (err: Error) =>
+        err.message.includes('exceed maximum aggregate limit of 16384 bytes') ||
+        err.message.includes('SKILL_BUDGET_EXCEEDED')
+    );
+  });
+
+  it('Scenario: recomputes token budget and rejects when actual tokens exceed 2000 even if caller claims fewer', () => {
+    // Skill with ~2000 words (> 2000 tokens) but forged estimatedTokens: 5
+    const forgedTokensSkill: ResolvedSkillItem = {
+      skillId: 's-forged-tok',
+      slug: 'forged-tokens',
+      title: 'Forged Tokens Skill',
+      versionId: 'v-forged-tok',
+      versionNumber: 1,
+      contentHash: 'hash-forged-tok',
+      instructions: 'word '.repeat(2000), // 10,000 bytes, ~2857 tokens > 2000 tokens, but < 16,384 bytes
+      source: 'manual',
+      supportedProducts: ['chat', 'agent'],
+      estimatedTokens: 5, // Forged fake estimate!
+    };
+
+    assert.throws(
+      () =>
+        composer.composeInstructions({
+          resolvedSkills: [forgedTokensSkill],
+          product: 'chat',
+          userId: 'user-42',
+        }),
+      (err: Error) =>
+        err.message.includes('Total skill instruction budget exceeded') ||
+        err.message.includes('exceeds limit of 2000 tokens')
+    );
+  });
+
+  it('Scenario: rejects custom instructions exceeding MAX_CUSTOM_INSTRUCTIONS_CHARS (2000 chars)', () => {
+    const longCustomChars = 'A'.repeat(2001);
+    assert.throws(
+      () =>
+        composer.composeInstructions({
+          resolvedSkills: [skillExplainCode],
+          product: 'chat',
+          userId: 'user-42',
+          userPreferences: {
+            customInstructions: longCustomChars,
+          },
+        }),
+      (err: Error) =>
+        err.message.includes('Custom instructions exceed maximum allowed limit of 2000 characters')
+    );
+  });
+
+  it('Scenario: accepts ResolvedSkillsResult and validates userId and product match', () => {
+    const resolvedResult = {
+      skills: [skillExplainCode],
+      totalEstimatedTokens: 16,
+      product: 'chat' as const,
+      userId: 'user-42',
+    };
+
+    // Matching userId and product succeeds
+    const result = composer.composeInstructions({
+      resolvedSkills: resolvedResult,
+      product: 'chat',
+      userId: 'user-42',
+    });
+    assert.strictEqual(result.appliedSkillsCount, 1);
+
+    // User mismatch fails
+    assert.throws(
+      () =>
+        composer.composeInstructions({
+          resolvedSkills: resolvedResult,
+          product: 'chat',
+          userId: 'attacker-user',
+        }),
+      (err: Error) =>
+        err.message.includes('Resolved skills userId mismatch')
+    );
+
+    // Product mismatch fails
+    assert.throws(
+      () =>
+        composer.composeInstructions({
+          resolvedSkills: resolvedResult,
+          product: 'agent',
+          userId: 'user-42',
+        }),
+      (err: Error) =>
+        err.message.includes('Resolved skills product mismatch')
+    );
   });
 });

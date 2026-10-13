@@ -15,13 +15,20 @@ import {
   type ComposedInstructionSegment,
   type SkillActivationManifest,
   type ResolvedSkillItem,
+  type ResolvedSkillsResult,
   MAX_CUSTOM_INSTRUCTIONS_BYTES,
+  MAX_CUSTOM_INSTRUCTIONS_CHARS,
   MAX_COMPOSED_OUTPUT_BYTES,
+  MAX_TOTAL_INSTRUCTION_BYTES,
   SkillConflictError,
   SkillValidationError,
   SkillError,
 } from './types.js';
-import { MAX_INSTRUCTION_BYTES } from './parser.js';
+import {
+  MAX_INSTRUCTION_BYTES,
+  estimateTokenCount,
+  getUtf8ByteCount,
+} from './parser.js';
 
 interface ConflictRule {
   type: string;
@@ -117,7 +124,7 @@ export class InstructionComposer {
    * and creates an immutable activation manifest.
    */
   public composeInstructions(request: ComposeInstructionsRequest): ComposedInstructionSegment {
-    const { resolvedSkills, product, userId, userPrompt, userPreferences } = request;
+    const { resolvedSkills: rawResolvedSkills, product, userId, userPrompt, userPreferences } = request;
 
     if (!userId || typeof userId !== 'string') {
       throw new SkillValidationError('SKILL_VALIDATION_ERROR', 'User ID is required for instruction composition');
@@ -129,6 +136,35 @@ export class InstructionComposer {
       );
     }
 
+    let resolvedSkills: ResolvedSkillItem[];
+    if (Array.isArray(rawResolvedSkills)) {
+      resolvedSkills = rawResolvedSkills;
+    } else if (
+      rawResolvedSkills &&
+      typeof rawResolvedSkills === 'object' &&
+      Array.isArray((rawResolvedSkills as ResolvedSkillsResult).skills)
+    ) {
+      const resultObj = rawResolvedSkills as ResolvedSkillsResult;
+      if (resultObj.userId !== userId) {
+        throw new SkillValidationError(
+          'SKILL_VALIDATION_ERROR',
+          `Resolved skills userId mismatch: expected '${userId}', got '${resultObj.userId}'`
+        );
+      }
+      if (resultObj.product !== product) {
+        throw new SkillValidationError(
+          'SKILL_INCOMPATIBLE_PRODUCT',
+          `Resolved skills product mismatch: expected '${product}', got '${resultObj.product}'`
+        );
+      }
+      resolvedSkills = resultObj.skills;
+    } else {
+      throw new SkillValidationError(
+        'SKILL_VALIDATION_ERROR',
+        'Invalid resolvedSkills input: expected array of skills or ResolvedSkillsResult'
+      );
+    }
+
     // 1. Revalidate input bounds on resolvedSkills
     if (resolvedSkills.length > 3) {
       throw new SkillError(
@@ -137,25 +173,54 @@ export class InstructionComposer {
       );
     }
 
+    let totalActualBytes = 0;
+    let totalActualTokens = 0;
+
     for (const skill of resolvedSkills) {
-      if (!skill.supportedProducts.includes(product)) {
+      if (!skill.supportedProducts || !skill.supportedProducts.includes(product)) {
         throw new SkillError(
           'SKILL_INCOMPATIBLE_PRODUCT',
           `Resolved skill '${skill.slug}' is incompatible with target product '${product}'`
         );
       }
-      const skillBytes = Buffer.byteLength(skill.instructions, 'utf8');
+      const skillBytes = getUtf8ByteCount(skill.instructions);
       if (skillBytes > MAX_INSTRUCTION_BYTES) {
         throw new SkillError(
           'SKILL_OVERSIZED',
           `Skill '${skill.slug}' instructions (${skillBytes} bytes) exceed maximum allowed size`
         );
       }
+      // Recompute token and byte counts directly from instructions text
+      const skillTokens = estimateTokenCount(skill.instructions);
+      totalActualBytes += skillBytes;
+      totalActualTokens += skillTokens;
+    }
+
+    // Enforce aggregate instruction size bounds independently (guards against forged estimates or direct composer bypass)
+    if (totalActualBytes > MAX_TOTAL_INSTRUCTION_BYTES) {
+      throw new SkillError(
+        'SKILL_BUDGET_EXCEEDED',
+        `Total skill instructions (${totalActualBytes} bytes) exceed maximum aggregate limit of ${MAX_TOTAL_INSTRUCTION_BYTES} bytes`
+      );
+    }
+
+    if (totalActualTokens > 2000) {
+      throw new SkillError(
+        'SKILL_BUDGET_EXCEEDED',
+        `Total skill instruction budget exceeded: approximately ${totalActualTokens} tokens exceeds limit of 2000 tokens`
+      );
     }
 
     // 2. Validate user preferences bounds
     if (userPreferences?.customInstructions) {
-      const customBytes = Buffer.byteLength(userPreferences.customInstructions, 'utf8');
+      const customChars = userPreferences.customInstructions.length;
+      if (customChars > MAX_CUSTOM_INSTRUCTIONS_CHARS) {
+        throw new SkillValidationError(
+          'SKILL_OVERSIZED',
+          `Custom instructions exceed maximum allowed limit of ${MAX_CUSTOM_INSTRUCTIONS_CHARS} characters (actual: ${customChars} characters)`
+        );
+      }
+      const customBytes = getUtf8ByteCount(userPreferences.customInstructions);
       if (customBytes > MAX_CUSTOM_INSTRUCTIONS_BYTES) {
         throw new SkillValidationError(
           'SKILL_OVERSIZED',
@@ -170,10 +235,8 @@ export class InstructionComposer {
     // 4. Build immutable activation manifest
     const manifestId = randomUUID();
     const activatedAt = new Date().toISOString();
-    let totalEstimatedTokens = 0;
 
     const manifestSkills = resolvedSkills.map((skill, index) => {
-      totalEstimatedTokens += skill.estimatedTokens;
       return Object.freeze({
         skillId: skill.skillId,
         versionId: skill.versionId,
@@ -190,7 +253,7 @@ export class InstructionComposer {
       resolverVersion: 'v0.1' as const,
       activatedAt,
       skills: Object.freeze(manifestSkills),
-      totalEstimatedTokens,
+      totalEstimatedTokens: totalActualTokens,
       preferencesRevision: userPreferences?.revision,
     });
 
@@ -261,7 +324,7 @@ export class InstructionComposer {
       content,
       manifest,
       appliedSkillsCount: resolvedSkills.length,
-      totalEstimatedTokens,
+      totalEstimatedTokens: manifest.totalEstimatedTokens,
     };
   }
 

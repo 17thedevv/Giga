@@ -118,7 +118,7 @@ export interface SkillActivationManifest {
 }
 
 export interface ComposeInstructionsRequest {
-  resolvedSkills: ResolvedSkillItem[];
+  resolvedSkills: ResolvedSkillsResult | ResolvedSkillItem[];
   product: ProductTarget;
   userId: string;
   userPrompt?: string;

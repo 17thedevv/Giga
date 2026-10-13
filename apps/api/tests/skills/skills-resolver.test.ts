@@ -481,4 +481,56 @@ describe('Skills Core — Resolver', () => {
         /was not found/i.test(err.message)
     );
   });
+
+  it('Scenario: private skill shadows built-in skill with the same slug for owner', async () => {
+    // Add a built-in skill with slug 'formatter'
+    storage.addSkill({
+      id: 'skill-builtin-fmt',
+      ownerId: null,
+      slug: 'formatter',
+      title: 'Built-in Formatter',
+      description: 'Default code formatter',
+      visibility: 'built_in',
+      supportedProducts: ['chat', 'agent'],
+      createdAt: '2026-10-13T00:00:00Z',
+    });
+    storage.addVersion({
+      id: 'ver-builtin-fmt-1',
+      skillId: 'skill-builtin-fmt',
+      versionNumber: 1,
+      contentHash: 'hash-fmt-builtin',
+      instructions: 'Format code according to standard conventions.',
+      createdAt: '2026-10-13T00:00:00Z',
+    });
+
+    // User A also creates a private skill with the same slug 'formatter'
+    storage.addSkill({
+      id: 'skill-userA-fmt',
+      ownerId: userA,
+      slug: 'formatter',
+      title: "User A's Custom Formatter",
+      description: 'Team specific formatting',
+      visibility: 'private',
+      supportedProducts: ['chat', 'agent'],
+      createdAt: '2026-10-13T00:00:00Z',
+    });
+    storage.addVersion({
+      id: 'ver-userA-fmt-1',
+      skillId: 'skill-userA-fmt',
+      versionNumber: 1,
+      contentHash: 'hash-fmt-userA',
+      instructions: 'Format code according to User A company style.',
+      createdAt: '2026-10-13T00:00:00Z',
+    });
+
+    // 1. Direct storage query for User A returns User A's private skill
+    const skillForUserA = await storage.getSkillBySlug('formatter', userA);
+    assert.strictEqual(skillForUserA?.id, 'skill-userA-fmt');
+    assert.strictEqual(skillForUserA?.title, "User A's Custom Formatter");
+
+    // 2. Direct storage query for User B returns the built-in skill
+    const skillForUserB = await storage.getSkillBySlug('formatter', userB);
+    assert.strictEqual(skillForUserB?.id, 'skill-builtin-fmt');
+    assert.strictEqual(skillForUserB?.title, 'Built-in Formatter');
+  });
 });

@@ -60,17 +60,28 @@ export class InMemorySkillStorage implements SkillStorage {
     slug: string,
     viewerUserId?: string
   ): Promise<SkillDefinition | null> {
+    let privateMatch: SkillDefinition | null = null;
+    let builtInMatch: SkillDefinition | null = null;
+
     for (const skill of this.skills.values()) {
       if (skill.slug === slug) {
-        // Built-in skills are visible to all authenticated viewers
-        if (skill.visibility === 'built_in') {
-          return { ...skill };
+        // Private skill owned by the viewer takes highest precedence
+        if (viewerUserId && skill.ownerId === viewerUserId && skill.visibility === 'private') {
+          privateMatch = skill;
+          break;
         }
-        // Private skills are strictly isolated to their owner
-        if (viewerUserId && skill.ownerId === viewerUserId) {
-          return { ...skill };
+        // Built-in skill is accessible if no private skill shadows it
+        if (skill.visibility === 'built_in' && !builtInMatch) {
+          builtInMatch = skill;
         }
       }
+    }
+
+    if (privateMatch) {
+      return { ...privateMatch };
+    }
+    if (builtInMatch) {
+      return { ...builtInMatch };
     }
     return null;
   }

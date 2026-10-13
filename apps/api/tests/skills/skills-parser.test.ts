@@ -353,4 +353,36 @@ Instructions`),
     // Emojis are accounted for
     assert.ok(tokensEmoji > 0, 'Emojis accounted for in token estimate');
   });
+
+  it('Scenario: rejects __proto__, constructor, and prototype in frontmatter to prevent prototype pollution', () => {
+    // __proto__ key must be rejected with SKILL_PARSE_ERROR
+    assert.throws(
+      () =>
+        parseSkillMarkdown(`---
+name: proto-polluter
+description: Valid description
+__proto__: evil
+---
+Instructions`),
+      (err: Error) =>
+        err instanceof SkillValidationError &&
+        err.code === 'SKILL_PARSE_ERROR' &&
+        /Forbidden frontmatter property '__proto__'/i.test(err.message)
+    );
+
+    // constructor key must be rejected with SKILL_PARSE_ERROR
+    assert.throws(
+      () =>
+        parseSkillMarkdown(`---
+name: proto-polluter
+description: Valid description
+constructor: evil
+---
+Instructions`),
+      (err: Error) =>
+        err instanceof SkillValidationError &&
+        err.code === 'SKILL_PARSE_ERROR' &&
+        /Forbidden frontmatter property 'constructor'/i.test(err.message)
+    );
+  });
 });
