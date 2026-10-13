@@ -52,12 +52,60 @@ const FORBIDDEN_CONTENT_PATTERNS = [
   { pattern: /\b(?:powershell|cmd)\.exe\b/i, reason: 'Direct shell binary invocations are prohibited in text-only skills' },
 ];
 
+const ALLOWED_FRONTMATTER_KEYS = new Set([
+  'name',
+  'description',
+  'title',
+  'supported_products',
+  'products',
+]);
+
 /**
- * Estimates token count conservatively using character count heuristic (4 chars per token).
+ * Estimates approximate token count conservatively across multilingual text.
+ *
+ * CAUTION: This is an approximate heuristic upper bound, NOT an exact model tokenizer.
+ * Character-to-token ratios vary by model architecture:
+ * - ASCII prose: ~3.5 to 4 characters per token
+ * - Vietnamese / Latin-ext diacritics: ~1.5 to 2.5 characters per token
+ * - CJK ideographs / Kana / Hangul: ~1 to 1.5 characters per token
+ * - Emojis / surrogate pairs: ~1 to 2 tokens per code point
+ *
+ * Hard UTF-8 byte limits (e.g. MAX_INSTRUCTION_BYTES) are enforced as the primary security bound.
  */
 export function estimateTokenCount(text: string): number {
   if (!text || text.length === 0) return 0;
-  return Math.ceil(text.length / 4);
+
+  let asciiCount = 0;
+  let cjkCount = 0;
+  let nonAsciiOtherCount = 0;
+
+  for (const char of text) {
+    const code = char.codePointAt(0) ?? 0;
+    if (code <= 127) {
+      asciiCount++;
+    } else if (
+      (code >= 0x4e00 && code <= 0x9fff) || // CJK Unified Ideographs
+      (code >= 0x3040 && code <= 0x30ff) || // Hiragana & Katakana
+      (code >= 0xac00 && code <= 0xd7af)    // Hangul Syllables
+    ) {
+      cjkCount++;
+    } else {
+      nonAsciiOtherCount++;
+    }
+  }
+
+  const asciiTokens = Math.ceil(asciiCount / 3.5);
+  const cjkTokens = Math.ceil(cjkCount * 1.2);
+  const otherTokens = Math.ceil(nonAsciiOtherCount / 1.5);
+
+  return asciiTokens + cjkTokens + otherTokens;
+}
+
+/**
+ * Returns raw UTF-8 byte length of a text string.
+ */
+export function getUtf8ByteCount(text: string): number {
+  return Buffer.byteLength(text, 'utf8');
 }
 
 /**
@@ -70,11 +118,12 @@ export function computeDeterministicHash(content: string): string {
 
 /**
  * Parses frontmatter YAML subset (key: value pairs, lists, basic strings).
- * Rejects nested objects, complex anchors, or arbitrary code.
+ * Rejects nested objects, complex anchors, duplicate keys, or arbitrary code.
  */
 function parseFrontmatterSubset(yamlText: string): Record<string, unknown> {
   const lines = yamlText.split(/\r?\n/);
   const result: Record<string, unknown> = {};
+  const seenKeys = new Set<string>();
   let currentKey: string | null = null;
   let currentList: string[] | null = null;
 
@@ -90,10 +139,17 @@ function parseFrontmatterSubset(yamlText: string): Record<string, unknown> {
 
     // List item (e.g. "  - chat")
     if (trimmed.startsWith('- ')) {
+      // Must be indented under the current list key
+      if (!rawLine.startsWith(' ') && !rawLine.startsWith('\t')) {
+        throw new SkillValidationError(
+          'SKILL_PARSE_ERROR',
+          `Malformed frontmatter: list item at line ${i + 1} must be indented under its parent key`
+        );
+      }
       if (!currentKey || !currentList) {
         throw new SkillValidationError(
           'SKILL_PARSE_ERROR',
-          `Malformed frontmatter: unexpected list item at line ${i + 1}`
+          `Malformed frontmatter: unexpected list item at line ${i + 1} without preceding list key`
         );
       }
       const itemVal = trimmed.slice(2).trim();
@@ -119,6 +175,15 @@ function parseFrontmatterSubset(yamlText: string): Record<string, unknown> {
         `Malformed frontmatter: empty key at line ${i + 1}`
       );
     }
+
+    const normalizedKey = key.toLowerCase();
+    if (seenKeys.has(normalizedKey)) {
+      throw new SkillValidationError(
+        'SKILL_PARSE_ERROR',
+        `Duplicate frontmatter key '${key}' at line ${i + 1}`
+      );
+    }
+    seenKeys.add(normalizedKey);
 
     // Save preceding list if active
     if (currentKey && currentList) {
@@ -232,12 +297,19 @@ export function parseSkillMarkdown(rawContent: string): ParsedSkill {
   // Parse frontmatter
   const frontmatter = parseFrontmatterSubset(frontmatterRaw);
 
-  // Validate forbidden keys (privilege escalation prevention)
+  // Validate allowed keys and forbidden keys
   for (const key of Object.keys(frontmatter)) {
-    if (FORBIDDEN_FRONTMATTER_KEYS.has(key.toLowerCase())) {
+    const lowerKey = key.toLowerCase();
+    if (FORBIDDEN_FRONTMATTER_KEYS.has(lowerKey)) {
       throw new SkillValidationError(
         'SKILL_UNSAFE_CONTENT',
         `Unsupported frontmatter field '${key}': skills in P0 cannot declare scripts, permissions, or tools`
+      );
+    }
+    if (!ALLOWED_FRONTMATTER_KEYS.has(lowerKey)) {
+      throw new SkillValidationError(
+        'SKILL_PARSE_ERROR',
+        `Unsupported frontmatter key '${key}': only 'name', 'description', 'title', and 'supported_products' are permitted in P0`
       );
     }
   }

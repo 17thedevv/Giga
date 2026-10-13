@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   parseSkillMarkdown,
   computeDeterministicHash,
+  estimateTokenCount,
   MAX_INSTRUCTION_BYTES,
 } from '../../src/modules/skills/parser.js';
 import { SkillValidationError } from '../../src/modules/skills/types.js';
@@ -271,5 +272,85 @@ rm -rf /`),
         err.code === 'SKILL_UNSAFE_CONTENT' &&
         /Executable shebang scripts are prohibited/i.test(err.message)
     );
+  });
+
+  it('Scenario: rejects unknown frontmatter keys in strict subset', () => {
+    assert.throws(
+      () =>
+        parseSkillMarkdown(`---
+name: unknown-key-skill
+description: Valid description
+author: Alice
+---
+Instructions`),
+      (err: Error) =>
+        err instanceof SkillValidationError &&
+        err.code === 'SKILL_PARSE_ERROR' &&
+        /Unsupported frontmatter key 'author'/i.test(err.message)
+    );
+
+    assert.throws(
+      () =>
+        parseSkillMarkdown(`---
+name: unknown-key-skill
+description: Valid description
+version: 1.0.0
+---
+Instructions`),
+      (err: Error) =>
+        err instanceof SkillValidationError &&
+        err.code === 'SKILL_PARSE_ERROR' &&
+        /Unsupported frontmatter key 'version'/i.test(err.message)
+    );
+  });
+
+  it('Scenario: rejects duplicate frontmatter keys', () => {
+    assert.throws(
+      () =>
+        parseSkillMarkdown(`---
+name: skill-one
+description: First description
+name: skill-two
+---
+Instructions`),
+      (err: Error) =>
+        err instanceof SkillValidationError &&
+        err.code === 'SKILL_PARSE_ERROR' &&
+        /Duplicate frontmatter key 'name'/i.test(err.message)
+    );
+  });
+
+  it('Scenario: rejects unindented list items in frontmatter', () => {
+    assert.throws(
+      () =>
+        parseSkillMarkdown(`---
+name: bad-list-skill
+description: Valid description
+supported_products:
+- chat
+---
+Instructions`),
+      (err: Error) =>
+        err instanceof SkillValidationError &&
+        err.code === 'SKILL_PARSE_ERROR' &&
+        /must be indented under its parent key/i.test(err.message)
+    );
+  });
+
+  it('Scenario: conservative multilingual token estimation for Vietnamese, CJK, and Emojis', () => {
+    const viText = 'Hướng dẫn giải thích mã nguồn chi tiết bằng tiếng Việt';
+    const cjkText = '详细解释代码功能，包括核心逻辑与架构';
+    const emojiText = '🚀🔥⚡💻🎯';
+
+    const tokensVi = estimateTokenCount(viText);
+    const tokensCjk = estimateTokenCount(cjkText);
+    const tokensEmoji = estimateTokenCount(emojiText);
+
+    // Vietnamese diacritics are conservatively estimated higher than ASCII length/4
+    assert.ok(tokensVi > viText.length / 4, 'Vietnamese diacritics estimated conservatively');
+    // CJK characters have at least 1 token per ideograph
+    assert.ok(tokensCjk >= cjkText.length, 'CJK characters estimated conservatively');
+    // Emojis are accounted for
+    assert.ok(tokensEmoji > 0, 'Emojis accounted for in token estimate');
   });
 });
