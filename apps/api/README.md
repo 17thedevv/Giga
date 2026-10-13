@@ -1,94 +1,213 @@
 # Giga API
 
-**Purpose:** Giga's TypeScript backend service built with Node.js and Hono, providing HTTP endpoints, streaming AI Chat, coding-agent orchestration, persistence and cloud health/operations.
+**Purpose:** Authenticated TypeScript backend service built with Node.js and Hono, providing persistent user accounts, session-based authentication, streaming AI Chat, coding-agent orchestration, and operations.
 
-> **Status:** Runnable backend scaffold (Task 17T-10). Node.js, Hono and strict TypeScript serve as the provisional stack. The API Contract remains **DRAFT** until joint freeze at the W1/W2 gate.
+> **Status:** Runnable backend with PostgreSQL persistence and session authentication (Task 17T-20). The API Contract remains **DRAFT** until joint review and freeze at the W1/W2 gate.
 
-## Architecture and boundaries
+---
 
-- `src/app/`: Application bootstrap, HTTP adapters, configuration, and app factory (`createApp`) separated from network socket binding (`startServer`).
-- `src/modules/auth/`: Authentication/session logic and account policy *(planned)*.
-- `src/modules/conversations/`: Conversation and message operations *(planned)*.
-- `src/modules/agent/`: Bounded agent run lifecycle and approvals *(planned)*.
-- `src/integrations/llm/`: Remote model/provider adapters *(planned)*.
-- `src/integrations/github/`: GitHub API tools with least-privilege access *(planned)*.
-- `src/db/`: Persistence adapter and reviewed migrations *(planned)*.
-- `tests/`: Unit and integration test suites.
+## 1. Architecture & Module Boundaries
 
-## Getting started
+- `src/app/`: HTTP application factory (`createApp`), configuration loader, and server socket entry point (`startServer`).
+- `src/db/`:
+  - `client.ts`: PostgreSQL connection pool management via `pg.Pool`, health ping probe, and credential URL redaction.
+  - `migrate.ts` & `migrate-cli.ts`: Deterministic, transaction-safe migration runner tracking executed versions in `schema_migrations`.
+  - `migrations/`: Forward-only SQL migration scripts.
+  - `repositories/`: Type-safe data access layer (`UserRepository`, `SessionRepository`) using parameterized queries.
+- `src/modules/auth/`:
+  - `password.ts`: Memory-hard password hashing and verification using **Argon2id**.
+  - `session.ts`: Cryptographically secure 256-bit token generation (`crypto.randomBytes(32)`), SHA-256 token hashing, and cookie configuration.
+  - `auth-validation.ts`: Runtime input validation and structured domain error definitions.
+  - `auth-service.ts`: Core authentication logic (register, login, session validation, logout).
+  - `auth-middleware.ts`: Reusable session authentication middleware for protected routes.
+  - `csrf-middleware.ts`: Origin validation for state-changing HTTP requests.
+  - `auth-routes.ts`: HTTP endpoints mounted under `/api/v1/auth`.
+- `tests/`: Automated unit and integration test suites.
 
-All commands should be executed inside `apps/api`:
+---
 
-```bash
-cd apps/api
-```
+## 2. Database Schema
 
-### Prerequisites
+The database design uses strict foreign keys, UTC timestamps, and uniqueness constraints:
 
-- Node.js >= 20 (recommended: Node.js 22 LTS or 24)
-- npm >= 10
+### `users` table
+| Column | Type | Constraints | Description |
+|---|---|---|---|
+| `id` | `UUID` | `PRIMARY KEY DEFAULT gen_random_uuid()` | Unique user identifier |
+| `email` | `VARCHAR(255)` | `NOT NULL` | User email (case-insensitive unique index) |
+| `display_name` | `VARCHAR(100)` | `NOT NULL` | Public display name |
+| `password_hash` | `VARCHAR(255)` | `NOT NULL` | Argon2id password hash |
+| `created_at` | `TIMESTAMPTZ` | `NOT NULL DEFAULT NOW()` | Account creation time |
+| `updated_at` | `TIMESTAMPTZ` | `NOT NULL DEFAULT NOW()` | Last update timestamp |
 
-### Installation
+### `sessions` table
+| Column | Type | Constraints | Description |
+|---|---|---|---|
+| `id` | `UUID` | `PRIMARY KEY DEFAULT gen_random_uuid()` | Unique session record ID |
+| `user_id` | `UUID` | `NOT NULL REFERENCES users(id) ON DELETE CASCADE` | Associated user |
+| `token_hash` | `VARCHAR(64)` | `NOT NULL UNIQUE` | SHA-256 hash of the 256-bit session token |
+| `expires_at` | `TIMESTAMPTZ` | `NOT NULL` | Session expiry timestamp (7 days) |
+| `created_at` | `TIMESTAMPTZ` | `NOT NULL DEFAULT NOW()` | Session establishment timestamp |
+| `revoked_at` | `TIMESTAMPTZ` | `NULL` | Revocation timestamp on logout |
 
-```bash
-npm ci
-```
+### `schema_migrations` table
+| Column | Type | Constraints | Description |
+|---|---|---|---|
+| `version` | `INTEGER` | `PRIMARY KEY` | Incremental migration version |
+| `name` | `VARCHAR(255)` | `NOT NULL` | Migration identifier |
+| `applied_at` | `TIMESTAMPTZ` | `NOT NULL DEFAULT NOW()` | Execution timestamp |
 
-### Development
+---
 
-Run the development server with live reload:
+## 3. Configuration & Environment Variables
 
-```bash
-npm run dev
-```
-
-### Typecheck
-
-Run strict TypeScript typechecking without emitting files:
-
-```bash
-npm run typecheck
-```
-
-### Build
-
-Compile TypeScript source files into `dist/`:
-
-```bash
-npm run build
-```
-
-### Start production server
-
-Start the compiled service from `dist/`:
-
-```bash
-npm start
-```
-
-### Tests
-
-Execute automated unit and integration tests:
+Create `.env` based on `.env.example`:
 
 ```bash
-npm test
+cp .env.example .env
 ```
-
-## Configuration
-
-Configuration is managed via environment variables and loaded with fail-fast validation in `src/app/config.ts`:
 
 | Variable | Type | Default | Description |
 |---|---|---|---|
-| `PORT` | Integer (1–65535) | `3000` | HTTP port for the network socket. Fails fast at startup if non-numeric, floating point, or outside 1–65535. |
+| `PORT` | Integer (1–65535) | `3000` | HTTP port. Fails fast at startup if invalid. |
+| `DATABASE_URL` | String | *(optional in dev/test)* | PostgreSQL connection URL. Required in production. |
+| `NODE_ENV` | String | `development` | Environment mode (`development`, `production`, `test`). |
+| `COOKIE_SECURE` | Boolean | `false` in dev, `true` in prod | Sets `Secure` flag on session cookies (requires HTTPS in production). |
+| `COOKIE_SAME_SITE` | String | `lax` | Cookie `SameSite` policy (`lax`, `strict`, or `none`). |
+| `ALLOWED_ORIGINS` | String (csv) | *(empty)* | Trusted origins for CSRF origin validation. |
 
-## Current endpoints
+---
 
-- `GET /health` — Returns HTTP 200 with status JSON (`{"status":"ok","service":"giga-api","timestamp":"..."}`). Safe and lightweight with zero credentials exposed.
-- Unknown routes return HTTP 404 with structured error shape (`{"error":{"code":"NOT_FOUND","message":"Route not found"}}`).
+## 4. Local Development & PostgreSQL Setup
 
-## Security invariants
+### Option A: Local Docker PostgreSQL
+Start the local PostgreSQL container:
 
-- Never expose provider tokens, database credentials, or secret keys to clients or logs.
-- Never output stack traces, sensitive system information, or internal error objects in HTTP responses.
-- Enforce strict input validation on all future request boundaries.
+```bash
+docker compose -f ../../infra/docker/docker-compose.dev.yml up -d
+```
+
+### Option B: Automatic In-Memory Fallback for Tests
+Automated tests automatically fall back to an isolated in-memory PostgreSQL engine (`pg-mem`) when `DATABASE_URL` is not set, allowing instant test runs on any developer workstation without local Docker.
+
+### Run Migrations
+Run forward database migrations against your configured database:
+
+```bash
+npm run migrate
+```
+
+---
+
+## 5. Development & Execution Scripts
+
+All commands run inside `apps/api`:
+
+```bash
+# Install dependencies reproducibly
+npm ci
+
+# Start development server with live reload
+npm run dev
+
+# Run TypeScript strict typecheck
+npm run typecheck
+
+# Build production bundle to dist/
+npm run build
+
+# Start production server
+npm start
+
+# Run automated tests
+npm test
+```
+
+---
+
+## 6. API Endpoints & Request Examples
+
+### Health Check (Process Health)
+- **`GET /health`** (200 OK)
+  Lightweight process health probe that does not require database access.
+  ```json
+  {
+    "status": "ok",
+    "service": "giga-api",
+    "timestamp": "2026-10-13T03:10:35.887Z"
+  }
+  ```
+
+### Registration
+- **`POST /api/v1/auth/register`** (201 Created)
+  Request:
+  ```json
+  {
+    "email": "user@example.com",
+    "password": "StrongPassword123!",
+    "displayName": "Test User"
+  }
+  ```
+  Response:
+  ```json
+  {
+    "user": {
+      "id": "1e86a032-4166-4e5a-939e-e31b798782a2",
+      "email": "user@example.com",
+      "displayName": "Test User",
+      "createdAt": "2026-10-13T03:45:00.000Z"
+    }
+  }
+  ```
+
+### Login
+- **`POST /api/v1/auth/login`** (200 OK)
+  Request:
+  ```json
+  {
+    "email": "user@example.com",
+    "password": "StrongPassword123!"
+  }
+  ```
+  Response:
+  ```json
+  {
+    "user": {
+      "id": "1e86a032-4166-4e5a-939e-e31b798782a2",
+      "email": "user@example.com",
+      "displayName": "Test User",
+      "createdAt": "2026-10-13T03:45:00.000Z"
+    }
+  }
+  ```
+  Headers:
+  `Set-Cookie: giga_session=<64-char-token>; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800`
+
+### Current Authenticated User
+- **`GET /api/v1/auth/me`** (200 OK)
+  Requires `giga_session` cookie.
+  Response:
+  ```json
+  {
+    "user": {
+      "id": "1e86a032-4166-4e5a-939e-e31b798782a2",
+      "email": "user@example.com",
+      "displayName": "Test User",
+      "createdAt": "2026-10-13T03:45:00.000Z"
+    }
+  }
+  ```
+
+### Logout
+- **`POST /api/v1/auth/logout`** (204 No Content)
+  Revokes session token in database and sets `Max-Age=0` on `giga_session` cookie.
+
+---
+
+## 7. Security Invariants & Limitations
+
+- **Argon2id Password Hashing:** Passwords are never stored in plaintext and never returned in API responses.
+- **Session Token Hashing:** Raw session tokens are never stored in the database. PostgreSQL stores SHA-256 hashes only.
+- **Account Enumeration Prevention:** Incorrect credentials and unknown email queries return an identical generic error message (`Invalid email or password`).
+- **No Leaked Stack Traces:** All errors follow canonical JSON error shape (`{"error":{"code":"...","message":"..."}}`).
+- **Cross-Origin / Cookie Deployment Gate:** The final decision between same-origin reverse proxy vs cross-site `SameSite=None; Secure` cookies remains pending real browser testing at the W2 cloud deployment gate.
