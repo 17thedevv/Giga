@@ -1,8 +1,9 @@
-# Infrastructure (planned)
+# Infrastructure
 
 Deployment definitions and operational configuration for Giga.
 
-- `docker/`: optional container definitions if needed by the selected deployment.
+- `docker/`: container definitions and local developer environments.
+  - `docker-compose.dev.yml`: local isolated PostgreSQL 16 container for development and testing.
 - `render/`: **provisional** Render deployment definitions if Render is confirmed.
 - `../docs/cloud/runbooks/`: reproducible deployment, verification, monitoring and rollback guides.
 
