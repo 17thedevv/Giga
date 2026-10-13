@@ -48,6 +48,9 @@ type ApiError = { code: string; message: string; details?: Record<string, unknow
 
 ## 4. Conversations & Chat
 
+> **2026-10-13 approved product direction, proposed technical detail:** See [GigaChat Runtime v0.2](../architecture/GIGACHAT_RUNTIME_V0.2.md), [Shared LLM Engine v0.1](../architecture/LLM_ENGINE_V0.1.md) and [Runtime API/SSE addendum](GIGACHAT_RUNTIME_API_V0.2.md). The existing POST stream route and message.started/delta/completed core remain a DRAFT starting point. Generation status + Stop + streamed retry/regenerate transport, additive terminal events and idempotency header still require Trà/Thư compatibility review; they are **not implemented or frozen**.
+
+
 | Method | Path | Input | Output |
 |---|---|---|---|
 | GET | `/api/v1/conversations?cursor=&limit=20` | query pagination | `200 { items: Conversation[], nextCursor }` |

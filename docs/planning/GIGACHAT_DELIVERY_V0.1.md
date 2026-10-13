@@ -9,6 +9,9 @@
 | G0 — stabilize | Finish 17T-23 auth CSRF/test DB safety; review API 17T-8 | Review auth/security and typed client behavior | Safe test DB, approved candidate auth contract, CI |
 | G1 — history | 17T-21 migrations 002, authenticated conversation/message repos | Conversation list/details UI; empty/unauthorized/error | Owner-scoped persistence across restart; peer review |
 | G2 — real chat | LLM provider adapter, bounded context, POST chat SSE and persisted completion | Chat composer, incremental fetch SSE parser, abort/retry states | Valid complete/error/abort streams and persisted messages |
+
+**G2 design reference (approved product behavior, not implementation):** [GigaChat Runtime v0.2](../architecture/GIGACHAT_RUNTIME_V0.2.md), [Shared LLM Engine v0.1](../architecture/LLM_ENGINE_V0.1.md), [Draft SSE/Generation API](../contracts/GIGACHAT_RUNTIME_API_V0.2.md), [ADR-004](../decisions/ADR-004-chat-generation-lifecycle.md) and [Verification](../architecture/GIGACHAT_RUNTIME_TEST_PLAN_V0.2.md). First build real text streaming + persisted completion, then Stop/retry variants in reviewed slices; do not mix 17T-21 history CRUD with LLM/runtime implementation.
+
 | G3 — manual memory | Review Memory spec; pgvector-capable DB migration, settings/manual CRUD, embedding adapter | Memory toggle, list/edit/delete, index status UI | Owner isolation, manual save→retrieve→forget tests |
 | G4 — suggested + auto | Extraction worker, dedup, suppression, consent revision and retries | Suggestion accept/reject, explicit auto opt-in | No silent autosave in suggest, no resurrection on delete |
 | G5 — RAG quality | Retriever, ranking evaluation, token budgets and provider fallback | Safe memory source/context visibility | Labeled recall metrics; no cross-user/stale hits |
