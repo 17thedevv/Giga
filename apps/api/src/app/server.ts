@@ -1,11 +1,48 @@
 import { serve, type ServerType } from '@hono/node-server';
+import type pg from 'pg';
 import { createApp } from './create-app.js';
-import { loadConfig } from './config.js';
+import { loadConfig, type AppConfig } from './config.js';
+import { createDatabasePool, redactDatabaseUrl } from '../db/client.js';
+import { runMigrations } from '../db/migrate.js';
 
-export function startServer(overridePort?: number): ServerType {
-  const config = loadConfig();
-  const port = overridePort ?? config.port;
-  const app = createApp();
+export interface StartServerOptions {
+  readonly port?: number;
+  readonly pool?: pg.Pool;
+  readonly config?: AppConfig;
+  readonly skipMigrations?: boolean;
+}
+
+export async function startServer(options: StartServerOptions = {}): Promise<{
+  server: ServerType;
+  pool?: pg.Pool;
+  port: number;
+}> {
+  const config = options.config ?? loadConfig();
+  const port = options.port ?? config.port;
+
+  let pool = options.pool;
+
+  if (!pool && config.databaseUrl) {
+    console.log(`[giga-api] Initializing PostgreSQL connection: ${redactDatabaseUrl(config.databaseUrl)}`);
+    pool = createDatabasePool({ connectionString: config.databaseUrl });
+
+    if (!options.skipMigrations) {
+      try {
+        const applied = await runMigrations(pool);
+        if (applied.length > 0) {
+          console.log(`[giga-api] Database migrations applied: ${applied.join(', ')}`);
+        }
+      } catch (err) {
+        console.error('[giga-api] Database migration error on startup:', err);
+        throw err;
+      }
+    }
+  }
+
+  const app = createApp({
+    pool,
+    config,
+  });
 
   const server = serve(
     {
@@ -17,5 +54,5 @@ export function startServer(overridePort?: number): ServerType {
     }
   );
 
-  return server;
+  return { server, pool, port };
 }
