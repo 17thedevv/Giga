@@ -9,6 +9,13 @@ export interface AppConfig {
 
 export const DEFAULT_PORT = 3000;
 
+export const DEFAULT_DEV_ORIGINS: readonly string[] = [
+  'http://localhost:3000',
+  'http://localhost:5173',
+  'http://127.0.0.1:3000',
+  'http://127.0.0.1:5173',
+];
+
 export function parsePort(rawPort: string | undefined): number {
   if (rawPort === undefined || rawPort.trim() === '') {
     return DEFAULT_PORT;
@@ -42,8 +49,69 @@ export function parseSameSite(rawSameSite?: string): 'lax' | 'strict' | 'none' {
   throw new Error(`Invalid COOKIE_SAME_SITE configuration: "${rawSameSite}". Must be 'lax', 'strict', or 'none'.`);
 }
 
+/**
+ * Validates and normalizes allowed CORS / CSRF origins.
+ * Fail-closed in production: missing origin config or wildcard '*' causes startup validation error.
+ */
+export function parseAllowedOrigins(
+  rawOrigins: string | undefined,
+  isProduction: boolean
+): string[] {
+  if (!rawOrigins || rawOrigins.trim() === '') {
+    if (isProduction) {
+      throw new Error('ALLOWED_ORIGINS environment variable is required in production mode.');
+    }
+    return [...DEFAULT_DEV_ORIGINS];
+  }
+
+  const list = rawOrigins
+    .split(',')
+    .map((o) => o.trim())
+    .filter((o) => o.length > 0);
+
+  if (list.length === 0) {
+    if (isProduction) {
+      throw new Error('ALLOWED_ORIGINS environment variable is required in production mode.');
+    }
+    return [...DEFAULT_DEV_ORIGINS];
+  }
+
+  for (const origin of list) {
+    if (origin === '*') {
+      if (isProduction) {
+        throw new Error("Wildcard origin '*' is forbidden in production mode.");
+      }
+      continue;
+    }
+
+    try {
+      const url = new URL(origin);
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+        throw new Error(`Invalid origin protocol in '${origin}'. Allowed protocols: http, https.`);
+      }
+      if (url.origin.toLowerCase() !== origin.toLowerCase()) {
+        throw new Error(
+          `Origin '${origin}' must be an exact origin (scheme + host + optional port) without paths or trailing slashes.`
+        );
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      throw new Error(`Invalid origin '${origin}': ${message}`);
+    }
+  }
+
+  return list;
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
-  const nodeEnv = (env.NODE_ENV === 'production' ? 'production' : env.NODE_ENV === 'test' ? 'test' : 'development') as 'development' | 'production' | 'test';
+  const nodeEnv = (
+    env.NODE_ENV === 'production'
+      ? 'production'
+      : env.NODE_ENV === 'test'
+        ? 'test'
+        : 'development'
+  ) as 'development' | 'production' | 'test';
+
   const port = parsePort(env.PORT);
 
   const databaseUrl = env.DATABASE_URL?.trim();
@@ -57,9 +125,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
 
   const cookieSameSite = parseSameSite(env.COOKIE_SAME_SITE);
 
-  const allowedOrigins = env.ALLOWED_ORIGINS
-    ? env.ALLOWED_ORIGINS.split(',').map((o) => o.trim()).filter((o) => o.length > 0)
-    : [];
+  const allowedOrigins = parseAllowedOrigins(env.ALLOWED_ORIGINS, nodeEnv === 'production');
 
   return {
     port,
