@@ -22,6 +22,12 @@
   - `auth-middleware.ts`: Reusable session authentication middleware for protected routes.
   - `csrf-middleware.ts`: Origin validation for state-changing HTTP requests.
   - `auth-routes.ts`: HTTP endpoints mounted under `/api/v1/auth`.
+- `src/modules/skills/`:
+  - `types.ts`: Domain models, activation manifest interfaces, and structured domain errors.
+  - `parser.ts`: Strict parser for supported text-only `SKILL.md` subset with deterministic SHA-256 hashing.
+  - `storage.ts`: Storage abstraction (`SkillStorage`) and in-memory implementation (`InMemorySkillStorage`).
+  - `resolver.ts`: Policy-guarded Resolver enforcing tenant isolation, enablement, product compatibility, and budget bounds.
+  - `composer.ts`: Instruction Composer with conflict detection, user prompt style precedence, and immutable activation manifests.
 - `tests/`: Automated unit and integration test suites.
 
 ---
