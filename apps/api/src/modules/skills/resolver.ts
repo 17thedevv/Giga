@@ -9,24 +9,28 @@
  * Authoritative docs: docs/architecture/GIGA_SKILLS_ENGINE_V0.1.md
  */
 
-import { estimateTokenCount } from './parser.js';
+import { estimateTokenCount, getUtf8ByteCount } from './parser.js';
 import type { SkillStorage } from './storage.js';
 import {
   type SkillResolutionRequest,
   type ResolvedSkillsResult,
   type ResolvedSkillItem,
   type SkillActivationSource,
+  type SkillVersion,
+  MAX_TOTAL_INSTRUCTION_BYTES,
   SkillResolutionError,
 } from './types.js';
 
 export interface SkillLimits {
   maxActiveSkills: number;
   maxInstructionTokens: number;
+  maxInstructionBytes: number;
 }
 
 export const DEFAULT_SKILL_LIMITS: SkillLimits = {
   maxActiveSkills: 3,
   maxInstructionTokens: 2000,
+  maxInstructionBytes: MAX_TOTAL_INSTRUCTION_BYTES,
 };
 
 export class SkillResolver {
@@ -38,6 +42,7 @@ export class SkillResolver {
     this.limits = {
       maxActiveSkills: limits.maxActiveSkills ?? DEFAULT_SKILL_LIMITS.maxActiveSkills,
       maxInstructionTokens: limits.maxInstructionTokens ?? DEFAULT_SKILL_LIMITS.maxInstructionTokens,
+      maxInstructionBytes: limits.maxInstructionBytes ?? DEFAULT_SKILL_LIMITS.maxInstructionBytes,
     };
   }
 
@@ -115,13 +120,14 @@ export class SkillResolver {
     // 3. Resolve each candidate skill definition, installation, and immutable version
     const resolvedItems: ResolvedSkillItem[] = [];
     let totalEstimatedTokens = 0;
+    let totalInstructionBytes = 0;
 
     for (const candidate of candidateList) {
-      // Lookup skill definition
+      // Lookup skill definition by ID
       let skill = await this.storage.getSkill(candidate.skillId);
       if (!skill) {
-        // Fallback: try by slug
-        skill = await this.storage.getSkillBySlug(candidate.skillId);
+        // Fallback: try by slug ONLY within user's own skills or built-in skills (prevents tenant leakage)
+        skill = await this.storage.getSkillBySlug(candidate.skillId, userId);
       }
 
       if (!skill) {
@@ -163,24 +169,31 @@ export class SkillResolver {
         );
       }
 
-      // Immutable Version selection
-      let version = installation.selectedVersionId
-        ? await this.storage.getSkillVersion(installation.selectedVersionId)
-        : null;
-
-      if (!version) {
+      // Immutable Version selection with strict integrity checks (fail closed, no silent fallback)
+      let version: SkillVersion | null = null;
+      if (installation.selectedVersionId) {
+        version = await this.storage.getSkillVersion(installation.selectedVersionId);
+        if (!version || version.skillId !== skill.id) {
+          throw new SkillResolutionError(
+            'SKILL_NOT_FOUND',
+            `Selected version '${installation.selectedVersionId}' for skill '${skill.slug}' is missing or does not belong to this skill`
+          );
+        }
+      } else {
         version = await this.storage.getLatestSkillVersion(skill.id);
-      }
-
-      if (!version) {
-        throw new SkillResolutionError(
-          'SKILL_NOT_FOUND',
-          `No valid version found for skill '${skill.slug}'`
-        );
+        if (!version || version.skillId !== skill.id) {
+          throw new SkillResolutionError(
+            'SKILL_NOT_FOUND',
+            `No valid version found for skill '${skill.slug}'`
+          );
+        }
       }
 
       const tokens = estimateTokenCount(version.instructions);
+      const bytes = getUtf8ByteCount(version.instructions);
+
       totalEstimatedTokens += tokens;
+      totalInstructionBytes += bytes;
 
       resolvedItems.push({
         skillId: skill.id,
@@ -196,11 +209,18 @@ export class SkillResolver {
       });
     }
 
-    // 4. Validate total instruction tokens budget
+    // 4. Validate total instruction size bounds (hard byte limit and approximate token budget)
+    if (totalInstructionBytes > this.limits.maxInstructionBytes) {
+      throw new SkillResolutionError(
+        'SKILL_BUDGET_EXCEEDED',
+        `Total skill instruction size (${totalInstructionBytes} bytes) exceeds limit of ${this.limits.maxInstructionBytes} bytes`
+      );
+    }
+
     if (totalEstimatedTokens > this.limits.maxInstructionTokens) {
       throw new SkillResolutionError(
         'SKILL_BUDGET_EXCEEDED',
-        `Total skill instruction budget exceeded: ${totalEstimatedTokens} tokens exceeds limit of ${this.limits.maxInstructionTokens} tokens`
+        `Total skill instruction budget exceeded: approximately ${totalEstimatedTokens} tokens exceeds limit of ${this.limits.maxInstructionTokens} tokens`
       );
     }
 

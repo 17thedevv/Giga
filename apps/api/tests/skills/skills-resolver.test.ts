@@ -406,4 +406,79 @@ describe('Skills Core — Resolver', () => {
     assert.strictEqual(result.skills.length, 0);
     assert.strictEqual(result.totalEstimatedTokens, 0);
   });
+
+  it('Scenario: rejects mismatched version belonging to another skill (fails closed)', async () => {
+    // User A installs skill-builtin-1, but selectedVersionId maliciously/erroneously points to version-custom-v1 (belonging to skill-custom-userA)
+    storage.addInstallation({
+      id: 'inst-mismatch',
+      userId: userA,
+      skillId: 'skill-builtin-1',
+      selectedVersionId: 'version-custom-v1', // Foreign version from skill-custom-userA!
+      enabled: true,
+      installedAt: '2026-10-13T00:00:00Z',
+    });
+
+    await assert.rejects(
+      async () =>
+        resolver.resolveSkills({
+          userId: userA,
+          product: 'chat',
+          selectedSkillIds: ['skill-builtin-1'],
+        }),
+      (err: Error) =>
+        err instanceof SkillResolutionError &&
+        err.code === 'SKILL_NOT_FOUND' &&
+        /does not belong to this skill/i.test(err.message)
+    );
+  });
+
+  it('Scenario: rejects deleted or stale selected version without silent fallback to latest', async () => {
+    storage.addInstallation({
+      id: 'inst-stale',
+      userId: userA,
+      skillId: 'skill-builtin-1',
+      selectedVersionId: 'non-existent-version-id',
+      enabled: true,
+      installedAt: '2026-10-13T00:00:00Z',
+    });
+
+    await assert.rejects(
+      async () =>
+        resolver.resolveSkills({
+          userId: userA,
+          product: 'chat',
+          selectedSkillIds: ['skill-builtin-1'],
+        }),
+      (err: Error) =>
+        err instanceof SkillResolutionError &&
+        err.code === 'SKILL_NOT_FOUND' &&
+        /missing or does not belong to this skill/i.test(err.message)
+    );
+  });
+
+  it('Scenario: slug lookup is owner-isolated and rejects cross-tenant private slugs', async () => {
+    // User A has private skill with slug 'custom-qa'
+    storage.addInstallation({
+      id: 'inst-A',
+      userId: userA,
+      skillId: 'skill-custom-userA',
+      selectedVersionId: 'version-custom-v1',
+      enabled: true,
+      installedAt: '2026-10-13T00:00:00Z',
+    });
+
+    // User B tries to resolve User A's private skill using its slug 'custom-qa'
+    await assert.rejects(
+      async () =>
+        resolver.resolveSkills({
+          userId: userB,
+          product: 'chat',
+          selectedSkillIds: ['custom-qa'],
+        }),
+      (err: Error) =>
+        err instanceof SkillResolutionError &&
+        err.code === 'SKILL_NOT_FOUND' &&
+        /was not found/i.test(err.message)
+    );
+  });
 });

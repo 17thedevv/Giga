@@ -16,7 +16,7 @@ import type {
 
 export interface SkillStorage {
   getSkill(skillId: string): Promise<SkillDefinition | null>;
-  getSkillBySlug(slug: string): Promise<SkillDefinition | null>;
+  getSkillBySlug(slug: string, viewerUserId?: string): Promise<SkillDefinition | null>;
   getSkillVersion(versionId: string): Promise<SkillVersion | null>;
   getLatestSkillVersion(skillId: string): Promise<SkillVersion | null>;
   getInstallation(userId: string, skillId: string): Promise<SkillInstallation | null>;
@@ -56,10 +56,20 @@ export class InMemorySkillStorage implements SkillStorage {
     return skill ? { ...skill } : null;
   }
 
-  public async getSkillBySlug(slug: string): Promise<SkillDefinition | null> {
+  public async getSkillBySlug(
+    slug: string,
+    viewerUserId?: string
+  ): Promise<SkillDefinition | null> {
     for (const skill of this.skills.values()) {
       if (skill.slug === slug) {
-        return { ...skill };
+        // Built-in skills are visible to all authenticated viewers
+        if (skill.visibility === 'built_in') {
+          return { ...skill };
+        }
+        // Private skills are strictly isolated to their owner
+        if (viewerUserId && skill.ownerId === viewerUserId) {
+          return { ...skill };
+        }
       }
     }
     return null;
