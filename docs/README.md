@@ -47,6 +47,24 @@ The product direction **Hybrid Memory** was selected on 2026-10-13. The detailed
 
 Original v0.1 Agent GitHub-only UX/contract assumptions are marked historical or revised in the DRAFT; Chat/Auth flows remain distinct. **Locked INV-07 is still effective** until ADR-003 is reviewed.
 
+## Giga Skills, Profiles and Plugins v0.1
+
+**Product decision accepted 2026-10-13:** Skills are a shared behavior layer for **both** independent GigaChat and GigaAgent products. Built-in + private Custom Text Skills, SKILL.md-compatible authoring and **manual activation** are first. Profile preferences and Memory are separate; a Skill does not grant a plugin, tool or data permission. Technical specs below are **DRAFT and not implemented**.
+
+| Document | Purpose | Status |
+|---|---|---|
+| [Skills Engine](architecture/GIGA_SKILLS_ENGINE_V0.1.md) | Resolver, instruction composition, activation scope, versioning and conflict policy | Technical proposal |
+| [Profiles & Personalization](architecture/GIGA_PROFILES_PERSONALIZATION_V0.1.md) | User response preferences, named AI Profiles and privacy boundaries | Draft |
+| [Plugin Registry & MCP](architecture/GIGA_PLUGINS_MCP_V0.1.md) | Connection, grants, audited tools and approval; future integration | Deferred implementation |
+| [Skills Data Model](architecture/GIGA_SKILLS_DATA_MODEL_V0.1.md) | Owner-scoped skills, immutable revisions, activation manifests and grants | Non-executable draft |
+| [Skills / Profiles / Plugins API](contracts/GIGA_SKILLS_PROFILES_PLUGINS_API_V0.1.md) | Candidate settings, skill CRUD, activation and plugin connect routes | DRAFT |
+| [Skills UX](design/frontend/GIGA_SKILLS_UX_V0.1.md) | Skill picker, My Skills, editor, Profiles and Integrations | Draft |
+| [Skills Verification](architecture/GIGA_SKILLS_TEST_PLAN_V0.1.md) | 35 security, behavior, authorization and quality cases | Not executed |
+| [ADR-005](decisions/ADR-005-skills-personalization-plugin-boundaries.md) | Shared Skills vs separate Profile, Memory and tool permissions | Proposed technical ADR |
+| [Skills Delivery Plan](planning/GIGA_SKILLS_DELIVERY_V0.1.md) | P0 text Skills → P1 imports/auto → P2 MCP/tools → P3 marketplace | Proposed |
+
+The development-agent skills in [.agents/skills](../.agents/README.md) are **repo contributor workflows**, not installed end-user Giga Skills. Shared Skills do not merge Chat and Agent contexts.
+
 ## Tracking
 
 - [Giga on Linear](https://linear.app/17thedev/project/giga-cloud-mini-project-0656a578ee3b)

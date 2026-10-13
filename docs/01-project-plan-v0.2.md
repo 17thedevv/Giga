@@ -17,6 +17,7 @@ Both share login, frontend shell, backend platform, observability and DB infrast
 |---|---|---|
 | Auth / Platform | Session, secure CSRF/origin, owner-scoped data, HTTPS | Multi-device security, richer admin |
 | GigaChat | Conversations + messages, LLM SSE, History CRUD, graceful errors | Hybrid long-term Memory, Knowledge PDF RAG |
+| Skills & Personalization | After basic Chat Core: user Profile, built-in/private text Skills, explicit activation | Skill imports, auto suggestions, Plugin/MCP tools and marketplace |
 | GigaAgent Manager | Create workspace/run, observe persistent status/events, cancel | Parallel and delegated agents |
 | GigaAgent Core | Plan/tool/observe/verify loop with hard budgets | Multi-model routing, reusable skills |
 | GigaAgent Workspace | Blank workspace, durable file snapshot, file tree | Imports, full editor, local devices |
@@ -26,6 +27,8 @@ Both share login, frontend shell, backend platform, observability and DB infrast
 | Cloud | HTTPS app, durable Postgres + artifacts, CI, logs, resource budgets, backup/recovery evidence | Scaled queues/runners, distributed tracing |
 
 The UI can be built incrementally from current mock components, but a mock demonstration is NOT a completed agent capability.
+
+**Skills (product decision 2026-10-13):** A shared, text-only Skill Resolver/Instruction Composer can guide Chat answers and Agent tasks using explicit user-selected versions, but must never merge Chat and Agent data/permissions. Profile, Skills, Memory and external tools are separate services. See [Skills Architecture](architecture/GIGA_SKILLS_ENGINE_V0.1.md) and [ADR-005](decisions/ADR-005-skills-personalization-plugin-boundaries.md). P0 user Skills follow the first real Chat Runtime slice; Tool-enabled Skills/MCP remain later.
 
 ## 3. Mandatory first vertical slices
 
