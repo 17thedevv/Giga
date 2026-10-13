@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { ApiModeProvider } from '../src/app/context/ApiModeContext.js';
-import { AuthProvider } from '../src/app/context/AuthContext.js';
+import { AuthProvider, useAuth } from '../src/app/context/AuthContext.js';
 import { RouterProvider } from '../src/app/router.js';
 import { LoginView } from '../src/features/auth/LoginView.js';
 
@@ -69,6 +69,86 @@ describe('Auth & Routing Integration', () => {
 
     await waitFor(() => {
       expect(screen.getByText(/Please enter a valid email format/i)).toBeDefined();
+    });
+  });
+
+  describe('Session Lifecycle & Persistence Guard', () => {
+    const SessionTester: React.FC = () => {
+      const { user, login, logout, checkSession, isLoading } = useAuth();
+      return (
+        <div>
+          <div data-testid="auth-loading">{String(isLoading)}</div>
+          <div data-testid="auth-user">{user ? user.email : 'anonymous'}</div>
+          <button data-testid="login-btn" onClick={() => login('trangthu@demo.giga.dev', 'CorrectPassword123!')}>
+            Login
+          </button>
+          <button data-testid="logout-btn" onClick={() => logout()}>
+            Logout
+          </button>
+          <button data-testid="check-btn" onClick={() => checkSession()}>
+            CheckSession
+          </button>
+        </div>
+      );
+    };
+
+    it('guarantees logout persists across checkSession and AuthProvider remount', async () => {
+      // Clear sessionStorage initially
+      window.sessionStorage.clear();
+
+      const { unmount } = render(
+        <ApiModeProvider initialMode="mock">
+          <AuthProvider>
+            <SessionTester />
+          </AuthProvider>
+        </ApiModeProvider>
+      );
+
+      // Initially unauthenticated
+      await waitFor(() => {
+        expect(screen.getByTestId('auth-loading').textContent).toBe('false');
+        expect(screen.getByTestId('auth-user').textContent).toBe('anonymous');
+      });
+
+      // 1. Perform mock login
+      fireEvent.click(screen.getByTestId('login-btn'));
+      await waitFor(() => {
+        expect(screen.getByTestId('auth-user').textContent).toBe('trangthu@demo.giga.dev');
+      });
+
+      // 2. Perform mock logout
+      fireEvent.click(screen.getByTestId('logout-btn'));
+      await waitFor(() => {
+        expect(screen.getByTestId('auth-user').textContent).toBe('anonymous');
+      });
+
+      // 3. Trigger checkSession - must remain anonymous!
+      fireEvent.click(screen.getByTestId('check-btn'));
+      await waitFor(() => {
+        expect(screen.getByTestId('auth-user').textContent).toBe('anonymous');
+      });
+
+      // 4. Remount AuthProvider (simulating page reload) - must remain anonymous!
+      unmount();
+
+      render(
+        <ApiModeProvider initialMode="mock">
+          <AuthProvider>
+            <SessionTester />
+          </AuthProvider>
+        </ApiModeProvider>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByTestId('auth-loading').textContent).toBe('false');
+        expect(screen.getByTestId('auth-user').textContent).toBe('anonymous');
+      });
+
+      // 5. Subsequent re-login succeeds normally
+      fireEvent.click(screen.getByTestId('login-btn'));
+      await waitFor(() => {
+        expect(screen.getByTestId('auth-user').textContent).toBe('trangthu@demo.giga.dev');
+      });
     });
   });
 });

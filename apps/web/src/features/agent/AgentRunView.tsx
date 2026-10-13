@@ -202,6 +202,7 @@ export const AgentRunView: React.FC = () => {
               onApprove={handleApprove}
               onReject={handleReject}
               isApplying={isApplying}
+              mode={mode}
             />
           </div>
         )}

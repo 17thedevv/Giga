@@ -6,6 +6,9 @@ import type {
   ChangeProposal,
   AgentRunStatus,
 } from './types.js';
+import { ApiException } from './client.js';
+
+export const MOCK_AUTH_STORAGE_KEY = 'giga_mock_auth_active';
 
 // Pre-loaded fixture data based on apps/web/mocks
 export const MOCK_USER: User = {
@@ -126,10 +129,25 @@ export const MOCK_PROPOSAL: ChangeProposal = {
  * Mock Data Adapter implementing stateful in-memory demo operations.
  */
 export class MockDataAdapter {
+  private currentUser: User | null = null;
   private conversations = [...INITIAL_CONVERSATIONS];
   private messages: Record<string, Message[]> = { ...INITIAL_MESSAGES };
   private runs = [...INITIAL_RUNS];
   private proposal = { ...MOCK_PROPOSAL };
+
+  constructor(initialUser: User | null = null) {
+    if (initialUser) {
+      this.currentUser = initialUser;
+    } else if (typeof window !== 'undefined' && window.sessionStorage) {
+      try {
+        if (window.sessionStorage.getItem(MOCK_AUTH_STORAGE_KEY) === 'true') {
+          this.currentUser = { ...MOCK_USER };
+        }
+      } catch {
+        // Ignore storage access errors in sandboxed environments
+      }
+    }
+  }
 
   // Auth
   async login(email: string, password: string): Promise<{ user: User }> {
@@ -140,16 +158,62 @@ export class MockDataAdapter {
     if (email !== 'trangthu@demo.giga.dev' && !email.includes('@')) {
       throw new Error('Invalid email format');
     }
-    return { user: { ...MOCK_USER, email } };
+    const user: User = { ...MOCK_USER, email };
+    this.currentUser = user;
+    if (typeof window !== 'undefined' && window.sessionStorage) {
+      try {
+        window.sessionStorage.setItem(MOCK_AUTH_STORAGE_KEY, 'true');
+      } catch {
+        // Ignore storage errors
+      }
+    }
+    return { user };
   }
 
   async logout(): Promise<void> {
     await this.delay(100);
+    this.currentUser = null;
+    if (typeof window !== 'undefined' && window.sessionStorage) {
+      try {
+        window.sessionStorage.removeItem(MOCK_AUTH_STORAGE_KEY);
+      } catch {
+        // Ignore storage errors
+      }
+    }
   }
 
   async getMe(): Promise<{ user: User }> {
     await this.delay(150);
-    return { user: MOCK_USER };
+    if (!this.currentUser) {
+      if (typeof window !== 'undefined' && window.sessionStorage) {
+        try {
+          if (window.sessionStorage.getItem(MOCK_AUTH_STORAGE_KEY) === 'true') {
+            this.currentUser = { ...MOCK_USER };
+            return { user: this.currentUser };
+          }
+        } catch {
+          // Ignore
+        }
+      }
+      throw new ApiException(401, 'UNAUTHORIZED', 'No active mock session. Please sign in.');
+    }
+    return { user: this.currentUser };
+  }
+
+  // Test helper to explicitly configure mock session
+  setMockSession(user: User | null): void {
+    this.currentUser = user;
+    if (typeof window !== 'undefined' && window.sessionStorage) {
+      try {
+        if (user) {
+          window.sessionStorage.setItem(MOCK_AUTH_STORAGE_KEY, 'true');
+        } else {
+          window.sessionStorage.removeItem(MOCK_AUTH_STORAGE_KEY);
+        }
+      } catch {
+        // Ignore
+      }
+    }
   }
 
   // Conversations
@@ -311,10 +375,10 @@ export class MockDataAdapter {
     }
     run.status = 'completed';
     run.result = {
-      prUrl: 'https://github.com/17thedevv/Giga/pull/12',
-      prNumber: 12,
-      branch: `agent/fix-db-leak-${runId.slice(-4)}`,
-      commitSha: 'e1f98bc4019a28b',
+      prUrl: 'https://demo.giga.dev/simulated-pr',
+      prNumber: 9999,
+      branch: `agent/simulated-branch-${runId.slice(-4)}`,
+      commitSha: 'simulated-commit-sha',
     };
     return { ...run };
   }

@@ -22,16 +22,26 @@ export const ChatView: React.FC = () => {
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
 
   const abortControllerRef = useRef<AbortController | null>(null);
+  const accumulatedTextRef = useRef('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Auto-scroll helper
   const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    messagesEndRef.current?.scrollIntoView?.({ behavior: 'smooth' });
   };
 
   useEffect(() => {
     scrollToBottom();
   }, [messages, streamingText]);
+
+  // Cleanup abort controller on component unmount
+  useEffect(() => {
+    return () => {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+    };
+  }, []);
 
   // Load conversations list
   const loadConversations = useCallback(async () => {
@@ -98,6 +108,8 @@ export const ChatView: React.FC = () => {
   };
 
   const handleSendMessage = async (content: string) => {
+    if (isStreaming) return;
+
     let targetConvId = conversationId;
     if (!targetConvId) {
       const newConv = await mockDataAdapter.createConversation(content.slice(0, 30));
@@ -113,19 +125,24 @@ export const ChatView: React.FC = () => {
     // Start streaming simulation
     setIsStreaming(true);
     setStreamingText('');
+    accumulatedTextRef.current = '';
+    let accumulated = '';
     abortControllerRef.current = new AbortController();
 
     try {
       await mockDataAdapter.simulateChatStream(
         content,
         (chunk) => {
-          setStreamingText((prev) => prev + chunk);
+          accumulated += chunk;
+          accumulatedTextRef.current = accumulated;
+          setStreamingText(accumulated);
         },
         async () => {
-          // Finalize assistant message
-          const fullText = streamingText;
+          // Finalize assistant message with accumulated content (immune to stale closure)
+          const fullText = accumulated.trim();
           setIsStreaming(false);
           setStreamingText('');
+          accumulatedTextRef.current = '';
           if (fullText) {
             const assistantMsg = await mockDataAdapter.addMessage(targetConvId!, 'assistant', fullText);
             setMessages((prev) => [...prev, assistantMsg]);
@@ -136,6 +153,7 @@ export const ChatView: React.FC = () => {
     } catch (err) {
       setIsStreaming(false);
       setStreamingText('');
+      accumulatedTextRef.current = '';
       setErrorBanner(err instanceof Error ? err.message : 'Stream error');
     }
   };
@@ -144,12 +162,15 @@ export const ChatView: React.FC = () => {
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
     }
-    if (streamingText && conversationId) {
-      const stoppedText = streamingText + '\n\n*[Response stopped by user]*';
-      mockDataAdapter.addMessage(conversationId, 'assistant', stoppedText).then((msg) => {
+    const stoppedPartial = accumulatedTextRef.current.trim();
+    const targetId = conversationId;
+    if (stoppedPartial && targetId) {
+      const stoppedText = stoppedPartial + '\n\n*[Response stopped by user]*';
+      mockDataAdapter.addMessage(targetId, 'assistant', stoppedText).then((msg) => {
         setMessages((prev) => [...prev, msg]);
       });
     }
+    accumulatedTextRef.current = '';
     setIsStreaming(false);
     setStreamingText('');
   };
@@ -168,8 +189,8 @@ export const ChatView: React.FC = () => {
 
       {/* Main Chat Workspace */}
       <div style={{ display: 'flex', flexDirection: 'column', flex: 1, height: '100%', backgroundColor: '#090d16', minWidth: 0 }}>
-        {/* Banner notification for Mock vs Real */}
-        {mode === 'mock' ? (
+        {/* Banner notification for Mock Mode */}
+        {mode === 'mock' && (
           <div
             style={{
               padding: '8px 16px',
@@ -186,20 +207,26 @@ export const ChatView: React.FC = () => {
               <strong>[DEMO / MOCK MODE]:</strong> Chat interactions are powered by local fixtures for UI validation. No real LLM tokens are consumed.
             </span>
           </div>
-        ) : errorBanner ? (
+        )}
+
+        {/* Error Alert Banner */}
+        {errorBanner && (
           <div style={{ padding: '12px 16px', borderBottom: '1px solid #1e293b' }}>
             <Alert
               type="warning"
-              title="Real Backend Status"
+              title={mode === 'real' ? 'Real Backend Status' : 'Notice'}
               message={errorBanner}
               action={
-                <Button size="sm" variant="secondary" onClick={() => setMode('mock')}>
-                  Switch to MOCK Mode Demo
-                </Button>
+                mode === 'real' ? (
+                  <Button size="sm" variant="secondary" onClick={() => setMode('mock')}>
+                    Switch to MOCK Mode Demo
+                  </Button>
+                ) : undefined
               }
+              onDismiss={() => setErrorBanner(null)}
             />
           </div>
-        ) : null}
+        )}
 
         {/* Message Feed */}
         <div style={{ flex: 1, overflowY: 'auto', padding: '24px 20px', display: 'flex', flexDirection: 'column' }}>

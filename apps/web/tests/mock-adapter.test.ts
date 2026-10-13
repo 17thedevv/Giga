@@ -5,6 +5,9 @@ describe('MockDataAdapter', () => {
   let adapter: MockDataAdapter;
 
   beforeEach(() => {
+    if (typeof window !== 'undefined' && window.sessionStorage) {
+      window.sessionStorage.clear();
+    }
     adapter = new MockDataAdapter();
   });
 
@@ -19,9 +22,33 @@ describe('MockDataAdapter', () => {
       await expect(adapter.login('invalid-email', 'pass')).rejects.toThrow('Invalid email format');
     });
 
-    it('returns current user session on getMe', async () => {
+    it('returns current user session on getMe after login', async () => {
+      await adapter.login('trangthu@demo.giga.dev', 'CorrectPassword123!');
       const res = await adapter.getMe();
       expect(res.user.displayName).toContain('Tráng A Thư');
+    });
+
+    it('rejects getMe with 401 when unauthenticated', async () => {
+      await expect(adapter.getMe()).rejects.toThrow('No active mock session');
+    });
+
+    it('transitions to unauthenticated upon logout', async () => {
+      await adapter.login('trangthu@demo.giga.dev', 'CorrectPassword123!');
+      expect(await adapter.getMe()).toBeDefined();
+
+      await adapter.logout();
+      await expect(adapter.getMe()).rejects.toThrow('No active mock session');
+    });
+
+    it('allows successful re-login after logout', async () => {
+      await adapter.login('trangthu@demo.giga.dev', 'CorrectPassword123!');
+      await adapter.logout();
+      await expect(adapter.getMe()).rejects.toThrow();
+
+      const res = await adapter.login('trangthu@demo.giga.dev', 'CorrectPassword123!');
+      expect(res.user.email).toBe('trangthu@demo.giga.dev');
+      const me = await adapter.getMe();
+      expect(me.user.email).toBe('trangthu@demo.giga.dev');
     });
   });
 
@@ -84,7 +111,8 @@ describe('MockDataAdapter', () => {
       // Finalize after server confirmation
       const finalized = await adapter.finalizeApprovedRun(created.run.id);
       expect(finalized.status).toBe('completed');
-      expect(finalized.result?.prUrl).toContain('github.com/17thedevv/Giga/pull/');
+      expect(finalized.result?.prUrl).toBe('https://demo.giga.dev/simulated-pr');
+      expect(finalized.result?.prNumber).toBe(9999);
     });
 
     it('transitions to cancelled when rejected', async () => {

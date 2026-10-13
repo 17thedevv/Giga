@@ -9,9 +9,13 @@ interface ApiModeContextType {
 
 const ApiModeContext = createContext<ApiModeContextType | undefined>(undefined);
 
-export const ApiModeProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+export const ApiModeProvider: React.FC<{ children: React.ReactNode; initialMode?: ApiMode }> = ({
+  children,
+  initialMode,
+}) => {
   const [mode, setModeState] = useState<ApiMode>(() => {
-    const saved = localStorage.getItem('giga_api_mode');
+    if (initialMode) return initialMode;
+    const saved = typeof localStorage !== 'undefined' ? localStorage.getItem('giga_api_mode') : null;
     return (saved === 'real' || saved === 'mock') ? saved : 'mock';
   });
 

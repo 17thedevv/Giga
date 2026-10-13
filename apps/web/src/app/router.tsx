@@ -34,8 +34,14 @@ function matchRoute(currentPath: string, pattern: string): Record<string, string
   return params;
 }
 
-export const RouterProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [path, setPath] = useState<string>(() => window.location.pathname || '/login');
+export const RouterProvider: React.FC<{ children: React.ReactNode; initialPath?: string }> = ({
+  children,
+  initialPath,
+}) => {
+  const [path, setPath] = useState<string>(() => {
+    if (initialPath) return initialPath;
+    return typeof window !== 'undefined' ? (window.location.pathname || '/login') : '/login';
+  });
 
   useEffect(() => {
     const handlePopState = () => {
