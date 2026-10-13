@@ -252,6 +252,7 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
       skillId: skillA.id,
       selectedVersionId: vA.id,
       enabled: true,
+      actor: { userId: userAId },
     });
     assert.strictEqual(installA.skillId, skillA.id);
     assert.strictEqual(installA.selectedVersionId, vA.id);
@@ -264,6 +265,7 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
           skillId: skillA.id,
           selectedVersionId: vB.id, // Mismatched foreign version!
           enabled: true,
+          actor: { userId: userBId },
         }),
       (err: Error) =>
         err instanceof SkillResolutionError &&
@@ -273,7 +275,7 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
 
     // 3. Database rejects updating installation of Skill A to Version B
     await assert.rejects(
-      async () => skillStorage.setInstallationVersion(userAId, skillA.id, vB.id),
+      async () => skillStorage.setInstallationVersion(userAId, skillA.id, vB.id, { userId: userAId }),
       (err: Error) =>
         err instanceof SkillResolutionError &&
         err.code === 'SKILL_NOT_FOUND' &&
@@ -307,6 +309,7 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
           skillId: privateSkillA.id,
           selectedVersionId: vA.id,
           enabled: true,
+          actor: { userId: userBId },
         }),
       (err: Error) =>
         err instanceof SkillResolutionError &&
@@ -338,10 +341,11 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
       skillId: skill.id,
       selectedVersionId: ver.id,
       enabled: true,
+      actor: { userId: userAId },
     });
 
     // Disable
-    const disabled = await skillStorage.setInstallationEnabled(userAId, skill.id, false);
+    const disabled = await skillStorage.setInstallationEnabled(userAId, skill.id, false, { userId: userAId });
     assert.ok(disabled);
     assert.strictEqual(disabled.enabled, false);
 
@@ -350,7 +354,7 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
     assert.strictEqual(fetchedDisabled.enabled, false);
 
     // Re-enable
-    const reEnabled = await skillStorage.setInstallationEnabled(userAId, skill.id, true);
+    const reEnabled = await skillStorage.setInstallationEnabled(userAId, skill.id, true, { userId: userAId });
     assert.ok(reEnabled);
     assert.strictEqual(reEnabled.enabled, true);
   });
@@ -380,6 +384,7 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
       skillId: skill.id,
       selectedVersionId: ver.id,
       enabled: true,
+      actor: { userId: userAId },
     });
 
     // 1. Resolve successfully
@@ -394,7 +399,7 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
     assert.strictEqual(result.skills[0]?.instructions, 'Solve problems step by step.');
 
     // 2. Disable skill -> resolution fails closed with SKILL_DISABLED
-    await skillStorage.setInstallationEnabled(userAId, skill.id, false);
+    await skillStorage.setInstallationEnabled(userAId, skill.id, false, { userId: userAId });
     await assert.rejects(
       async () =>
         resolver.resolveSkills({
@@ -700,7 +705,22 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
     });
     assert.strictEqual(versionA.versionNumber, 1);
 
-    // 7. Forged actor on createInstallation rejects
+    // 7a. Missing actor on createInstallation rejects with SKILL_UNAUTHORIZED
+    await assert.rejects(
+      async () =>
+        // @ts-expect-error Testing missing actor runtime validation
+        skillStorage.createInstallation({
+          userId: userAId,
+          skillId: privateSkillA.id,
+          selectedVersionId: versionA.id,
+        }),
+      (err: Error) =>
+        err instanceof SkillValidationError &&
+        err.code === 'SKILL_UNAUTHORIZED' &&
+        /Actor authorization context is required to install a skill/i.test(err.message)
+    );
+
+    // 7b. Forged actor on createInstallation rejects
     await assert.rejects(
       async () =>
         skillStorage.createInstallation({
@@ -714,6 +734,62 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
         err.code === 'SKILL_UNAUTHORIZED' &&
         /Cannot install skill for another user/i.test(err.message)
     );
+
+    // Valid installation for User A
+    const validInstallA = await skillStorage.createInstallation({
+      userId: userAId,
+      skillId: privateSkillA.id,
+      selectedVersionId: versionA.id,
+      actor: { userId: userAId },
+    });
+    assert.strictEqual(validInstallA.userId, userAId);
+
+    // 7c. Missing actor on setInstallationEnabled rejects
+    await assert.rejects(
+      async () =>
+        // @ts-expect-error Testing missing actor runtime validation
+        skillStorage.setInstallationEnabled(userAId, privateSkillA.id, false),
+      (err: Error) =>
+        err instanceof SkillValidationError &&
+        err.code === 'SKILL_UNAUTHORIZED' &&
+        /Actor authorization context is required to modify an installation/i.test(err.message)
+    );
+
+    // 7d. Forged actor on setInstallationEnabled rejects
+    await assert.rejects(
+      async () =>
+        skillStorage.setInstallationEnabled(userAId, privateSkillA.id, false, { userId: userBId, isAdmin: false }),
+      (err: Error) =>
+        err instanceof SkillValidationError &&
+        err.code === 'SKILL_UNAUTHORIZED' &&
+        /Cannot modify installation for another user/i.test(err.message)
+    );
+
+    // 7e. Missing actor on setInstallationVersion rejects
+    await assert.rejects(
+      async () =>
+        // @ts-expect-error Testing missing actor runtime validation
+        skillStorage.setInstallationVersion(userAId, privateSkillA.id, versionA.id),
+      (err: Error) =>
+        err instanceof SkillValidationError &&
+        err.code === 'SKILL_UNAUTHORIZED' &&
+        /Actor authorization context is required to modify an installation/i.test(err.message)
+    );
+
+    // 7f. Forged actor on setInstallationVersion rejects
+    await assert.rejects(
+      async () =>
+        skillStorage.setInstallationVersion(userAId, privateSkillA.id, versionA.id, { userId: userBId, isAdmin: false }),
+      (err: Error) =>
+        err instanceof SkillValidationError &&
+        err.code === 'SKILL_UNAUTHORIZED' &&
+        /Cannot modify installation for another user/i.test(err.message)
+    );
+
+    // 7g. Admin CAN update installation for another user
+    const adminToggled = await skillStorage.setInstallationEnabled(userAId, privateSkillA.id, false, { isAdmin: true });
+    assert.ok(adminToggled);
+    assert.strictEqual(adminToggled.enabled, false);
   });
 
   it('Version Tenant Isolation: getSkillVersion and getLatestSkillVersion enforce viewer authorization', async () => {
@@ -765,9 +841,11 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
     assert.strictEqual(latestAnon, null);
   });
 
-  it('Migration coordination: safely handles pending migration 002 landing out-of-order', async () => {
+  it('Migration coordination: safely handles simulated out-of-order migration 002 runner registration', async () => {
     // Both migration 1 and 3 are already applied in testDb setup.
-    // Simulate pending migration 2 (17T-21 conversations) arriving late and being registered in the runner:
+    // Note: This test verifies the migration runner mechanism for out-of-order backward execution
+    // using a simulated stand-in schema for migration 002. Canonical compatibility will be verified
+    // once 17T-21 merges.
     const migration002Conversations: Migration = {
       version: 2,
       name: '002_conversations_and_messages',

@@ -63,7 +63,7 @@ export interface CreateInstallationParams {
   skillId: string;
   selectedVersionId: string;
   enabled?: boolean;
-  actor?: SkillActorContext;
+  actor: SkillActorContext;
 }
 
 const SLUG_REGEX = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -462,9 +462,13 @@ export class PostgresSkillStorage implements SkillStorage {
    * Installs a skill for a user, pinning a specific version.
    * Rejects installation if the version does not belong to the skill (enforced via DB foreign key).
    * Rejects installation if the skill is another user's private skill.
+   * Requires trusted actor authorization context matching the target user or system administrator.
    */
   public async createInstallation(params: CreateInstallationParams): Promise<SkillInstallation> {
-    if (params.actor && !params.actor.isAdmin && params.actor.userId !== params.userId) {
+    if (!params.actor) {
+      throw new SkillValidationError('SKILL_UNAUTHORIZED', 'Actor authorization context is required to install a skill');
+    }
+    if (!params.actor.isAdmin && params.actor.userId !== params.userId) {
       throw new SkillValidationError('SKILL_UNAUTHORIZED', 'Cannot install skill for another user');
     }
 
@@ -515,12 +519,24 @@ export class PostgresSkillStorage implements SkillStorage {
 
   /**
    * Toggles enablement status of an installed skill.
+   * Requires trusted actor authorization context matching the target user or system administrator.
    */
   public async setInstallationEnabled(
     userId: string,
     skillId: string,
-    enabled: boolean
+    enabled: boolean,
+    actor: SkillActorContext
   ): Promise<SkillInstallation | null> {
+    if (!actor) {
+      throw new SkillValidationError(
+        'SKILL_UNAUTHORIZED',
+        'Actor authorization context is required to modify an installation'
+      );
+    }
+    if (!actor.isAdmin && actor.userId !== userId) {
+      throw new SkillValidationError('SKILL_UNAUTHORIZED', 'Cannot modify installation for another user');
+    }
+
     const query = `
       UPDATE skill_installations
       SET enabled = $3
@@ -535,12 +551,24 @@ export class PostgresSkillStorage implements SkillStorage {
   /**
    * Updates the selected version pinned for an installation.
    * Fails closed if the version does not belong to this skill.
+   * Requires trusted actor authorization context matching the target user or system administrator.
    */
   public async setInstallationVersion(
     userId: string,
     skillId: string,
-    selectedVersionId: string
+    selectedVersionId: string,
+    actor: SkillActorContext
   ): Promise<SkillInstallation | null> {
+    if (!actor) {
+      throw new SkillValidationError(
+        'SKILL_UNAUTHORIZED',
+        'Actor authorization context is required to modify an installation'
+      );
+    }
+    if (!actor.isAdmin && actor.userId !== userId) {
+      throw new SkillValidationError('SKILL_UNAUTHORIZED', 'Cannot modify installation for another user');
+    }
+
     const query = `
       UPDATE skill_installations
       SET selected_version_id = $3
