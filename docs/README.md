@@ -15,6 +15,20 @@
 | [Git Workflow v0.1](engineering/GIT_WORKFLOW_V0.1.md) | Branch naming, Conventional Commits, reviews, safe sync, conflicts and CI | Review proposed |
 | [Shared Development Agent Skills](../.agents/README.md) | Shared skill pack for Codex/Antigravity, eight task-specific workflows and manual acceptance cases | Draft; requires joint trial |
 
+## GigaChat / Hybrid Memory technical specification
+
+The product direction **Hybrid Memory** was selected on 2026-10-13. The detailed DB, API and provider implementation is **proposed, not implemented or frozen**.
+
+| Document | Purpose | Status |
+|---|---|---|
+| [Hybrid Memory and RAG Architecture](architecture/AI_MEMORY_RAG_V0.1.md) | Scope, consent modes, chat/RAG architecture, user memory policy, source lifecycle | Draft technical design |
+| [Memory Data Model](architecture/AI_MEMORY_RAG_DATA_MODEL_V0.1.md) | PostgreSQL + pgvector schema/migration sketches, ownership, versioning, jobs | **Non-executable** proposed DDL |
+| [Memory Pipelines and Security](architecture/AI_MEMORY_RAG_PIPELINES_V0.1.md) | Capture, embedding, retrieval, worker leases, delete/forget and threat model | Draft |
+| [Memory API v0.1](contracts/GIGACHAT_MEMORY_API_V0.1.md) | Settings, memory CRUD, suggestions, DTO/errors and contract questions | **DRAFT; not canonical frozen API** |
+| [Memory Verification & Eval](architecture/AI_MEMORY_RAG_TEST_PLAN_V0.1.md) | Behavior matrix, privacy tests, real pgvector integration and retrieval benchmarks | **Plan; not executed** |
+| [ADR-002](decisions/ADR-002-hybrid-memory-pgvector.md) | Hybrid Memory product choice, preferred pgvector candidate, alternatives and gates | Proposed technical ADR |
+| [GigaChat Delivery Plan](planning/GIGACHAT_DELIVERY_V0.1.md) | Incremental milestones, two-person ownership, review dependencies | Proposed |
+
 ## Tracking
 
 - [Giga on Linear](https://linear.app/17thedev/project/giga-cloud-mini-project-0656a578ee3b)
