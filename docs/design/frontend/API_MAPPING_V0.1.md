@@ -1,5 +1,7 @@
 # Giga — Frontend-to-API Mapping Specification v0.1
 
+> **Agent scope update, 2026-10-13:** Agent API rows are HISTORICAL MOCK-era mappings and do not define a mandatory repository or PR. For Agent use [new Draft API](../../contracts/GIGA_AGENT_API_V0.2.md); Auth/Chat mappings are unaffected drafts.
+
 > **Status:** DRAFT / PROPOSED · **Date:** 2026-10-13  
 > **Author:** Tráng A Thư (Frontend / UX)  
 > **Reviewer:** Trà (Backend / API)  

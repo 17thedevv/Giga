@@ -1,5 +1,7 @@
 # Giga — Frontend UX Flow Blueprint v0.1
 
+> **Agent scope update, 2026-10-13:** The repository-first Agent user flow is a HISTORICAL MOCK; the new design is [GigaAgent Workspace UX v0.2](GIGA_AGENT_UX_V0.2.md) and [Agent API v0.2](../../contracts/GIGA_AGENT_API_V0.2.md). Chat/Auth flows remain DRAFT.
+
 > **Status:** DRAFT / PROPOSED · **Date:** 2026-10-13  
 > **Author:** Tráng A Thư (Frontend / UX)  
 > **Reviewer:** Trà (Backend / API)  
