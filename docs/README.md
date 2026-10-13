@@ -6,7 +6,7 @@
 
 | Document | Purpose | Status |
 |---|---|---|
-| [Project Plan v0.1](01-project-plan-v0.1.md) | Goals, scope, team responsibilities, cloud split, roadmap, report requirements, Definition of Done | Baseline / review |
+| [Project Plan v0.1](01-project-plan-v0.1.md) | Original mini-project baseline; GitHub-first Agent scope now superseded | Historical / course context |
 | [API Contract v0.1](contracts/API_CONTRACT_V0.1.md) | Proposed frontend–backend endpoints, DTOs, SSE, agent tools, approvals and error semantics | **Draft: requires joint review** |
 | [Architecture Invariants v0.1](architecture/INVARIANTS_V0.1.md) | Stable architecture policies, exceptions and design-gate checklist | Policy baseline |
 | [ADR-001: API Stability](decisions/ADR-001-api-compatibility.md) | Backward compatibility rules, `/api/v2` migration and freeze gate | Policy accepted, concrete API pending |
@@ -28,6 +28,24 @@ The product direction **Hybrid Memory** was selected on 2026-10-13. The detailed
 | [Memory Verification & Eval](architecture/AI_MEMORY_RAG_TEST_PLAN_V0.1.md) | Behavior matrix, privacy tests, real pgvector integration and retrieval benchmarks | **Plan; not executed** |
 | [ADR-002](decisions/ADR-002-hybrid-memory-pgvector.md) | Hybrid Memory product choice, preferred pgvector candidate, alternatives and gates | Proposed technical ADR |
 | [GigaChat Delivery Plan](planning/GIGACHAT_DELIVERY_V0.1.md) | Incremental milestones, two-person ownership, review dependencies | Proposed |
+
+## GigaAgent — Agentic Workspace v0.2
+
+**Direction selected 2026-10-13:** GigaChat and GigaAgent are independent. Agent creates/edits/files, builds/tests and returns artifacts using a separately isolated sandbox; GitHub is OPTIONAL. No new backend/runner is implemented by these documents.
+
+| Document | Purpose | Status |
+|---|---|---|
+| [Product Plan v0.2](01-project-plan-v0.2.md) | Independent Chat and workspace-first Agent product scope | Review proposal |
+| [Agent Architecture](architecture/GIGA_AGENT_ARCHITECTURE_V0.2.md) | Generic loop, control/execution planes, tools, workspace and result | Draft |
+| [Agent Runtime Security](architecture/GIGA_AGENT_RUNTIME_SECURITY_V0.2.md) | Sandbox isolation, permissions, budgets, approvals and threats | Draft |
+| [Agent Data Model](architecture/GIGA_AGENT_DATA_MODEL_V0.2.md) | Workspace, run, steps/events, snapshots, artifacts, jobs | Non-executable draft |
+| [Agent API v0.2](contracts/GIGA_AGENT_API_V0.2.md) | Workspace-first REST/SSE DTOs, approval and artifact endpoints | DRAFT |
+| [Agent Workspace UX](design/frontend/GIGA_AGENT_UX_V0.2.md) | Agent Manager, Workspace Editor, activity and approvals | Draft |
+| [Agent Test Plan](architecture/GIGA_AGENT_TEST_PLAN_V0.2.md) | 35 acceptance/security cases and no-GitHub golden E2E | Not executed |
+| [ADR-003](decisions/ADR-003-agentic-workspace-and-isolated-runtime.md) | Change from GitHub bot to isolated general Agent | PROPOSED, needs review |
+| [Agent Delivery Plan](planning/GIGA_AGENT_DELIVERY_V0.2.md) | Incremental implementation slices and Cloud gates | Proposed |
+
+Original v0.1 Agent GitHub-only UX/contract assumptions are marked historical or revised in the DRAFT; Chat/Auth flows remain distinct. **Locked INV-07 is still effective** until ADR-003 is reviewed.
 
 ## Tracking
 
