@@ -7,7 +7,7 @@ import type { HealthResponse } from '../src/app/create-app.js';
 describe('Server network socket lifecycle', () => {
   it('starts HTTP server on network port and handles request', async () => {
     // Port 0 tells the OS to assign an available ephemeral port
-    const server = startServer(0);
+    const { server } = await startServer({ port: 0 });
 
     try {
       await new Promise<void>((resolve) => {

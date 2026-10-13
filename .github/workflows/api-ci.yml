@@ -18,6 +18,20 @@ jobs:
     defaults:
       run:
         working-directory: apps/api
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: giga_ci
+          POSTGRES_PASSWORD: giga_ci_password
+          POSTGRES_DB: giga_ci_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U giga_ci -d giga_ci_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -38,5 +52,7 @@ jobs:
       - name: Build API service
         run: npm run build
 
-      - name: Run unit tests
+      - name: Run unit and integration tests (Real PostgreSQL)
+        env:
+          DATABASE_URL: postgres://giga_ci:giga_ci_password@localhost:5432/giga_ci_test
         run: npm test
