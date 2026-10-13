@@ -28,7 +28,7 @@ Other possible runs: analyze CSV, research docs via approved web tools, edit a p
 |---|---|---|
 | One isolated Cloud Sandbox runner; one active run/user; user-owned workspaces | Browser preview and visual checks in controlled runtime | Local Runner, desktop agent |
 | Agent loop, typed tool registry and budget guard | Browser UI automation, screenshots | Parallel subagents and task delegation |
-| Filesystem/terminal/build/test tools inside sandbox | Skills/MCP allowlisted integrations | Distributed orchestration at scale |
+| Filesystem/terminal/build/test tools inside sandbox | Optional tool-enabled Skills/MCP allowlisted integrations | Distributed orchestration at scale |
 | Persistent plan/events, artifact ZIP, resume/reconnect | GitHub optional import and approved PR publishing | Marketplace and hosted integrations |
 | Ask / Plan / Execute modes with scoped permission engine | Structured reusable project knowledge | Autonomous cross-system pipelines |
 
@@ -128,7 +128,8 @@ Proposed names:
 - **Browser** (next milestone): open_page, interact, capture_screenshot in browser sandbox or proxied isolated preview.
 - **Research/Artifacts**: optional web_search/fetch_url, package_files, create_report, preview_artifact.
 - **Git** (optional): status/diff/commit on explicit workspace; GitHub PR is separate external_write tool, not run completion prerequisite.
-- **Extensions** (later): Skills and MCP adapters, scoped per installation and fully schema-validated.
+- **Instructions / text Skills:** a shared, separately owner-scoped [Skills Engine](GIGA_SKILLS_ENGINE_V0.1.md) supports explicitly selected text-only SKILL.md-style guidance and Agent Workspace defaults without tools. The Skill itself cannot grant filesystem/terminal, Memory, GitHub or MCP authority. Text Skills are P0 in their own program, integrated only after the relevant Agent text/model path is functional.
+- **Tool-enabled Skills and extensions (later):** MCP and scripts require allowlisted Tool Registry, explicit grants and adopted isolated sandbox permissions; not part of the initial text Skills.
 - **Parallel subagents** (later): separate budget/risk/task namespaces; no invisible delegated authority.
 
 Tool Registry must be capability- and policy-driven. The LLM does not gain every tool merely because a connector is installed.
