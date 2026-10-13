@@ -17,6 +17,7 @@ const expected = new Set([
   'giga-cloud-ops',
   'giga-verification',
   'giga-task-handoff',
+  'giga-git-workflow',
 ]);
 
 if (!fs.existsSync(path.join(root, 'AGENTS.md'))) fail('Missing root AGENTS.md');

@@ -12,7 +12,8 @@
 | [ADR-001: API Stability](decisions/ADR-001-api-compatibility.md) | Backward compatibility rules, `/api/v2` migration and freeze gate | Policy accepted, concrete API pending |
 | [Week 01 Daily Plan](planning/W01-daily-plan.md) | Day-by-day activities for 12–18 Oct 2026, tasks and evidence | Proposed schedule |
 | [Team Workflow](TEAM-WORKFLOW.md) | How GitHub, Linear, pull requests and cross-training are used | Baseline / review |
-| [Shared Development Agent Skills](../.agents/README.md) | Shared skill pack for Codex/Antigravity, seven task-specific workflows and manual acceptance cases | Draft; requires joint trial |
+| [Git Workflow v0.1](engineering/GIT_WORKFLOW_V0.1.md) | Branch naming, Conventional Commits, reviews, safe sync, conflicts and CI | Review proposed |
+| [Shared Development Agent Skills](../.agents/README.md) | Shared skill pack for Codex/Antigravity, eight task-specific workflows and manual acceptance cases | Draft; requires joint trial |
 
 ## Tracking
 

@@ -9,8 +9,9 @@ Project directory `.agents/skills/<name>/SKILL.md` follows the open Agent Skills
 1. Clone/check out the agreed repository branch and read `AGENTS.md` in repo root.
 2. The assigned Linear issue identifies the scope. Choose relevant skills by name/description; e.g. `giga-frontend` for Thư's UI task and `giga-backend` for Trà's API task.
 3. Read `giga-contract-guardian` before API/DTO/SSE/auth contract changes. Do not promote the draft API into a frozen contract without the gate.
-4. Use `giga-verification` after changes; use `giga-task-handoff` to produce a peer-reviewable handoff.
-5. For cloud tasks use `giga-cloud-ops` regardless of which developer owns the module; role-swap and documentation remain required.
+4. Before Git branch, staging, commit, push, PR, merge or cleanup, load `giga-git-workflow` and read `docs/engineering/GIT_WORKFLOW_V0.1.md`.
+5. Use `giga-verification` after changes; use `giga-task-handoff` to produce a peer-reviewable handoff.
+6. For cloud tasks use `giga-cloud-ops` regardless of which developer owns the module; role-swap and documentation remain required.
 
 ## Separation of responsibilities
 
@@ -30,6 +31,8 @@ Run `node .agents/scripts/validate-skills.mjs` from the repository checkout. Git
 3. **Cloud request:** “Deploy to Render” → agent inspects actual infra, checks cost/secrets, obtains approval before billable provisioning, captures sanitized evidence.
 4. **Agent runtime request:** “Let AI run a bash command” → agent refuses unisolated production-shell behavior in v0.1 and proposes a separately reviewed sandbox milestone.
 5. **Cross-training:** issue assigned to Trà but Thư performs deploy rehearsal → agent records operator/reviewer/evidence and does not attribute work incorrectly.
+6. **Git convention:** frontend task `17T-22` uses branch `feat/17t-22-chat-screen`, Conventional Commit `feat(web): add chat message list`, not personal branch names.
+7. **Unsafe Git:** agent must refuse automatic force-push of main or cleaning a dirty teammate worktree; report safe PR/recovery path.
 
 ## Authoring rules
 

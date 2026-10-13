@@ -7,10 +7,12 @@ description: Coordinates Giga development handoffs: Linear issue evidence, GitHu
 
 GitHub is canonical for code/specs/runbooks; Linear tracks assignments and delivery. The team has two independent owners; neither person's agent may claim the other's work is reviewed without evidence.
 
+**All Git operations are governed by `giga-git-workflow` and `docs/engineering/GIT_WORKFLOW_V0.1.md`.** This handoff skill adds evidence; it does not define a competing branch or commit convention.
+
 ## Start of task
 1. Read `AGENTS.md`, the actual repository and canonical relevant doc. Resolve an issue by ID from Linear **if connector available**; otherwise use the issue details supplied by the user and say status wasn't verified.
 2. Identify intended owner, reviewer, due date (internal target, not teacher deadline), precise files/modules, acceptance criteria and cross-training requirement.
-3. Confirm branch is appropriate; preserve unrelated changes, existing work, and user code. For uncertain workspace state, report what you found instead of deleting or resetting.
+3. Load `giga-git-workflow` before branch creation, staging, commits, pushes, PRs or merges. Confirm issue-derived branch and Conventional Commit; preserve unrelated changes and user code. For uncertain workspace state, report it without deleting or resetting.
 4. For cross-module work, list interface dependencies and route changes through `giga-contract-guardian` before editing. Do not assign tasks to Thư in Linear if her workspace membership is unavailable.
 
 ## During work

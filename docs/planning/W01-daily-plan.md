@@ -102,6 +102,7 @@
 - Run `node .agents/scripts/validate-skills.mjs` and record the result; run one contract-change scenario and one cloud handoff scenario in each developer's chosen agent.
 - Review whether the agent selects appropriate skills without unnecessary context loading; log mismatches before declaring the pack adopted.
 - Track skill-pack adoption in [Linear 17T-15](https://linear.app/17thedev/issue/17T-15/w1-review-and-adopt-shared-development-agent-skills-v01) (internal target 15/10).
+- Review branch naming, Conventional Commits, PR template and safety behavior in [Linear 17T-18](https://linear.app/17thedev/issue/17T-18/w1-standardize-git-workflow-across-both-coding-agents) before publishing implementation branches.
 
 ## W1 evidence minimum
 

@@ -1,0 +1,29 @@
+name: Validate Git Workflow
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  git-conventions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Test Git policy validator
+        run: node --test .agents/scripts/validate-git-workflow.test.mjs
+      - name: Validate PR branch, title, Linear issue reference and commit subjects
+        env:
+          GIGA_PR_BRANCH: ${{ github.event.pull_request.head.ref }}
+          GIGA_PR_TITLE: ${{ github.event.pull_request.title }}
+          GIGA_PR_BODY: ${{ github.event.pull_request.body }}
+          GIGA_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          GIGA_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: node .agents/scripts/validate-git-workflow.mjs
