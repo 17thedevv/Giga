@@ -40,15 +40,23 @@ export const MIGRATIONS: readonly Migration[] = [
 
 /**
  * Creates schema_migrations tracking table if it does not exist.
+ * Tolerates concurrent race condition on PostgreSQL composite type creation.
  */
 export async function ensureMigrationTable(client: pg.PoolClient | pg.Pool): Promise<void> {
-  await client.query(`
-    CREATE TABLE IF NOT EXISTS schema_migrations (
-        version INTEGER PRIMARY KEY,
-        name VARCHAR(255) NOT NULL,
-        applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-  `);
+  try {
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+          version INTEGER PRIMARY KEY,
+          name VARCHAR(255) NOT NULL,
+          applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!message.includes('already exists') && !message.includes('pg_type_typname_nsp_index')) {
+      throw err;
+    }
+  }
 }
 
 /**
@@ -62,12 +70,21 @@ export async function getAppliedMigrationVersions(client: pg.PoolClient | pg.Poo
 
 /**
  * Executes pending forward migrations in transaction order.
+ * Uses an advisory lock in real PostgreSQL to serialize concurrent migration runs.
  */
 export async function runMigrations(pool: pg.Pool): Promise<string[]> {
   const client = await pool.connect();
   const appliedNow: string[] = [];
 
+  let lockAcquired = false;
   try {
+    try {
+      await client.query('SELECT pg_advisory_lock(7162534);');
+      lockAcquired = true;
+    } catch {
+      // In-memory or databases without advisory locks proceed normally
+    }
+
     await ensureMigrationTable(client);
     const appliedVersions = await getAppliedMigrationVersions(client);
 
@@ -94,6 +111,13 @@ export async function runMigrations(pool: pg.Pool): Promise<string[]> {
       }
     }
   } finally {
+    if (lockAcquired) {
+      try {
+        await client.query('SELECT pg_advisory_unlock(7162534);');
+      } catch {
+        // Ignore unlock error on connection teardown
+      }
+    }
     client.release();
   }
 
