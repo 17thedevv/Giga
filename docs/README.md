@@ -15,6 +15,20 @@
 | [Git Workflow v0.1](engineering/GIT_WORKFLOW_V0.1.md) | Branch naming, Conventional Commits, reviews, safe sync, conflicts and CI | Review proposed |
 | [Shared Development Agent Skills](../.agents/README.md) | Shared skill pack for Codex/Antigravity, eight task-specific workflows and manual acceptance cases | Draft; requires joint trial |
 
+## GigaChat Runtime & Shared LLM Engine (13 October 2026)
+
+**Product design accepted; technical DTOs/provider/runtime parameters remain DRAFT.** Documents below define the real Chat generation path and the shared provider-neutral AI model layer without coupling Agent to Chat Memory.
+
+| Document | Purpose | Status |
+|---|---|---|
+| [GigaChat Runtime v0.2](architecture/GIGACHAT_RUNTIME_V0.2.md) | Generation lifecycle, persistence, Stop/Retry, context and SSE orchestration | Design agreed; implementation proposed |
+| [Shared LLM Engine v0.1](architecture/LLM_ENGINE_V0.1.md) | Model aliases, adapters, capabilities, budgets and provider usage | Design agreed; provider choice open |
+| [GigaChat Runtime API Addendum](contracts/GIGACHAT_RUNTIME_API_V0.2.md) | Proposed status/cancel, SSE events, idempotency, regenerate review gates | **DRAFT** |
+| [GigaChat Runtime Test Plan](architecture/GIGACHAT_RUNTIME_TEST_PLAN_V0.2.md) | 34 test scenarios incl. persistence, provider/streaming, privacy, billing | Not executed |
+| [ADR-004](decisions/ADR-004-chat-generation-lifecycle.md) | Persistent generation/stop and shared LLM engine rationale | Proposed technical ADR |
+
+Existing Conversation History 17T-21 owns messages; Memory 17T-22 handles retrieval/extraction; GigaAgent remains an independent execution runtime. API v1 is not frozen.
+
 ## GigaChat / Hybrid Memory technical specification
 
 The product direction **Hybrid Memory** was selected on 2026-10-13. The detailed DB, API and provider implementation is **proposed, not implemented or frozen**.
