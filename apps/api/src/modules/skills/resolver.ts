@@ -123,8 +123,8 @@ export class SkillResolver {
     let totalInstructionBytes = 0;
 
     for (const candidate of candidateList) {
-      // Lookup skill definition by ID
-      let skill = await this.storage.getSkill(candidate.skillId);
+      // Lookup skill definition by ID with viewer tenant scoping
+      let skill = await this.storage.getSkill(candidate.skillId, userId);
       if (!skill) {
         // Fallback: try by slug ONLY within user's own skills or built-in skills (prevents tenant leakage)
         skill = await this.storage.getSkillBySlug(candidate.skillId, userId);
@@ -172,7 +172,7 @@ export class SkillResolver {
       // Immutable Version selection with strict integrity checks (fail closed, no silent fallback)
       let version: SkillVersion | null = null;
       if (installation.selectedVersionId) {
-        version = await this.storage.getSkillVersion(installation.selectedVersionId);
+        version = await this.storage.getSkillVersion(installation.selectedVersionId, userId);
         if (!version || version.skillId !== skill.id) {
           throw new SkillResolutionError(
             'SKILL_NOT_FOUND',
@@ -180,7 +180,7 @@ export class SkillResolver {
           );
         }
       } else {
-        version = await this.storage.getLatestSkillVersion(skill.id);
+        version = await this.storage.getLatestSkillVersion(skill.id, userId);
         if (!version || version.skillId !== skill.id) {
           throw new SkillResolutionError(
             'SKILL_NOT_FOUND',

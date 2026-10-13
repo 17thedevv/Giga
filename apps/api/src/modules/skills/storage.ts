@@ -15,10 +15,10 @@ import type {
 } from './types.js';
 
 export interface SkillStorage {
-  getSkill(skillId: string): Promise<SkillDefinition | null>;
+  getSkill(skillId: string, viewerUserId?: string): Promise<SkillDefinition | null>;
   getSkillBySlug(slug: string, viewerUserId?: string): Promise<SkillDefinition | null>;
-  getSkillVersion(versionId: string): Promise<SkillVersion | null>;
-  getLatestSkillVersion(skillId: string): Promise<SkillVersion | null>;
+  getSkillVersion(versionId: string, viewerUserId?: string): Promise<SkillVersion | null>;
+  getLatestSkillVersion(skillId: string, viewerUserId?: string): Promise<SkillVersion | null>;
   getInstallation(userId: string, skillId: string): Promise<SkillInstallation | null>;
   getWorkspaceDefaults(workspaceId: string, ownerId: string): Promise<WorkspaceSkillDefault[]>;
 }
@@ -51,9 +51,13 @@ export class InMemorySkillStorage implements SkillStorage {
     this.workspaceDefaults.set(key, [...defaults]);
   }
 
-  public async getSkill(skillId: string): Promise<SkillDefinition | null> {
+  public async getSkill(skillId: string, viewerUserId?: string): Promise<SkillDefinition | null> {
     const skill = this.skills.get(skillId);
-    return skill ? { ...skill } : null;
+    if (!skill) return null;
+    if (viewerUserId && skill.visibility === 'private' && skill.ownerId !== viewerUserId) {
+      return null;
+    }
+    return { ...skill };
   }
 
   public async getSkillBySlug(
@@ -86,12 +90,25 @@ export class InMemorySkillStorage implements SkillStorage {
     return null;
   }
 
-  public async getSkillVersion(versionId: string): Promise<SkillVersion | null> {
+  public async getSkillVersion(versionId: string, viewerUserId?: string): Promise<SkillVersion | null> {
     const version = this.versions.get(versionId);
-    return version ? { ...version } : null;
+    if (!version) return null;
+    const skill = this.skills.get(version.skillId);
+    if (skill && skill.visibility === 'private') {
+      if (!viewerUserId || skill.ownerId !== viewerUserId) {
+        return null;
+      }
+    }
+    return { ...version };
   }
 
-  public async getLatestSkillVersion(skillId: string): Promise<SkillVersion | null> {
+  public async getLatestSkillVersion(skillId: string, viewerUserId?: string): Promise<SkillVersion | null> {
+    const skill = this.skills.get(skillId);
+    if (skill && skill.visibility === 'private') {
+      if (!viewerUserId || skill.ownerId !== viewerUserId) {
+        return null;
+      }
+    }
     let latest: SkillVersion | null = null;
     for (const version of this.versions.values()) {
       if (version.skillId === skillId) {

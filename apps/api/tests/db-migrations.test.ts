@@ -9,6 +9,16 @@ import { redactDatabaseUrl, pingDatabase } from '../src/db/client.js';
 describe('Database Migrations and Utilities', () => {
   it('runs migrations deterministically and idempotently', async () => {
     const db = newDb({ noAstCoverageCheck: true });
+    db.public.interceptQueries((sql) => {
+      if (sql.includes('prevent_skill_versions_update') || sql.includes('CREATE TRIGGER')) {
+        const stripped = sql
+          .replace(/CREATE OR REPLACE FUNCTION[\s\S]*?LANGUAGE plpgsql;/gi, '')
+          .replace(/DROP TRIGGER[\s\S]*?;/gi, '')
+          .replace(/CREATE TRIGGER[\s\S]*?;/gi, '');
+        return db.public.many(stripped);
+      }
+      return null;
+    });
     db.public.registerFunction({
       name: 'gen_random_uuid',
       implementation: () => crypto.randomUUID(),
@@ -17,13 +27,15 @@ describe('Database Migrations and Utilities', () => {
     const pool = new adapter.Pool() as unknown as pg.Pool;
 
     try {
-      // First run: applies migration 1
+      // First run: applies all pending migrations
       const firstRun = await runMigrations(pool);
-      assert.strictEqual(firstRun.length, 1);
+      assert.strictEqual(firstRun.length, 2);
       assert.strictEqual(firstRun[0], '001_initial_users_and_sessions');
+      assert.strictEqual(firstRun[1], '003_skills_and_preferences');
 
       const versions = await getAppliedMigrationVersions(pool);
       assert.ok(versions.has(1));
+      assert.ok(versions.has(3));
 
       // Second run: idempotent, applies 0 migrations
       const secondRun = await runMigrations(pool);

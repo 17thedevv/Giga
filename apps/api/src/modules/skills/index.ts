@@ -8,5 +8,7 @@
 export * from './types.js';
 export * from './parser.js';
 export * from './storage.js';
+export * from './postgres-storage.js';
+export * from './preferences-storage.js';
 export * from './resolver.js';
 export * from './composer.js';

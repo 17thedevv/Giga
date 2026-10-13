@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import type pg from 'pg';
-import { newDb } from 'pg-mem';
+import { newDb, DataType } from 'pg-mem';
 import { createDatabasePool, redactDatabaseUrl } from '../src/db/client.js';
 import { runMigrations } from '../src/db/migrate.js';
 
@@ -132,7 +132,7 @@ export async function createTestDatabase(): Promise<TestDbInstance> {
       if (!check.safe) {
         throw new Error(`[test-db-safety] Refusing cleanup: ${check.reason}`);
       }
-      await pool.query('TRUNCATE users, sessions CASCADE;');
+      await pool.query('TRUNCATE users, sessions, user_preferences, skill_installations, skill_versions, skill_definitions CASCADE;');
     };
 
     return { pool, cleanup, isMemory: false };
@@ -141,9 +141,48 @@ export async function createTestDatabase(): Promise<TestDbInstance> {
   // Explicit in-memory fallback when no TEST_DATABASE_URL is provided
   const db = newDb({ noAstCoverageCheck: true });
 
+  db.public.interceptQueries((sql) => {
+    // Intercept and strip PostgreSQL triggers/plpgsql DDL that pg-mem does not support
+    if (sql.includes('prevent_skill_versions_update') || sql.includes('CREATE TRIGGER')) {
+      const stripped = sql
+        .replace(/CREATE OR REPLACE FUNCTION[\s\S]*?LANGUAGE plpgsql;/gi, '')
+        .replace(/DROP TRIGGER[\s\S]*?;/gi, '')
+        .replace(/CREATE TRIGGER[\s\S]*?;/gi, '');
+      return db.public.many(stripped);
+    }
+    // Emulate PostgreSQL trigger immutability enforcement on direct UPDATE in pg-mem
+    if (/UPDATE\s+skill_versions/i.test(sql)) {
+      throw new Error('skill_versions rows are strictly immutable and cannot be updated');
+    }
+    return null;
+  });
+
   db.public.registerFunction({
     name: 'gen_random_uuid',
+    returns: DataType.uuid,
+    impure: true,
     implementation: () => crypto.randomUUID(),
+  });
+
+  db.public.registerFunction({
+    name: 'length',
+    args: [DataType.text],
+    returns: DataType.integer,
+    implementation: (str: string) => (str ? str.length : 0),
+  });
+
+  db.public.registerFunction({
+    name: 'char_length',
+    args: [DataType.text],
+    returns: DataType.integer,
+    implementation: (str: string) => (str ? str.length : 0),
+  });
+
+  db.public.registerFunction({
+    name: 'octet_length',
+    args: [DataType.text],
+    returns: DataType.integer,
+    implementation: (str: string) => (str ? Buffer.byteLength(String(str), 'utf8') : 0),
   });
 
   const adapter = db.adapters.createPg();
@@ -152,6 +191,10 @@ export async function createTestDatabase(): Promise<TestDbInstance> {
   await runMigrations(pool);
 
   const cleanup = async (): Promise<void> => {
+    await pool.query('DELETE FROM skill_installations;');
+    await pool.query('DELETE FROM skill_versions;');
+    await pool.query('DELETE FROM skill_definitions;');
+    await pool.query('DELETE FROM user_preferences;');
     await pool.query('DELETE FROM sessions;');
     await pool.query('DELETE FROM users;');
   };
