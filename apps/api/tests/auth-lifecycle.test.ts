@@ -6,10 +6,16 @@ import { createTestDatabase, type TestDbInstance } from './test-db-helper.js';
 describe('Authentication Lifecycle Integration', () => {
   let db: TestDbInstance;
   let app: ReturnType<typeof createApp>;
+  const trustedOrigin = 'http://localhost:3000';
 
   before(async () => {
     db = await createTestDatabase();
-    app = createApp({ pool: db.pool });
+    app = createApp({
+      pool: db.pool,
+      config: {
+        allowedOrigins: [trustedOrigin],
+      },
+    });
   });
 
   beforeEach(async () => {
@@ -30,7 +36,10 @@ describe('Authentication Lifecycle Integration', () => {
 
     const registerRes = await app.request('/api/v1/auth/register', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        Origin: trustedOrigin,
+      },
       body: JSON.stringify(registerPayload),
     });
 
@@ -51,7 +60,10 @@ describe('Authentication Lifecycle Integration', () => {
     // 3. Login with valid credentials
     const loginRes = await app.request('/api/v1/auth/login', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        Origin: trustedOrigin,
+      },
       body: JSON.stringify({
         email: 'TRA@EXAMPLE.COM',
         password: 'StrongPassword123!',
@@ -94,6 +106,7 @@ describe('Authentication Lifecycle Integration', () => {
     const logoutRes = await app.request('/api/v1/auth/logout', {
       method: 'POST',
       headers: {
+        Origin: trustedOrigin,
         Cookie: `giga_session=${sessionToken}`,
       },
     });

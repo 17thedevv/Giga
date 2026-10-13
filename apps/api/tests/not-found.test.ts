@@ -27,7 +27,10 @@ describe('404 Route Handler', () => {
     const res = await app.request('/api/v1/non-existent', {
       method: 'POST',
       body: JSON.stringify({ test: true }),
-      headers: { 'content-type': 'application/json' },
+      headers: {
+        'content-type': 'application/json',
+        origin: 'http://localhost:3000',
+      },
     });
 
     assert.strictEqual(res.status, 404);
