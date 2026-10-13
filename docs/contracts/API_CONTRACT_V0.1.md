@@ -22,7 +22,8 @@ type User = { id: ID; email: string; displayName: string };
 type Conversation = { id: ID; title: string; createdAt: ISODateTime; updatedAt: ISODateTime };
 type Message = { id: ID; conversationId: ID; role: 'user' | 'assistant'; content: string; createdAt: ISODateTime };
 type AgentRunStatus = 'queued' | 'running' | 'awaiting_approval' | 'applying' | 'completed' | 'failed' | 'cancelled';
-type AgentRun = { id: ID; status: AgentRunStatus; task: string; repository: string; createdAt: ISODateTime; updatedAt: ISODateTime; error?: ApiError };
+type AgentRun = { id: ID; workspaceId: ID; status: AgentRunStatus; task: string; mode: 'ask' | 'plan' | 'execute'; runtime: 'cloud'; createdAt: ISODateTime; updatedAt: ISODateTime; result?: { summary: string; artifactIds: ID[] }; error?: ApiError };
+// ChangeProposal is an OPTIONAL GitHub integration artifact, not a required Agent outcome.
 type ChangeProposal = { id: ID; runId: ID; baseCommitSha: string; files: Array<{ path: string; status: 'added' | 'modified' | 'deleted'; unifiedDiff: string }>; createdAt: ISODateTime };
 type ApiError = { code: string; message: string; details?: Record<string, unknown>; requestId?: string };
 ```
@@ -73,44 +74,34 @@ data: {"messageId":"msg_1","createdAt":"2026-10-12T00:00:00.000Z"}
 - A single conversation must not initiate overlapping chat generations in v0.1 (`409 CONFLICT`). UI handles retry, abort, empty responses, rate limit and unauthenticated states.
 - `modelId` is an allowlisted alias exposed by backend, not arbitrary provider/model parameters. MVP may offer just one model.
 
-## 5. Agent runs & approvals
+## 5. GigaAgent — Workspace-first Runs and Approvals (DRAFT v0.2)
 
-| Method | Path | Input | Output |
-|---|---|---|---|
-| POST | `/api/v1/agent/runs` | `{ task: string, repository: string, baseRef?: string }` | `201 { run: AgentRun }` |
-| GET | `/api/v1/agent/runs/:id` | run ID | `200 { run: AgentRun }` |
-| GET | `/api/v1/agent/runs/:id/events` | run ID; optional `Last-Event-ID` | `200 text/event-stream` |
-| GET | `/api/v1/agent/runs/:id/proposal` | run ID | `200 { proposal: ChangeProposal }`; `404` if not ready |
-| POST | `/api/v1/agent/runs/:id/decision` | `{ proposalId: string, decision: "approve" | "reject" }` | `202 { run: AgentRun }` |
-| POST | `/api/v1/agent/runs/:id/cancel` | empty | `202 { run: AgentRun }` |
+> **Design direction changed 2026-10-13.** The GitHub-first repository→diff→PR design below was an unfrozen draft, not a required Agent behavior. GigaAgent is now a general-purpose Agentic Workspace, independent from GigaChat. [Agent API v0.2](GIGA_AGENT_API_V0.2.md), [Architecture](../architecture/GIGA_AGENT_ARCHITECTURE_V0.2.md) and proposed [ADR-003](../decisions/ADR-003-agentic-workspace-and-isolated-runtime.md) are the current candidates. No new endpoint here is implemented or FROZEN.
 
-### State machine
+| Method | Route | Responsibility |
+|---|---|---|
+| POST | /api/v1/agent/workspaces | Create blank workspace; Git optional |
+| GET | /api/v1/agent/workspaces | List authorized workspaces |
+| GET | /api/v1/agent/workspaces/:id | Workspace metadata |
+| GET | /api/v1/agent/workspaces/:id/files | Saved file tree |
+| POST | /api/v1/agent/runs | Create run with workspaceId, task, mode, runtime |
+| GET | /api/v1/agent/runs | List run history |
+| GET | /api/v1/agent/runs/:id | Current run status and result |
+| GET | /api/v1/agent/runs/:id/events | Replayable SSE |
+| POST | /api/v1/agent/runs/:id/messages | Follow-up instructions |
+| POST | /api/v1/agent/runs/:id/cancel | Safe cancellation |
+| GET | /api/v1/agent/runs/:id/artifacts | Durable results and downloads |
+| POST | /api/v1/agent/approvals/:id/decision | Decide exact privileged/external effect |
 
-```mermaid
-flowchart LR
-  Q["queued"] --> R["running"]
-  R --> A["awaiting_approval"]
-  A -->|approve| P["applying"]
-  P --> C["completed"]
-  A -->|reject| X["cancelled"]
-  Q --> X
-  R --> X
-  Q --> F["failed"]
-  R --> F
-  P --> F
-```
+**Request**: { workspaceId, task, mode: 'ask'|'plan'|'execute', runtime:'cloud', modelId? }; no required repository/baseRef. GitHub import and PR publication are optional integrations.
 
-**Agent event types (draft):** `run.status`, `tool.started`, `tool.completed`, `proposal.ready`, `run.completed`, `run.failed`, `heartbeat`. Server-side events have monotonically increasing `id`; frontend can reconnect and avoid duplicate rendering. Store enough event history to reconstruct a run after refresh.
+**States**: queued, running, awaiting_approval, applying, completed, failed, cancelled. Within running, use an optional phase planning/executing/observing/verifying. Completed means evidenced task output, **not** PR creation. Applying is for approved external actions; normal sandbox file edits/builds stay running.
 
-**Write policy and safety:**
+**SSE**: Keep proposed run.status, tool.started, tool.completed, run.completed, run.failed, heartbeat; new plan.updated, approval.required, artifact.ready are candidates requiring DTO/replay tests and Thư review. Store event IDs before broadcasting; Last-Event-ID reconnection cannot restart a task.
 
-1. Read-only tool calls may run on the allowlisted demo GitHub repository before approval.
-2. The agent produces a stable proposal/diff tied to `baseCommitSha`; no write operation occurs yet.
-3. Only an authenticated owner can approve or reject the exact `proposalId`; server re-checks approval state and current commit to prevent stale writes.
-4. After approval, server may create a branch/commit/PR under least-privilege repository credentials. Never permit direct pushes to default branch or unreviewed actions.
-5. Approval is single-use and idempotent; duplicate submits must not create duplicate PRs. Prefer an `Idempotency-Key` request header for retryable write requests.
-6. Enforce per-run limits on steps, duration and model token budget. Never execute model-provided shell commands on the API host in v0.1.
-7. Cancel is best-effort while external GitHub writes are executing; communicate whether a write has already happened.
+**Safety**: Hono/API host never executes model-generated shell. A separately isolated sandbox may run bounded code only after security/ADR approval. Ordinary authorized sandbox file writes need no GitHub-style review; privileged/external actions require explicit authenticated effect approval. Existing INV-07 remains controlling.
+
+**Compatibility**: This replaces an unfrozen Agent-only draft. The Auth/Conversation/Chat SSE draft sections are unaffected.
 
 ## 6. HTTP status, security & UX acceptance tests
 
@@ -119,7 +110,7 @@ flowchart LR
 - Login invalid password returns generic error; logout clears the session; browser refresh preserves authorized state.
 - Streaming works from deployed HTTPS web UI, including network abort and upstream error.
 - Chat delete denies cross-user data access and does not leave orphaned user-visible records.
-- Agent user cannot approve another user’s run; cannot approve mismatched proposal; duplicate approval does not duplicate commits/PRs.
+- Agent users cannot access another user's workspace/run/artifacts or approve another user's privileged effect; duplicate approval cannot duplicate external actions.
 - CORS is origin-allowlisted; no wildcard with credentialed endpoints; CSRF policy tested from an unrelated origin.
 - Health checks never expose connection strings or credentials.
 
