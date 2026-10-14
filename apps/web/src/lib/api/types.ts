@@ -87,3 +87,100 @@ export interface ToolCallStep {
 }
 
 export type ApiMode = 'real' | 'mock';
+
+// ==========================================
+// Skills & Personalization Types (Task 17T-30 / 17T-29 API Contract)
+// ==========================================
+
+export type ProductTarget = 'chat' | 'agent';
+export type SkillVisibility = 'built_in' | 'private';
+
+export interface SkillDefinition {
+  id: ID;
+  ownerId: ID | null;
+  slug: string;
+  title: string;
+  description: string;
+  visibility: SkillVisibility;
+  supportedProducts: ProductTarget[];
+  revision?: number;
+  createdAt: ISODateTime;
+}
+
+export interface SkillVersion {
+  id: ID;
+  skillId: ID;
+  versionNumber: number;
+  contentHash: string;
+  instructions: string;
+  createdAt: ISODateTime;
+}
+
+export interface SkillInstallation {
+  id: ID;
+  userId: ID;
+  skillId: ID;
+  selectedVersionId: ID;
+  enabled: boolean;
+  installedAt: ISODateTime;
+}
+
+export interface SkillListItem {
+  id: ID;
+  ownerId: ID | null;
+  slug: string;
+  title: string;
+  description: string;
+  visibility: SkillVisibility;
+  supportedProducts: ProductTarget[];
+  revision?: number;
+  createdAt: ISODateTime;
+  installed: boolean;
+  enabled: boolean;
+  selectedVersionId: ID | null;
+}
+
+export interface CreateSkillDto {
+  slug: string;
+  title: string;
+  description: string;
+  supportedProducts?: ProductTarget[];
+  instructions?: string;
+}
+
+export interface UpdateSkillDto {
+  title?: string;
+  description?: string;
+  supportedProducts?: ProductTarget[];
+  expectedRevision: number;
+}
+
+export interface CreateVersionDto {
+  instructions: string;
+}
+
+export interface InstallSkillDto {
+  versionId?: string;
+  enabled?: boolean;
+}
+
+export interface UpdateInstallationDto {
+  enabled?: boolean;
+  selectedVersionId?: string;
+}
+
+export interface UserPreferences {
+  revision: number;
+  preferredLanguage?: string | null;
+  responseLength: 'concise' | 'balanced' | 'detailed';
+  responseStyle: 'professional' | 'casual' | 'technical';
+  customInstructions: string;
+}
+
+export interface UpdatePreferencesDto {
+  expectedRevision: number;
+  preferredLanguage?: string | null;
+  responseLength?: 'concise' | 'balanced' | 'detailed';
+  responseStyle?: 'professional' | 'casual' | 'technical';
+  customInstructions?: string;
+}

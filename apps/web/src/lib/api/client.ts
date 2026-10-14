@@ -1,4 +1,22 @@
-import type { User, ApiError, Conversation, Message, AgentRun, ChangeProposal } from './types.js';
+import type {
+  User,
+  ApiError,
+  Conversation,
+  Message,
+  AgentRun,
+  ChangeProposal,
+  SkillListItem,
+  SkillDefinition,
+  SkillVersion,
+  SkillInstallation,
+  CreateSkillDto,
+  UpdateSkillDto,
+  CreateVersionDto,
+  InstallSkillDto,
+  UpdateInstallationDto,
+  UserPreferences,
+  UpdatePreferencesDto,
+} from './types.js';
 
 export class ApiException extends Error {
   constructor(
@@ -88,7 +106,7 @@ export class RealApiClient {
     });
   }
 
-  // Conversation & Chat Operations (Real mode flags if backend is not implemented yet)
+  // Conversation & Chat Operations
   async listConversations(): Promise<{ items: Conversation[]; nextCursor: string | null }> {
     return this.request<{ items: Conversation[]; nextCursor: string | null }>('/api/v1/conversations', {
       method: 'GET',
@@ -144,6 +162,93 @@ export class RealApiClient {
   async cancelAgentRun(runId: string): Promise<{ run: AgentRun }> {
     return this.request<{ run: AgentRun }>(`/api/v1/agent/runs/${encodeURIComponent(runId)}/cancel`, {
       method: 'POST',
+    });
+  }
+
+  // ==========================================
+  // Skills & Personalization Operations (17T-29 / 17T-30)
+  // ==========================================
+
+  // User Preferences
+  async getPreferences(): Promise<{ preferences: UserPreferences }> {
+    return this.request<{ preferences: UserPreferences }>('/api/v1/me/preferences', {
+      method: 'GET',
+    });
+  }
+
+  async updatePreferences(dto: UpdatePreferencesDto): Promise<{ preferences: UserPreferences }> {
+    return this.request<{ preferences: UserPreferences }>('/api/v1/me/preferences', {
+      method: 'PATCH',
+      body: JSON.stringify(dto),
+    });
+  }
+
+  // Skills Catalog & Management
+  async listSkills(options?: {
+    scope?: 'installed' | 'builtIn';
+    limit?: number;
+    cursor?: string;
+  }): Promise<{ items: SkillListItem[]; nextCursor: string | null }> {
+    const params = new URLSearchParams();
+    if (options?.scope) params.set('scope', options.scope);
+    if (options?.limit) params.set('limit', String(options.limit));
+    if (options?.cursor) params.set('cursor', options.cursor);
+    const qs = params.toString() ? `?${params.toString()}` : '';
+
+    return this.request<{ items: SkillListItem[]; nextCursor: string | null }>(`/api/v1/skills${qs}`, {
+      method: 'GET',
+    });
+  }
+
+  async createSkill(dto: CreateSkillDto): Promise<{ skill: SkillDefinition }> {
+    return this.request<{ skill: SkillDefinition }>('/api/v1/skills', {
+      method: 'POST',
+      body: JSON.stringify(dto),
+    });
+  }
+
+  async getSkill(
+    id: string
+  ): Promise<{ skill: SkillDefinition & { versions?: SkillVersion[]; installation?: SkillInstallation } }> {
+    return this.request<{ skill: SkillDefinition & { versions?: SkillVersion[]; installation?: SkillInstallation } }>(
+      `/api/v1/skills/${encodeURIComponent(id)}`,
+      {
+        method: 'GET',
+      }
+    );
+  }
+
+  async updateSkill(id: string, dto: UpdateSkillDto): Promise<{ skill: SkillDefinition }> {
+    return this.request<{ skill: SkillDefinition }>(`/api/v1/skills/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(dto),
+    });
+  }
+
+  async deleteSkill(id: string): Promise<void> {
+    await this.request<void>(`/api/v1/skills/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+  }
+
+  async publishSkillVersion(id: string, dto: CreateVersionDto): Promise<{ version: SkillVersion }> {
+    return this.request<{ version: SkillVersion }>(`/api/v1/skills/${encodeURIComponent(id)}/versions`, {
+      method: 'POST',
+      body: JSON.stringify(dto),
+    });
+  }
+
+  async installSkill(id: string, dto?: InstallSkillDto): Promise<{ installation: SkillInstallation }> {
+    return this.request<{ installation: SkillInstallation }>(`/api/v1/skills/${encodeURIComponent(id)}/install`, {
+      method: 'POST',
+      body: JSON.stringify(dto || {}),
+    });
+  }
+
+  async updateInstallation(id: string, dto: UpdateInstallationDto): Promise<{ installation: SkillInstallation }> {
+    return this.request<{ installation: SkillInstallation }>(`/api/v1/skills/${encodeURIComponent(id)}/installation`, {
+      method: 'PATCH',
+      body: JSON.stringify(dto),
     });
   }
 }
