@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import type pg from 'pg';
 import { newDb, DataType } from 'pg-mem';
 import { createDatabasePool, redactDatabaseUrl } from '../src/db/client.js';
-import { runMigrations } from '../src/db/migrate.js';
+import { runMigrations, type Migration } from '../src/db/migrate.js';
 
 export interface TestDbInstance {
   readonly pool: pg.Pool;
@@ -85,7 +85,7 @@ export function validateTestDatabaseSafety(
  * - If TEST_DATABASE_URL is provided, fails fast if safeguards fail or connection cannot be established (NO silent fallback to pg-mem).
  * - If TEST_DATABASE_URL is not set, explicitly uses memory-isolated pg-mem for unit tests.
  */
-export async function createTestDatabase(): Promise<TestDbInstance> {
+export async function createTestDatabase(migrations?: readonly Migration[]): Promise<TestDbInstance> {
   const testDatabaseUrl = process.env.TEST_DATABASE_URL?.trim();
 
   // Guard: ordinary DATABASE_URL must NEVER implicitly authorize real DB cleanup in tests
@@ -118,7 +118,7 @@ export async function createTestDatabase(): Promise<TestDbInstance> {
         throw new Error(`Active database '${actualDb}' does not contain 'test'`);
       }
 
-      await runMigrations(pool);
+      await runMigrations(pool, migrations);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       // Redact credentials in error message
@@ -132,7 +132,9 @@ export async function createTestDatabase(): Promise<TestDbInstance> {
       if (!check.safe) {
         throw new Error(`[test-db-safety] Refusing cleanup: ${check.reason}`);
       }
-      await pool.query('TRUNCATE users, sessions, user_preferences, skill_installations, skill_versions, skill_definitions CASCADE;');
+      await pool.query(
+        'TRUNCATE users, sessions, user_preferences, skill_installations, skill_versions, skill_definitions, conversations, messages CASCADE;'
+      );
     };
 
     return { pool, cleanup, isMemory: false };
@@ -188,9 +190,15 @@ export async function createTestDatabase(): Promise<TestDbInstance> {
   const adapter = db.adapters.createPg();
   const pool = new adapter.Pool() as unknown as pg.Pool;
 
-  await runMigrations(pool);
+  await runMigrations(pool, migrations);
 
   const cleanup = async (): Promise<void> => {
+    try {
+      await pool.query('DELETE FROM messages;');
+      await pool.query('DELETE FROM conversations;');
+    } catch {
+      // Ignore if tables do not exist yet in test
+    }
     await pool.query('DELETE FROM skill_installations;');
     await pool.query('DELETE FROM skill_versions;');
     await pool.query('DELETE FROM skill_definitions;');

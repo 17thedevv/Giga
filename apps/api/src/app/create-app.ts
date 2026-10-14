@@ -6,6 +6,10 @@ import { AuthService } from '../modules/auth/auth-service.js';
 import { createAuthRoutes } from '../modules/auth/auth-routes.js';
 import { createCsrfMiddleware } from '../modules/auth/csrf-middleware.js';
 import { AppError } from '../modules/auth/auth-validation.js';
+import { ConversationRepository } from '../db/repositories/conversation-repository.js';
+import { MessageRepository } from '../db/repositories/message-repository.js';
+import { ConversationsService } from '../modules/conversations/conversations-service.js';
+import { createConversationRoutes } from '../modules/conversations/conversations-routes.js';
 import { DEFAULT_DEV_ORIGINS, type AppConfig } from './config.js';
 
 export interface HealthResponse {
@@ -24,6 +28,7 @@ export interface ErrorResponse {
 export interface AppDependencies {
   readonly pool?: pg.Pool;
   readonly authService?: AuthService;
+  readonly conversationsService?: ConversationsService;
   readonly config?: Partial<AppConfig>;
 }
 
@@ -74,6 +79,22 @@ export function createApp(dependencies: AppDependencies = {}): Hono {
       cookieConfig,
     });
     app.route('/api/v1/auth', authRouter);
+  }
+
+  // Mount Conversations module if conversationsService or pool is available alongside authService
+  let conversationsService = dependencies.conversationsService;
+  if (!conversationsService && dependencies.pool) {
+    const convRepo = new ConversationRepository(dependencies.pool);
+    const msgRepo = new MessageRepository(dependencies.pool);
+    conversationsService = new ConversationsService(convRepo, msgRepo);
+  }
+
+  if (conversationsService && authService) {
+    const conversationsRouter = createConversationRoutes({
+      conversationsService,
+      authService,
+    });
+    app.route('/api/v1/conversations', conversationsRouter);
   }
 
   // 404 handler for unknown routes
