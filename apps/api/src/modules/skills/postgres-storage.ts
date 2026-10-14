@@ -17,6 +17,10 @@ import {
   type WorkspaceSkillDefault,
   type ProductTarget,
   type SkillVisibility,
+  type SkillListItem,
+  type SkillActorContext,
+  type ListSkillsOptions,
+  type PaginatedSkillList,
   SkillValidationError,
   SkillResolutionError,
   SkillConflictError,
@@ -31,11 +35,7 @@ import {
   computeDeterministicHash,
 } from './parser.js';
 
-export interface SkillActorContext {
-  userId?: string;
-  isAdmin?: boolean;
-  isSystem?: boolean;
-}
+export type { SkillActorContext };
 
 export interface CreateSkillParams {
   id?: string;
@@ -76,6 +76,7 @@ interface SkillDefinitionDbRow {
   description: string;
   visibility: string;
   supported_products: string[];
+  revision?: number;
   created_at: Date | string;
 }
 
@@ -97,6 +98,22 @@ interface SkillInstallationDbRow {
   installed_at: Date | string;
 }
 
+interface SkillListDbRow {
+  id: string;
+  owner_id: string | null;
+  slug: string;
+  title: string;
+  description: string;
+  visibility: string;
+  supported_products: string[];
+  revision?: number;
+  created_at: Date | string;
+  exact_created_at?: string;
+  installed: boolean;
+  enabled: boolean | null;
+  selected_version_id: string | null;
+}
+
 
 function mapRowToSkillDefinition(row: SkillDefinitionDbRow): SkillDefinition {
   return {
@@ -107,6 +124,7 @@ function mapRowToSkillDefinition(row: SkillDefinitionDbRow): SkillDefinition {
     description: row.description,
     visibility: row.visibility as SkillVisibility,
     supportedProducts: (row.supported_products ?? []) as ProductTarget[],
+    revision: Number(row.revision ?? 1),
     createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
   };
 }
@@ -147,7 +165,7 @@ export class PostgresSkillStorage implements SkillStorage {
     }
 
     const query = `
-      SELECT id, owner_id, slug, title, description, visibility, supported_products, created_at
+      SELECT id, owner_id, slug, title, description, visibility, supported_products, revision, created_at
       FROM skill_definitions
       WHERE id = $1
       LIMIT 1;
@@ -181,7 +199,7 @@ export class PostgresSkillStorage implements SkillStorage {
 
     if (viewerUserId) {
       const query = `
-        SELECT id, owner_id, slug, title, description, visibility, supported_products, created_at
+        SELECT id, owner_id, slug, title, description, visibility, supported_products, revision, created_at
         FROM skill_definitions
         WHERE slug = $1 AND (
           visibility = 'built_in' OR (visibility = 'private' AND owner_id = $2)
@@ -196,7 +214,7 @@ export class PostgresSkillStorage implements SkillStorage {
 
     // Viewer is not specified: only built-in skills are accessible
     const query = `
-      SELECT id, owner_id, slug, title, description, visibility, supported_products, created_at
+      SELECT id, owner_id, slug, title, description, visibility, supported_products, revision, created_at
       FROM skill_definitions
       WHERE slug = $1 AND visibility = 'built_in'
       LIMIT 1;
@@ -348,7 +366,7 @@ export class PostgresSkillStorage implements SkillStorage {
     const query = `
       INSERT INTO skill_definitions (id, owner_id, slug, title, description, visibility, supported_products)
       VALUES (COALESCE($1, gen_random_uuid()), $2, $3, $4, $5, $6, $7)
-      RETURNING id, owner_id, slug, title, description, visibility, supported_products, created_at;
+      RETURNING id, owner_id, slug, title, description, visibility, supported_products, revision, created_at;
     `;
     try {
       const result = await this.pool.query<SkillDefinitionDbRow>(query, [
@@ -390,7 +408,7 @@ export class PostgresSkillStorage implements SkillStorage {
 
     // 1. Verify parent skill exists and enforce publication authorization
     const queryParent = `
-      SELECT id, owner_id, slug, title, description, visibility, supported_products, created_at
+      SELECT id, owner_id, slug, title, description, visibility, supported_products, revision, created_at
       FROM skill_definitions
       WHERE id = $1
       LIMIT 1;
@@ -592,6 +610,461 @@ export class PostgresSkillStorage implements SkillStorage {
       }
       throw err;
     }
+  }
+
+  /**
+   * Atomically updates an installation's enabled flag and/or selected version in a single SQL query.
+   * Prevents inconsistent partial states.
+   */
+  public async updateInstallationAtomic(
+    userId: string,
+    skillId: string,
+    updates: { enabled?: boolean; selectedVersionId?: string },
+    actor: SkillActorContext
+  ): Promise<SkillInstallation> {
+    if (!actor) {
+      throw new SkillValidationError(
+        'SKILL_UNAUTHORIZED',
+        'Actor authorization context is required to modify an installation'
+      );
+    }
+    if (!actor.isAdmin && actor.userId !== userId) {
+      throw new SkillValidationError('SKILL_UNAUTHORIZED', 'Cannot modify installation for another user');
+    }
+
+    if (updates.enabled === undefined && updates.selectedVersionId === undefined) {
+      const current = await this.getInstallation(userId, skillId);
+      if (!current) {
+        throw new SkillResolutionError('SKILL_NOT_FOUND', `Skill installation not found for skill '${skillId}'`);
+      }
+      return current;
+    }
+
+    const query = `
+      UPDATE skill_installations
+      SET
+        enabled = COALESCE($3, enabled),
+        selected_version_id = COALESCE($4, selected_version_id)
+      WHERE user_id = $1 AND skill_id = $2
+      RETURNING id, user_id, skill_id, selected_version_id, enabled, installed_at;
+    `;
+
+    try {
+      const result = await this.pool.query<SkillInstallationDbRow>(query, [
+        userId,
+        skillId,
+        updates.enabled !== undefined ? updates.enabled : null,
+        updates.selectedVersionId !== undefined ? updates.selectedVersionId : null,
+      ]);
+      const row = result.rows[0];
+      if (!row) {
+        throw new SkillResolutionError('SKILL_NOT_FOUND', `Skill installation not found for skill '${skillId}'`);
+      }
+      return mapRowToInstallation(row);
+    } catch (err: unknown) {
+      const pgErr = err as { code?: string; message?: string };
+      const isFkViolation =
+        pgErr.code === '23503' ||
+        (typeof pgErr.message === 'string' && pgErr.message.includes('foreign key constraint'));
+      if (isFkViolation) {
+        throw new SkillResolutionError(
+          'SKILL_NOT_FOUND',
+          `Selected version '${updates.selectedVersionId}' does not belong to skill '${skillId}'`
+        );
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Atomically creates a skill definition, initial immutable version 1, and user installation in a single transaction.
+   * If any step fails, the entire transaction rolls back cleanly leaving no orphaned skill.
+   */
+  public async createSkillWithInitialVersionAndInstallationAtomic(params: {
+    skill: CreateSkillParams;
+    instructions: string;
+    contentHash?: string;
+  }): Promise<{ skill: SkillDefinition; version: SkillVersion; installation: SkillInstallation }> {
+    const slug = params.skill.slug.trim();
+    if (slug.length < MIN_SLUG_LENGTH || slug.length > MAX_SLUG_LENGTH || !SLUG_REGEX.test(slug)) {
+      throw new SkillValidationError('SKILL_VALIDATION_ERROR', `Invalid skill slug '${slug}'`);
+    }
+
+    const description = params.skill.description.trim();
+    if (description.length < MIN_DESCRIPTION_LENGTH || description.length > MAX_DESCRIPTION_LENGTH) {
+      throw new SkillValidationError('SKILL_VALIDATION_ERROR', 'Invalid skill description length');
+    }
+
+    if (!params.skill.actor) {
+      throw new SkillValidationError('SKILL_UNAUTHORIZED', 'Actor authorization context is required to create a skill');
+    }
+
+    if (!params.skill.actor.isAdmin && (!params.skill.actor.userId || params.skill.actor.userId !== params.skill.ownerId)) {
+      throw new SkillValidationError('SKILL_UNAUTHORIZED', 'Cannot create a private skill for another owner');
+    }
+
+    const bytes = getUtf8ByteCount(params.instructions);
+    if (bytes > MAX_INSTRUCTION_BYTES) {
+      throw new SkillValidationError('SKILL_OVERSIZED', `Instructions exceed ${MAX_INSTRUCTION_BYTES} bytes`);
+    }
+
+    const expectedHash = computeDeterministicHash(params.instructions);
+    if (params.contentHash && params.contentHash !== expectedHash) {
+      throw new SkillValidationError(
+        'SKILL_VALIDATION_ERROR',
+        `Provided content hash '${params.contentHash}' does not match deterministic instruction hash '${expectedHash}'`
+      );
+    }
+
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      const insertSkillQuery = `
+        INSERT INTO skill_definitions (id, owner_id, slug, title, description, visibility, supported_products)
+        VALUES (COALESCE($1, gen_random_uuid()), $2, $3, $4, $5, $6, $7)
+        RETURNING id, owner_id, slug, title, description, visibility, supported_products, revision, created_at;
+      `;
+      const skillRes = await client.query<SkillDefinitionDbRow>(insertSkillQuery, [
+        params.skill.id ?? null,
+        params.skill.ownerId,
+        slug,
+        params.skill.title.trim(),
+        description,
+        params.skill.visibility,
+        params.skill.supportedProducts,
+      ]);
+      const skillRow = skillRes.rows[0];
+      if (!skillRow) throw new Error('Failed to insert skill: no row returned');
+      const skill = mapRowToSkillDefinition(skillRow);
+
+      const insertVersionQuery = `
+        INSERT INTO skill_versions (id, skill_id, version_number, content_hash, instructions)
+        VALUES (gen_random_uuid(), $1, 1, $2, $3)
+        RETURNING id, skill_id, version_number, content_hash, instructions, created_at;
+      `;
+      const versionRes = await client.query<SkillVersionDbRow>(insertVersionQuery, [
+        skill.id,
+        expectedHash,
+        params.instructions,
+      ]);
+      const versionRow = versionRes.rows[0];
+      if (!versionRow) throw new Error('Failed to insert initial version: no row returned');
+      const version = mapRowToSkillVersion(versionRow);
+
+      const insertInstQuery = `
+        INSERT INTO skill_installations (id, user_id, skill_id, selected_version_id, enabled)
+        VALUES (gen_random_uuid(), $1, $2, $3, true)
+        RETURNING id, user_id, skill_id, selected_version_id, enabled, installed_at;
+      `;
+      const instRes = await client.query<SkillInstallationDbRow>(insertInstQuery, [
+        params.skill.ownerId,
+        skill.id,
+        version.id,
+      ]);
+      const instRow = instRes.rows[0];
+      if (!instRow) throw new Error('Failed to insert initial installation: no row returned');
+      const installation = mapRowToInstallation(instRow);
+
+      await client.query('COMMIT');
+      return { skill, version, installation };
+    } catch (err: unknown) {
+      await client.query('ROLLBACK');
+      const pgErr = err as { code?: string; message?: string };
+      if (pgErr.code === '23505') {
+        throw new SkillConflictError(`Skill slug '${slug}' already exists in this scope`, [slug]);
+      }
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Lists skills accessible to the viewer with strict scope validation and bounded deterministic pagination.
+   */
+  public async listSkills(
+    viewerUserId: string,
+    options?: ListSkillsOptions
+  ): Promise<PaginatedSkillList> {
+    if (!viewerUserId || typeof viewerUserId !== 'string') {
+      throw new SkillValidationError('SKILL_UNAUTHORIZED', 'Viewer user ID is required to list skills');
+    }
+
+    const scope = options?.scope;
+    if (scope && scope !== 'installed' && scope !== 'builtIn') {
+      throw new SkillValidationError(
+        'SKILL_VALIDATION_ERROR',
+        `Invalid scope '${scope}': expected 'installed' or 'builtIn'`
+      );
+    }
+
+    const limit = Math.min(Math.max(options?.limit ?? 20, 1), 100);
+
+    let whereClause = `(d.visibility = 'built_in' OR (d.visibility = 'private' AND d.owner_id = $1))`;
+    if (scope === 'installed') {
+      whereClause = `i.id IS NOT NULL AND (d.visibility = 'built_in' OR (d.visibility = 'private' AND d.owner_id = $1))`;
+    } else if (scope === 'builtIn') {
+      whereClause = `d.visibility = 'built_in'`;
+    }
+
+    const queryParams: unknown[] = [viewerUserId];
+
+    if (options?.cursor !== undefined) {
+      if (typeof options.cursor !== 'string' || options.cursor.trim() === '') {
+        throw new SkillValidationError('SKILL_VALIDATION_ERROR', 'Invalid pagination cursor: cursor cannot be empty');
+      }
+      let decoded: string;
+      try {
+        decoded = Buffer.from(options.cursor, 'base64url').toString('utf8');
+      } catch {
+        throw new SkillValidationError(
+          'SKILL_VALIDATION_ERROR',
+          'Invalid pagination cursor: malformed base64url encoding'
+        );
+      }
+      const parts = decoded.split('::');
+      if (parts.length !== 2) {
+        throw new SkillValidationError(
+          'SKILL_VALIDATION_ERROR',
+          'Invalid pagination cursor format: expected timestamp::uuid'
+        );
+      }
+      const [cursorDate, cursorId] = parts;
+      if (!cursorDate || isNaN(Date.parse(cursorDate))) {
+        throw new SkillValidationError('SKILL_VALIDATION_ERROR', 'Invalid pagination cursor: invalid timestamp');
+      }
+      const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (!cursorId || !UUID_REGEX.test(cursorId)) {
+        throw new SkillValidationError('SKILL_VALIDATION_ERROR', 'Invalid pagination cursor: invalid UUID');
+      }
+      queryParams.push(cursorDate, cursorId);
+      whereClause += ` AND (d.created_at > $${queryParams.length - 1} OR (d.created_at = $${queryParams.length - 1} AND d.id > $${queryParams.length}))`;
+    }
+
+    queryParams.push(limit + 1);
+
+    const query = `
+      SELECT
+        d.id,
+        d.owner_id,
+        d.slug,
+        d.title,
+        d.description,
+        d.visibility,
+        d.supported_products,
+        d.revision,
+        d.created_at,
+        to_char(d.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS exact_created_at,
+        (i.id IS NOT NULL) AS installed,
+        COALESCE(i.enabled, false) AS enabled,
+        i.selected_version_id
+      FROM skill_definitions d
+      LEFT JOIN skill_installations i ON i.skill_id = d.id AND i.user_id = $1
+      WHERE ${whereClause}
+      ORDER BY d.created_at ASC, d.id ASC
+      LIMIT $${queryParams.length};
+    `;
+
+    const result = await this.pool.query<SkillListDbRow>(query, queryParams);
+    const hasMore = result.rows.length > limit;
+    const pageRows = hasMore ? result.rows.slice(0, limit) : result.rows;
+
+    const items: SkillListItem[] = pageRows.map((row) => ({
+      id: row.id,
+      ownerId: row.owner_id,
+      slug: row.slug,
+      title: row.title,
+      description: row.description,
+      visibility: row.visibility as SkillVisibility,
+      supportedProducts: (row.supported_products ?? []) as ProductTarget[],
+      revision: Number(row.revision ?? 1),
+      createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
+      installed: Boolean(row.installed),
+      enabled: Boolean(row.enabled),
+      selectedVersionId: row.selected_version_id ?? null,
+    }));
+
+    let nextCursor: string | null = null;
+    if (hasMore && pageRows.length > 0) {
+      const lastRow = pageRows[pageRows.length - 1];
+      if (lastRow) {
+        const exactTimestamp =
+          lastRow.exact_created_at ||
+          (lastRow.created_at instanceof Date ? lastRow.created_at.toISOString() : String(lastRow.created_at));
+        nextCursor = Buffer.from(`${exactTimestamp}::${lastRow.id}`).toString('base64url');
+      }
+    }
+
+    return { items, nextCursor };
+  }
+
+  /**
+   * Updates metadata (title, description, supportedProducts) of a private skill.
+   * Built-in skills cannot be updated.
+   * Cross-tenant access is rejected with SKILL_NOT_FOUND to prevent information disclosure.
+   * Enforces optimistic concurrency control (CAS) via expectedRevision.
+   */
+  public async updateSkill(
+    skillId: string,
+    actor: SkillActorContext,
+    updates: {
+      title?: string;
+      description?: string;
+      supportedProducts?: ProductTarget[];
+      expectedRevision: number;
+    }
+  ): Promise<SkillDefinition> {
+    if (!actor) {
+      throw new SkillValidationError('SKILL_UNAUTHORIZED', 'Actor authorization context is required');
+    }
+
+    if (
+      updates.expectedRevision === undefined ||
+      updates.expectedRevision === null ||
+      typeof updates.expectedRevision !== 'number' ||
+      !Number.isInteger(updates.expectedRevision) ||
+      updates.expectedRevision < 1
+    ) {
+      throw new SkillValidationError(
+        'SKILL_VALIDATION_ERROR',
+        'expectedRevision is required and must be a positive integer (>= 1)'
+      );
+    }
+
+    const queryExisting = `
+      SELECT id, owner_id, slug, title, description, visibility, supported_products, revision, created_at
+      FROM skill_definitions
+      WHERE id = $1
+      LIMIT 1;
+    `;
+    const existingRes = await this.pool.query<SkillDefinitionDbRow>(queryExisting, [skillId]);
+    const existingRow = existingRes.rows[0];
+    if (!existingRow) {
+      throw new SkillResolutionError('SKILL_NOT_FOUND', `Skill '${skillId}' not found`);
+    }
+    const existingSkill = mapRowToSkillDefinition(existingRow);
+
+    if (existingSkill.visibility === 'built_in') {
+      throw new SkillValidationError('SKILL_UNAUTHORIZED', 'Built-in skills cannot be modified');
+    }
+
+    if (!actor.isAdmin && (!actor.userId || actor.userId !== existingSkill.ownerId)) {
+      throw new SkillResolutionError('SKILL_NOT_FOUND', `Skill '${skillId}' not found`);
+    }
+
+    let titleToSet = existingSkill.title;
+    if (updates.title !== undefined) {
+      const trimmedTitle = updates.title.trim();
+      if (trimmedTitle.length === 0 || trimmedTitle.length > 100) {
+        throw new SkillValidationError('SKILL_VALIDATION_ERROR', 'Title must be between 1 and 100 characters');
+      }
+      titleToSet = trimmedTitle;
+    }
+
+    let descToSet = existingSkill.description;
+    if (updates.description !== undefined) {
+      const trimmedDesc = updates.description.trim();
+      if (trimmedDesc.length < MIN_DESCRIPTION_LENGTH || trimmedDesc.length > MAX_DESCRIPTION_LENGTH) {
+        throw new SkillValidationError(
+          'SKILL_VALIDATION_ERROR',
+          `Description must be between ${MIN_DESCRIPTION_LENGTH} and ${MAX_DESCRIPTION_LENGTH} characters`
+        );
+      }
+      descToSet = trimmedDesc;
+    }
+
+    let prodsToSet = existingSkill.supportedProducts;
+    if (updates.supportedProducts !== undefined) {
+      if (!Array.isArray(updates.supportedProducts) || updates.supportedProducts.length === 0) {
+        throw new SkillValidationError('SKILL_VALIDATION_ERROR', 'supportedProducts must be a non-empty array');
+      }
+      for (const p of updates.supportedProducts) {
+        if (p !== 'chat' && p !== 'agent') {
+          throw new SkillValidationError('SKILL_VALIDATION_ERROR', `Invalid product target '${p}'`);
+        }
+      }
+      prodsToSet = [...new Set(updates.supportedProducts)];
+    }
+
+    // Atomic CAS update: matches expectedRevision and increments revision by 1
+    const updateQuery = `
+      UPDATE skill_definitions
+      SET title = $2, description = $3, supported_products = $4, revision = revision + 1
+      WHERE id = $1 AND revision = $5
+      RETURNING id, owner_id, slug, title, description, visibility, supported_products, revision, created_at;
+    `;
+    const res = await this.pool.query<SkillDefinitionDbRow>(updateQuery, [
+      skillId,
+      titleToSet,
+      descToSet,
+      prodsToSet,
+      updates.expectedRevision,
+    ]);
+    const updatedRow = res.rows[0];
+    if (!updatedRow) {
+      const checkRes = await this.pool.query<{ revision: number }>(
+        'SELECT revision FROM skill_definitions WHERE id = $1',
+        [skillId]
+      );
+      if (checkRes.rows.length === 0) {
+        throw new SkillResolutionError('SKILL_NOT_FOUND', `Skill '${skillId}' not found`);
+      }
+      const currentRev = checkRes.rows[0]?.revision ?? 1;
+      throw new SkillConflictError(
+        `Metadata update conflict: expectedRevision ${updates.expectedRevision} does not match current revision ${currentRev}`,
+        [existingSkill.slug]
+      );
+    }
+    return mapRowToSkillDefinition(updatedRow);
+  }
+
+  /**
+   * Deletes a private skill definition.
+   * Built-in skills cannot be deleted.
+   * Versions and installations cascade delete due to database constraints.
+   */
+  public async deleteSkill(skillId: string, actor: SkillActorContext): Promise<void> {
+    if (!actor) {
+      throw new SkillValidationError('SKILL_UNAUTHORIZED', 'Actor authorization context is required');
+    }
+
+    const queryExisting = `
+      SELECT id, owner_id, slug, title, description, visibility, supported_products, revision, created_at
+      FROM skill_definitions
+      WHERE id = $1
+      LIMIT 1;
+    `;
+    const existingRes = await this.pool.query<SkillDefinitionDbRow>(queryExisting, [skillId]);
+    const existingRow = existingRes.rows[0];
+    if (!existingRow) {
+      throw new SkillResolutionError('SKILL_NOT_FOUND', `Skill '${skillId}' not found`);
+    }
+    const existingSkill = mapRowToSkillDefinition(existingRow);
+
+    if (existingSkill.visibility === 'built_in') {
+      throw new SkillValidationError('SKILL_UNAUTHORIZED', 'Built-in skills cannot be deleted');
+    }
+
+    if (!actor.isAdmin && (!actor.userId || actor.userId !== existingSkill.ownerId)) {
+      throw new SkillResolutionError('SKILL_NOT_FOUND', `Skill '${skillId}' not found`);
+    }
+
+    await this.pool.query('DELETE FROM skill_definitions WHERE id = $1;', [skillId]);
+  }
+
+  /**
+   * Gets the next sequential version number for a skill.
+   */
+  public async getNextVersionNumber(skillId: string): Promise<number> {
+    const query = `
+      SELECT COALESCE(MAX(version_number), 0) + 1 AS next_version
+      FROM skill_versions
+      WHERE skill_id = $1;
+    `;
+    const res = await this.pool.query<{ next_version: string | number }>(query, [skillId]);
+    const row = res.rows[0];
+    return Number(row?.next_version ?? 1);
   }
 
   /**

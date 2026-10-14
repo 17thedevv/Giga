@@ -12,3 +12,6 @@ export * from './postgres-storage.js';
 export * from './preferences-storage.js';
 export * from './resolver.js';
 export * from './composer.js';
+export * from './skills-service.js';
+export * from './skills-routes.js';
+export * from './preferences-routes.js';

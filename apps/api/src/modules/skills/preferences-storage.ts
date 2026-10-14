@@ -120,10 +120,10 @@ export class PostgresUserPreferencesStorage implements UserPreferencesStorage {
     const current = await this.getPreferences(userId);
 
     if (!current) {
-      // First time saving preferences: initial revision is 1
-      if (expectedRevision !== undefined && expectedRevision !== 0 && expectedRevision !== 1) {
+      // First time saving preferences: initial revision is 1, caller must specify expectedRevision === 0 (or omit)
+      if (expectedRevision !== undefined && expectedRevision !== 0) {
         throw new SkillConflictError(
-          `Revision conflict: preferences do not exist yet, but expected revision was ${expectedRevision}`,
+          `Revision conflict: preferences do not exist yet, expectedRevision must be 0 (received ${expectedRevision})`,
           []
         );
       }
@@ -133,18 +133,29 @@ export class PostgresUserPreferencesStorage implements UserPreferencesStorage {
         VALUES ($1, 1, $2, $3, $4, $5, NOW())
         RETURNING user_id, revision, preferred_language, response_length, response_style, custom_instructions, updated_at;
       `;
-      const result = await this.pool.query<UserPreferencesDbRow>(insertQuery, [
-        userId,
-        preferences.preferredLanguage ?? null,
-        preferences.responseLength ?? null,
-        preferences.responseStyle ?? null,
-        preferences.customInstructions ?? '',
-      ]);
-      const row = result.rows[0];
-      if (!row) {
-        throw new Error('Failed to insert user preferences: no row returned');
+      try {
+        const result = await this.pool.query<UserPreferencesDbRow>(insertQuery, [
+          userId,
+          preferences.preferredLanguage ?? null,
+          preferences.responseLength ?? null,
+          preferences.responseStyle ?? null,
+          preferences.customInstructions ?? '',
+        ]);
+        const row = result.rows[0];
+        if (!row) {
+          throw new Error('Failed to insert user preferences: no row returned');
+        }
+        return mapRowToPreferences(row);
+      } catch (err: unknown) {
+        const pgErr = err as { code?: string; message?: string };
+        if (pgErr.code === '23505') {
+          throw new SkillConflictError(
+            'Concurrent modification conflict: user preferences were initialized by another request',
+            []
+          );
+        }
+        throw err;
       }
-      return mapRowToPreferences(row);
     }
 
     // Existing preferences: check optimistic concurrency control revision
@@ -211,8 +222,11 @@ export class InMemoryUserPreferencesStorage implements UserPreferencesStorage {
 
     const current = this.prefs.get(userId);
     if (!current) {
-      if (expectedRevision !== undefined && expectedRevision !== 0 && expectedRevision !== 1) {
-        throw new SkillConflictError(`Revision conflict: preferences do not exist yet, expected ${expectedRevision}`, []);
+      if (expectedRevision !== undefined && expectedRevision !== 0) {
+        throw new SkillConflictError(
+          `Revision conflict: preferences do not exist yet, expectedRevision must be 0 (received ${expectedRevision})`,
+          []
+        );
       }
       const record: UserPreferencesSnapshot = {
         ...preferences,

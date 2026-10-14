@@ -37,9 +37,10 @@ Neither a skill ID nor plugin ID is proof of authorization. The backend resolves
 
 All rows are **candidates**; some endpoints may be consolidated with approved shared API patterns. No MCP endpoint is exposed solely to let the model install arbitrary servers.
 
-## 3. Candidate DTOs
+## 3. Candidate DTOs (P0 Implemented Shapes)
 
 ~~~ts
+// User Preferences
 interface UserPreferences {
   revision: number;
   preferredLanguage?: string;
@@ -47,31 +48,101 @@ interface UserPreferences {
   responseStyle: 'professional' | 'casual' | 'technical';
   customInstructions: string;
 }
-interface Skill {
+
+interface UpdateUserPreferencesRequest {
+  expectedRevision: number; // Mandatory for optimistic concurrency control (CAS; 0 for initial write)
+  preferredLanguage?: string | null;
+  responseLength?: 'concise' | 'balanced' | 'detailed';
+  responseStyle?: 'professional' | 'casual' | 'technical';
+  customInstructions?: string;
+}
+
+// Skills Metadata & Catalog
+interface SkillListItem {
   id: string;
+  ownerId: string | null;
   slug: string;
   title: string;
   description: string;
   visibility: 'built_in' | 'private';
   supportedProducts: Array<'chat' | 'agent'>;
-  selectedVersionId?: string;
+  revision: number;
+  createdAt: string;
+  installed: boolean;
   enabled: boolean;
+  selectedVersionId: string | null;
 }
+
+interface SkillDetail {
+  id: string;
+  ownerId: string | null;
+  slug: string;
+  title: string;
+  description: string;
+  visibility: 'built_in' | 'private';
+  supportedProducts: Array<'chat' | 'agent'>;
+  revision: number;
+  createdAt: string;
+  latestVersion: SkillVersion | null;
+  installation: SkillInstallation | null;
+}
+
+interface CreateSkillRequest {
+  slug: string;
+  title: string;
+  description: string;
+  supportedProducts?: Array<'chat' | 'agent'>;
+  instructions?: string; // Optional initial version 1 + auto-install
+}
+
+interface UpdateSkillRequest {
+  expectedRevision: number; // Mandatory for optimistic concurrency control (CAS)
+  title?: string;
+  description?: string;
+  supportedProducts?: Array<'chat' | 'agent'>;
+}
+
+// Skill Versions
 interface SkillVersion {
   id: string;
   skillId: string;
-  revision: number;
-  sha256: string;
-  content: string;
+  versionNumber: number;
+  contentHash: string; // Deterministic SHA-256 computed exclusively by server
+  instructions: string;
   createdAt: string;
 }
+
+interface CreateVersionRequest {
+  instructions: string; // Server exclusively computes deterministic SHA-256 contentHash
+}
+
+// Skill Installations
+interface SkillInstallation {
+  id: string;
+  userId: string;
+  skillId: string;
+  selectedVersionId: string;
+  enabled: boolean;
+  installedAt: string;
+}
+
+interface InstallSkillRequest {
+  versionId?: string; // Pins specific version; defaults to latest if omitted
+  enabled?: boolean;  // Defaults to true
+}
+
+interface UpdateInstallationRequest {
+  enabled?: boolean;
+  selectedVersionId?: string;
+}
+
 interface SkillActivation {
   skillIds: string[];        // IDs user selected manually
   source?: 'manual';         // MVP only
 }
 ~~~
 
-Skill version hash is server-computed. PATCH with expectedRevision rejects stale edits 409. Mutable editing of an immutable revision is forbidden; version publish creates a new SkillVersion.
+Skill version hash is server-computed. PATCH with expectedRevision rejects stale edits 409 CONFLICT. Mutable editing of an immutable revision is forbidden; version publish creates a new SkillVersion. P0 endpoints are implemented in `apps/api`; public contract status remains DRAFT pending W1 joint review and deployed browser verification.
 
 ## 4. Hook into Chat and Agent without changing identity boundaries
 

@@ -10,6 +10,12 @@ import { ConversationRepository } from '../db/repositories/conversation-reposito
 import { MessageRepository } from '../db/repositories/message-repository.js';
 import { ConversationsService } from '../modules/conversations/conversations-service.js';
 import { createConversationRoutes } from '../modules/conversations/conversations-routes.js';
+import { PostgresSkillStorage } from '../modules/skills/postgres-storage.js';
+import { PostgresUserPreferencesStorage } from '../modules/skills/preferences-storage.js';
+import { SkillsService } from '../modules/skills/skills-service.js';
+import { createSkillsRoutes } from '../modules/skills/skills-routes.js';
+import { createPreferencesRoutes } from '../modules/skills/preferences-routes.js';
+import { SkillError } from '../modules/skills/types.js';
 import { DEFAULT_DEV_ORIGINS, type AppConfig } from './config.js';
 
 export interface HealthResponse {
@@ -29,6 +35,9 @@ export interface AppDependencies {
   readonly pool?: pg.Pool;
   readonly authService?: AuthService;
   readonly conversationsService?: ConversationsService;
+  readonly skillStorage?: PostgresSkillStorage;
+  readonly preferencesStorage?: PostgresUserPreferencesStorage;
+  readonly skillsService?: SkillsService;
   readonly config?: Partial<AppConfig>;
 }
 
@@ -97,6 +106,35 @@ export function createApp(dependencies: AppDependencies = {}): Hono {
     app.route('/api/v1/conversations', conversationsRouter);
   }
 
+  // Mount Skills and Preferences modules if dependencies/pool are available
+  let skillStorage = dependencies.skillStorage;
+  let preferencesStorage = dependencies.preferencesStorage;
+  if (!skillStorage && dependencies.pool) {
+    skillStorage = new PostgresSkillStorage(dependencies.pool);
+  }
+  if (!preferencesStorage && dependencies.pool) {
+    preferencesStorage = new PostgresUserPreferencesStorage(dependencies.pool);
+  }
+
+  let skillsService = dependencies.skillsService;
+  if (!skillsService && skillStorage && preferencesStorage) {
+    skillsService = new SkillsService(skillStorage, preferencesStorage);
+  }
+
+  if (authService && skillsService) {
+    const preferencesRouter = createPreferencesRoutes({
+      skillsService,
+      authService,
+    });
+    app.route('/api/v1/me/preferences', preferencesRouter);
+
+    const skillsRouter = createSkillsRoutes({
+      skillsService,
+      authService,
+    });
+    app.route('/api/v1/skills', skillsRouter);
+  }
+
   // 404 handler for unknown routes
   app.notFound((c) => {
     const errorBody: ErrorResponse = {
@@ -118,6 +156,22 @@ export function createApp(dependencies: AppDependencies = {}): Hono {
         },
       };
       return c.json(errorBody, err.statusCode as 400 | 401 | 403 | 404 | 409 | 500);
+    }
+
+    if (err instanceof SkillError) {
+      let statusCode = 400;
+      if (err.code === 'SKILL_NOT_FOUND') statusCode = 404;
+      else if (err.code === 'SKILL_UNAUTHORIZED') statusCode = 403;
+      else if (err.code === 'SKILL_CONFLICT') statusCode = 409;
+      else if (err.code === 'SKILL_OVERSIZED') statusCode = 400;
+
+      const errorBody: ErrorResponse = {
+        error: {
+          code: err.code,
+          message: err.message,
+        },
+      };
+      return c.json(errorBody, statusCode as 400 | 403 | 404 | 409);
     }
 
     console.error('[giga-api] Unexpected unhandled error:', err);

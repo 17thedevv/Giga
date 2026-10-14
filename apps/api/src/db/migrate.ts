@@ -143,6 +143,13 @@ export const MIGRATIONS: readonly Migration[] = [
       EXECUTE FUNCTION prevent_skill_versions_update();
     `,
   },
+  {
+    version: 4,
+    name: '004_skill_definitions_revision',
+    sql: `
+      ALTER TABLE skill_definitions ADD COLUMN IF NOT EXISTS revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1);
+    `,
+  },
 ];
 
 /**

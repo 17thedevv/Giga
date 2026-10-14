@@ -445,3 +445,49 @@ export function parseSkillMarkdown(rawContent: string): ParsedSkill {
     estimatedTokens,
   };
 }
+
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isValidUuid(id: unknown): id is string {
+  return typeof id === 'string' && UUID_REGEX.test(id);
+}
+
+/**
+ * Validates instructions content strictly:
+ * - Checks size bound (<= MAX_INSTRUCTION_BYTES)
+ * - If frontmatter is provided, verifies with full parser and checks forbidden keys
+ * - Rejects executable script tags, iframes, embeds, shell binaries, and shebangs
+ */
+export function validateInstructionText(instructions: string): string {
+  if (typeof instructions !== 'string') {
+    throw new SkillValidationError('SKILL_VALIDATION_ERROR', 'Instructions must be a string');
+  }
+
+  const trimmed = instructions.trim();
+  if (trimmed.length === 0) {
+    throw new SkillValidationError('SKILL_VALIDATION_ERROR', 'Instructions cannot be empty');
+  }
+
+  const bytes = getUtf8ByteCount(instructions);
+  if (bytes > MAX_INSTRUCTION_BYTES) {
+    throw new SkillValidationError(
+      'SKILL_OVERSIZED',
+      `Instructions exceed maximum allowed size of ${MAX_INSTRUCTION_BYTES} bytes (actual: ${bytes} bytes)`
+    );
+  }
+
+  // If content starts with frontmatter delimiter, parse and validate full SKILL.md
+  if (trimmed.startsWith('---')) {
+    const parsed = parseSkillMarkdown(instructions);
+    return parsed.instructions;
+  }
+
+  // Check plain instructions against forbidden executable content patterns
+  for (const { pattern, reason } of FORBIDDEN_CONTENT_PATTERNS) {
+    if (pattern.test(instructions)) {
+      throw new SkillValidationError('SKILL_UNSAFE_CONTENT', reason);
+    }
+  }
+
+  return instructions;
+}
