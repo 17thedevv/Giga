@@ -872,7 +872,8 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
 
     const mig1 = MIGRATIONS.find((m) => m.version === 1);
     const mig3 = MIGRATIONS.find((m) => m.version === 3);
-    assert.ok(mig1 && mig3, 'Canonical migrations 1 and 3 must exist');
+    const mig4 = MIGRATIONS.find((m) => m.version === 4);
+    assert.ok(mig1 && mig3 && mig4, 'Canonical migrations 1, 3, and 4 must exist');
 
     const testSkill = await skillStorage.createSkill({
       ownerId: userAId,
@@ -901,18 +902,19 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
         mig1, // version 1 (already applied)
         migration002Conversations, // version 2 (newly registered late arrival)
         mig3, // version 3 (already applied)
+        mig4, // version 4 (already applied)
       ]);
 
-      // Exactly version 2 should be applied, version 1 and 3 are safely skipped
+      // Exactly version 2 should be applied; versions 1, 3, and 4 are safely skipped
       assert.strictEqual(applied.length, 1);
       assert.strictEqual(applied[0], '002_conversations_and_messages');
 
-      // 2. Verify schema_migrations now records version 2 alongside 1 and 3
+      // 2. Verify schema_migrations now records version 2 alongside 1, 3, and 4
       const checkVersions = await testDb.pool.query<{ version: number }>(
         'SELECT version FROM schema_migrations ORDER BY version ASC;'
       );
       const versionNumbers = checkVersions.rows.map((r) => r.version);
-      assert.deepStrictEqual(versionNumbers, [1, 2, 3]);
+      assert.deepStrictEqual(versionNumbers, [1, 2, 3, 4]);
 
       // 3. Verify conversation and message tables function correctly with foreign keys to users(id)
       const convRes = await testDb.pool.query(
@@ -938,6 +940,7 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
         mig1,
         migration002Conversations,
         mig3,
+        mig4,
       ]);
       assert.strictEqual(rerun.length, 0);
     } finally {

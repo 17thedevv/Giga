@@ -142,8 +142,26 @@ export async function createTestDatabase(migrations?: readonly Migration[]): Pro
 
   // Explicit in-memory fallback when no TEST_DATABASE_URL is provided
   const db = newDb({ noAstCoverageCheck: true });
+  let activeTxBackup: ReturnType<typeof db.backup> | null = null;
 
   db.public.interceptQueries((sql) => {
+    // Emulate PostgreSQL transaction isolation and rollback in pg-mem
+    if (/^\s*BEGIN\b/i.test(sql)) {
+      activeTxBackup = db.backup();
+      return [];
+    }
+    if (/^\s*COMMIT\b/i.test(sql)) {
+      activeTxBackup = null;
+      return [];
+    }
+    if (/^\s*ROLLBACK\b/i.test(sql)) {
+      if (activeTxBackup) {
+        activeTxBackup.restore();
+        activeTxBackup = null;
+      }
+      return [];
+    }
+
     // Intercept and strip PostgreSQL triggers/plpgsql DDL that pg-mem does not support
     if (sql.includes('prevent_skill_versions_update') || sql.includes('CREATE TRIGGER')) {
       const stripped = sql
@@ -151,6 +169,14 @@ export async function createTestDatabase(migrations?: readonly Migration[]): Pro
         .replace(/DROP TRIGGER[\s\S]*?;/gi, '')
         .replace(/CREATE TRIGGER[\s\S]*?;/gi, '');
       return db.public.many(stripped);
+    }
+    // Intercept to_char with AT TIME ZONE in pg-mem which does not implement the AT TIME ZONE operator
+    if (sql.includes('to_char(d.created_at')) {
+      const rewritten = sql.replace(
+        /to_char\([^)]+?\)\s+AS\s+exact_created_at,/gi,
+        "'' AS exact_created_at,"
+      );
+      return db.public.many(rewritten);
     }
     // Emulate PostgreSQL trigger immutability enforcement on direct UPDATE in pg-mem
     if (/UPDATE\s+skill_versions/i.test(sql)) {

@@ -12,6 +12,11 @@ import type {
   SkillVersion,
   SkillInstallation,
   WorkspaceSkillDefault,
+  SkillListItem,
+  SkillActorContext,
+  ProductTarget,
+  ListSkillsOptions,
+  PaginatedSkillList,
 } from './types.js';
 
 export interface SkillStorage {
@@ -21,6 +26,25 @@ export interface SkillStorage {
   getLatestSkillVersion(skillId: string, viewerUserId?: string): Promise<SkillVersion | null>;
   getInstallation(userId: string, skillId: string): Promise<SkillInstallation | null>;
   getWorkspaceDefaults(workspaceId: string, ownerId: string): Promise<WorkspaceSkillDefault[]>;
+  listSkills?(viewerUserId: string, options?: ListSkillsOptions): Promise<PaginatedSkillList | SkillListItem[]>;
+  updateSkill?(
+    skillId: string,
+    actor: SkillActorContext,
+    updates: {
+      title?: string;
+      description?: string;
+      supportedProducts?: ProductTarget[];
+      expectedRevision: number;
+    }
+  ): Promise<SkillDefinition>;
+  deleteSkill?(skillId: string, actor: SkillActorContext): Promise<void>;
+  getNextVersionNumber?(skillId: string): Promise<number>;
+  updateInstallationAtomic?(
+    userId: string,
+    skillId: string,
+    updates: { enabled?: boolean; selectedVersionId?: string },
+    actor: SkillActorContext
+  ): Promise<SkillInstallation>;
 }
 
 export class InMemorySkillStorage implements SkillStorage {
@@ -136,6 +160,151 @@ export class InMemorySkillStorage implements SkillStorage {
     const key = `${workspaceId}:${ownerId}`;
     const list = this.workspaceDefaults.get(key);
     return list ? list.map((item) => ({ ...item })) : [];
+  }
+
+  public async listSkills(
+    viewerUserId: string,
+    options?: { scope?: 'installed' | 'builtIn' }
+  ): Promise<SkillListItem[]> {
+    const results: SkillListItem[] = [];
+    const scope = options?.scope;
+
+    for (const skill of this.skills.values()) {
+      const isBuiltIn = skill.visibility === 'built_in';
+      const isOwner = skill.visibility === 'private' && skill.ownerId === viewerUserId;
+      if (!isBuiltIn && !isOwner) {
+        continue;
+      }
+
+      const instKey = `${viewerUserId}:${skill.id}`;
+      const inst = this.installations.get(instKey);
+      const installed = Boolean(inst);
+
+      if (scope === 'installed' && !installed) {
+        continue;
+      }
+      if (scope === 'builtIn' && !isBuiltIn) {
+        continue;
+      }
+
+      results.push({
+        id: skill.id,
+        ownerId: skill.ownerId,
+        slug: skill.slug,
+        title: skill.title,
+        description: skill.description,
+        visibility: skill.visibility,
+        supportedProducts: [...skill.supportedProducts],
+        revision: skill.revision ?? 1,
+        createdAt: skill.createdAt,
+        installed,
+        enabled: inst ? inst.enabled : false,
+        selectedVersionId: inst ? inst.selectedVersionId : null,
+      });
+    }
+
+    results.sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.slug.localeCompare(b.slug));
+    return results;
+  }
+
+  public async updateSkill(
+    skillId: string,
+    actor: SkillActorContext,
+    updates: {
+      expectedRevision: number;
+      title?: string;
+      description?: string;
+      supportedProducts?: ProductTarget[];
+    }
+  ): Promise<SkillDefinition> {
+    const skill = this.skills.get(skillId);
+    if (!skill) {
+      throw new Error(`Skill '${skillId}' not found`);
+    }
+    if (skill.visibility === 'built_in') {
+      throw new Error('Built-in skills cannot be modified');
+    }
+    if (!actor.isAdmin && (!actor.userId || actor.userId !== skill.ownerId)) {
+      throw new Error(`Skill '${skillId}' not found`);
+    }
+
+    const currentRevision = skill.revision ?? 1;
+    if (updates.expectedRevision !== currentRevision) {
+      throw new Error(
+        `Metadata update conflict: current revision ${currentRevision} does not match expectedRevision ${updates.expectedRevision}`
+      );
+    }
+
+    if (updates.title !== undefined) skill.title = updates.title;
+    if (updates.description !== undefined) skill.description = updates.description;
+    if (updates.supportedProducts !== undefined) skill.supportedProducts = [...updates.supportedProducts];
+    skill.revision = currentRevision + 1;
+
+    this.skills.set(skillId, { ...skill });
+    return { ...skill };
+  }
+
+  public async deleteSkill(skillId: string, actor: SkillActorContext): Promise<void> {
+    const skill = this.skills.get(skillId);
+    if (!skill) {
+      throw new Error(`Skill '${skillId}' not found`);
+    }
+    if (skill.visibility === 'built_in') {
+      throw new Error('Built-in skills cannot be deleted');
+    }
+    if (!actor.isAdmin && (!actor.userId || actor.userId !== skill.ownerId)) {
+      throw new Error(`Skill '${skillId}' not found`);
+    }
+
+    this.skills.delete(skillId);
+    for (const [vId, v] of this.versions.entries()) {
+      if (v.skillId === skillId) {
+        this.versions.delete(vId);
+      }
+    }
+    for (const [k, inst] of this.installations.entries()) {
+      if (inst.skillId === skillId) {
+        this.installations.delete(k);
+      }
+    }
+  }
+
+  public async getNextVersionNumber(skillId: string): Promise<number> {
+    let max = 0;
+    for (const v of this.versions.values()) {
+      if (v.skillId === skillId && v.versionNumber > max) {
+        max = v.versionNumber;
+      }
+    }
+    return max + 1;
+  }
+
+  public async updateInstallationAtomic(
+    userId: string,
+    skillId: string,
+    updates: { enabled?: boolean; selectedVersionId?: string },
+    actor: SkillActorContext
+  ): Promise<SkillInstallation> {
+    if (!actor) throw new Error('Actor authorization context is required');
+    if (!actor.isAdmin && actor.userId !== userId) throw new Error('Cannot modify installation for another user');
+
+    const key = `${userId}:${skillId}`;
+    const inst = this.installations.get(key);
+    if (!inst) throw new Error(`Skill installation not found for skill '${skillId}'`);
+
+    if (updates.selectedVersionId !== undefined) {
+      const ver = this.versions.get(updates.selectedVersionId);
+      if (!ver || ver.skillId !== skillId) {
+        throw new Error(`Selected version '${updates.selectedVersionId}' does not belong to skill '${skillId}'`);
+      }
+      inst.selectedVersionId = updates.selectedVersionId;
+    }
+    if (updates.enabled !== undefined) {
+      inst.enabled = updates.enabled;
+    }
+
+    this.installations.set(key, { ...inst });
+    return { ...inst };
   }
 
   public clear(): void {

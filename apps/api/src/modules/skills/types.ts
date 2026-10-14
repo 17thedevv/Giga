@@ -9,6 +9,12 @@ export type ProductTarget = 'chat' | 'agent';
 export type SkillVisibility = 'built_in' | 'private';
 export type SkillActivationSource = 'manual' | 'workspace';
 
+export interface SkillActorContext {
+  userId?: string;
+  isAdmin?: boolean;
+  isSystem?: boolean;
+}
+
 export interface ParsedSkill {
   slug: string;
   title: string;
@@ -28,6 +34,7 @@ export interface SkillDefinition {
   description: string;
   visibility: SkillVisibility;
   supportedProducts: ProductTarget[];
+  revision?: number;
   createdAt: string;
 }
 
@@ -47,6 +54,32 @@ export interface SkillInstallation {
   selectedVersionId: string;
   enabled: boolean;
   installedAt: string;
+}
+
+export interface SkillListItem {
+  id: string;
+  ownerId: string | null;
+  slug: string;
+  title: string;
+  description: string;
+  visibility: SkillVisibility;
+  supportedProducts: ProductTarget[];
+  revision?: number;
+  createdAt: string;
+  installed: boolean;
+  enabled: boolean;
+  selectedVersionId: string | null;
+}
+
+export interface ListSkillsOptions {
+  scope?: 'installed' | 'builtIn';
+  limit?: number;
+  cursor?: string;
+}
+
+export interface PaginatedSkillList {
+  items: SkillListItem[];
+  nextCursor: string | null;
 }
 
 export interface WorkspaceSkillDefault {
