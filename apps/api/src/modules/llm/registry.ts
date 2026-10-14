@@ -52,6 +52,12 @@ export class ModelRegistry {
       throw new LLMValidationError(`Adapter '${adapter.providerId}' must implement generateText()`);
     }
 
+    if (this.adapters.has(adapter.providerId)) {
+      throw new LLMValidationError(
+        `Adapter with providerId '${adapter.providerId}' is already registered`
+      );
+    }
+
     this.adapters.set(adapter.providerId, adapter);
   }
 
@@ -66,6 +72,9 @@ export class ModelRegistry {
       throw new LLMValidationError(
         `Invalid alias format: '${config.alias}'. Must contain only alphanumeric characters, hyphens, and underscores.`
       );
+    }
+    if (this.aliases.has(config.alias)) {
+      throw new LLMValidationError(`Alias '${config.alias}' is already registered`);
     }
     if (!config.providerId || typeof config.providerId !== 'string' || config.providerId.trim() === '') {
       throw new LLMValidationError(`Alias '${config.alias}' must define a non-empty providerId`);

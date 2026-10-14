@@ -33,6 +33,55 @@ export function sanitizeErrorMessage(message: string): string {
   return sanitized;
 }
 
+const SENSITIVE_KEY_REGEX = /(?:key|token|auth|secret|password|bearer|credential|header)/i;
+
+/**
+ * Recursively sanitizes any value in details, scrubbing secrets from strings
+ * and redacting values associated with sensitive keys.
+ */
+export function sanitizeDetailValue(value: unknown, depth = 0): unknown {
+  if (depth > 5) {
+    return '[TRUNCATED_DEPTH]';
+  }
+
+  if (value === null || value === undefined) {
+    return value;
+  }
+
+  if (typeof value === 'string') {
+    return sanitizeErrorMessage(value);
+  }
+
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeDetailValue(item, depth + 1));
+  }
+
+  if (typeof value === 'object') {
+    const sanitizedObj: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (SENSITIVE_KEY_REGEX.test(k)) {
+        sanitizedObj[k] = '[REDACTED]';
+      } else {
+        sanitizedObj[k] = sanitizeDetailValue(v, depth + 1);
+      }
+    }
+    return sanitizedObj;
+  }
+
+  return String(value);
+}
+
+export function sanitizeDetails(details?: Record<string, unknown>): Record<string, unknown> | undefined {
+  if (!details || typeof details !== 'object' || Array.isArray(details)) {
+    return undefined;
+  }
+  return sanitizeDetailValue(details, 0) as Record<string, unknown>;
+}
+
 export abstract class LLMError extends Error {
   public abstract readonly code: string;
   public readonly statusCode: number;
@@ -44,7 +93,7 @@ export abstract class LLMError extends Error {
     this.name = this.constructor.name;
     this.statusCode = statusCode;
     this.isOperational = true;
-    this.details = details;
+    this.details = sanitizeDetails(details);
     Object.setPrototypeOf(this, new.target.prototype);
   }
 }

@@ -8,11 +8,11 @@
 import {
   LLMCancelledError,
   LLMValidationError,
+  ProviderFailureError,
   toLLMError,
 } from './errors.js';
 import type { ModelRegistry } from './registry.js';
 import type {
-  FinishReason,
   LLMCaller,
   LLMRequest,
   LLMStreamEvent,
@@ -21,6 +21,12 @@ import type {
   ResolvedLLMRequest,
 } from './types.js';
 
+export const MAX_REQUEST_ID_LENGTH = 128;
+export const MAX_MESSAGE_NAME_LENGTH = 64;
+export const MAX_MESSAGES_COUNT = 500;
+export const MAX_SINGLE_MESSAGE_BYTES = 256 * 1024; // 256 KB
+export const MAX_TOTAL_MESSAGES_BYTES = 1024 * 1024; // 1 MB
+
 const VALID_CALLERS: ReadonlySet<LLMCaller> = new Set(['chat', 'agent', 'memory']);
 const VALID_ROLES = new Set(['system', 'user', 'assistant']);
 
@@ -28,7 +34,7 @@ export class LLMEngine {
   constructor(private readonly registry: ModelRegistry) {}
 
   /**
-   * Validates common LLMRequest invariants.
+   * Validates common LLMRequest invariants and enforces conservative bounds.
    */
   private validateRequest(req: LLMRequest): void {
     if (!req || typeof req !== 'object') {
@@ -37,6 +43,12 @@ export class LLMEngine {
 
     if (!req.requestId || typeof req.requestId !== 'string' || req.requestId.trim() === '') {
       throw new LLMValidationError('requestId must be a non-empty string');
+    }
+
+    if (req.requestId.length > MAX_REQUEST_ID_LENGTH) {
+      throw new LLMValidationError(
+        `requestId exceeds maximum length of ${MAX_REQUEST_ID_LENGTH} characters`
+      );
     }
 
     if (!VALID_CALLERS.has(req.caller)) {
@@ -55,6 +67,13 @@ export class LLMEngine {
       throw new LLMValidationError('messages must be a non-empty array of ModelMessage');
     }
 
+    if (req.messages.length > MAX_MESSAGES_COUNT) {
+      throw new LLMValidationError(
+        `messages array exceeds maximum limit of ${MAX_MESSAGES_COUNT} messages`
+      );
+    }
+
+    let totalBytes = 0;
     for (let i = 0; i < req.messages.length; i++) {
       const msg: unknown = req.messages[i];
       if (!msg || typeof msg !== 'object') {
@@ -68,6 +87,26 @@ export class LLMEngine {
       }
       if (typeof typedMsg.content !== 'string') {
         throw new LLMValidationError(`Message at index ${i} content must be a string`);
+      }
+      if (typedMsg.name !== undefined) {
+        if (typeof typedMsg.name !== 'string' || typedMsg.name.length > MAX_MESSAGE_NAME_LENGTH) {
+          throw new LLMValidationError(
+            `Message at index ${i} name exceeds maximum length of ${MAX_MESSAGE_NAME_LENGTH} characters`
+          );
+        }
+      }
+
+      const msgBytes = Buffer.byteLength(typedMsg.content, 'utf8');
+      if (msgBytes > MAX_SINGLE_MESSAGE_BYTES) {
+        throw new LLMValidationError(
+          `Message at index ${i} size (${msgBytes} bytes) exceeds maximum single message limit of ${MAX_SINGLE_MESSAGE_BYTES} bytes`
+        );
+      }
+      totalBytes += msgBytes;
+      if (totalBytes > MAX_TOTAL_MESSAGES_BYTES) {
+        throw new LLMValidationError(
+          `Total messages size (${totalBytes} bytes) exceeds maximum limit of ${MAX_TOTAL_MESSAGES_BYTES} bytes`
+        );
       }
     }
 
@@ -119,7 +158,6 @@ export class LLMEngine {
     }
 
     let hasCompleted = false;
-    let terminalFinishReason: FinishReason = 'stop';
 
     try {
       const stream = adapter.streamText(resolvedReq);
@@ -136,7 +174,6 @@ export class LLMEngine {
 
         if (event.type === 'completed') {
           hasCompleted = true;
-          terminalFinishReason = event.finishReason;
           yield event;
         } else {
           yield event;
@@ -147,13 +184,12 @@ export class LLMEngine {
         throw new LLMCancelledError('LLM operation was cancelled');
       }
 
-      // If adapter completed cleanly without emitting a terminal event, emit one
+      // A normalized adapter stream MUST emit an explicit terminal completed event.
+      // If the iterator closes without emitting completed, treat it as premature truncation / provider failure.
       if (!hasCompleted) {
-        hasCompleted = true;
-        yield {
-          type: 'completed',
-          finishReason: terminalFinishReason,
-        };
+        throw new ProviderFailureError(
+          'Stream terminated prematurely without a terminal completed event'
+        );
       }
     } catch (err) {
       if (signal.aborted) {

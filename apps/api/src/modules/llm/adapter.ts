@@ -22,6 +22,10 @@ export interface ProviderAdapter {
 
   /**
    * Streams text generation tokens and usage events.
+   *
+   * Must yield exactly one terminal event { type: 'completed', finishReason: ... }
+   * when generation completes cleanly. If the stream terminates without emitting
+   * a completed event, the engine classifies it as a premature truncation failure.
    */
   streamText(req: ResolvedLLMRequest): AsyncIterable<LLMStreamEvent>;
 
