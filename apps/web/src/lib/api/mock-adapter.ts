@@ -5,6 +5,17 @@ import type {
   AgentRun,
   ChangeProposal,
   AgentRunStatus,
+  SkillListItem,
+  SkillDefinition,
+  SkillVersion,
+  SkillInstallation,
+  CreateSkillDto,
+  UpdateSkillDto,
+  CreateVersionDto,
+  InstallSkillDto,
+  UpdateInstallationDto,
+  UserPreferences,
+  UpdatePreferencesDto,
 } from './types.js';
 import { ApiException } from './client.js';
 
@@ -58,28 +69,30 @@ export const INITIAL_RUNS: AgentRun[] = [
     task: 'Refactor Neon database client pool initialization in apps/api/src/db/client.ts to handle connection error events and set idleTimeoutMillis.',
     repository: '17thedevv/Giga',
     baseRef: 'main',
-    createdAt: '2026-10-13T03:50:00.000Z',
-    updatedAt: '2026-10-13T03:50:42.000Z',
+    createdAt: '2026-10-13T03:45:00.000Z',
+    updatedAt: '2026-10-13T03:50:30.000Z',
   },
   {
-    id: 'run_652c0011-88b9-4112-a002-990a1827ec31',
-    status: 'failed',
-    task: 'Perform automated refactor of authentication middleware',
+    id: 'run_4f1a0293-1992-49aa-9b11-739c901a88b2',
+    status: 'completed',
+    task: 'Add strict authentication guard and session check endpoint /api/v1/auth/me to API routes.',
     repository: '17thedevv/Giga',
     baseRef: 'main',
-    createdAt: '2026-10-12T16:00:00.000Z',
-    updatedAt: '2026-10-12T16:02:15.000Z',
-    error: {
-      code: 'AGENT_STEP_LIMIT_EXCEEDED',
-      message: 'Agent exceeded maximum permitted reasoning and tool execution steps (limit: 10 steps)',
+    createdAt: '2026-10-12T16:10:00.000Z',
+    updatedAt: '2026-10-12T16:18:22.000Z',
+    result: {
+      prUrl: 'https://github.com/17thedevv/Giga/pull/7',
+      prNumber: 7,
+      branch: 'agent/fix-auth-guard',
+      commitSha: '7f918e2a',
     },
   },
 ];
 
 export const MOCK_PROPOSAL: ChangeProposal = {
-  id: 'prop_3b1a8f90-112c-4911-aa90-55e120bc7710',
+  id: 'prop_9a12c840-77a1-4322-98ab-4172a912ef01',
   runId: 'run_881a29f0-55b1-42e8-912a-33c8b1a9901e',
-  baseCommitSha: '4aff64821a8109bfef210087cb1a4901e9121a10',
+  baseCommitSha: '4aff64893b1c7a8291f089e1732a1019f2a912b0',
   files: [
     {
       path: 'apps/api/src/db/client.ts',
@@ -88,19 +101,19 @@ export const MOCK_PROPOSAL: ChangeProposal = {
       deletions: 6,
       unifiedDiff: `--- a/apps/api/src/db/client.ts
 +++ b/apps/api/src/db/client.ts
-@@ -32,8 +32,14 @@ export function createDbClient() {
-     const pool = new Pool({
-       connectionString: env.DATABASE_URL,
--      max: 20,
-+      max: 10,
-+      idleTimeoutMillis: 30000,
-     });
+@@ -10,12 +10,18 @@ export function createDbClient(databaseUrl: string) {
+-  const pool = new Pool({ connectionString: databaseUrl });
++  const pool = new Pool({
++    connectionString: databaseUrl,
++    max: 10,
++    idleTimeoutMillis: 30000,
++    connectionTimeoutMillis: 5000,
++  });
 +
-+    pool.on('error', (err) => {
-+      console.error('Unexpected error on idle DB client', err);
-+    });
-+
-     return pool;
++  pool.on('error', (err) => {
++    console.error('Unexpected idle client error on Neon pool', err);
++  });
+   return drizzle(pool);
  }`,
     },
     {
@@ -123,6 +136,125 @@ export const MOCK_PROPOSAL: ChangeProposal = {
     },
   ],
   createdAt: '2026-10-13T03:50:40.000Z',
+ };
+
+// ==========================================
+// Skills & Personalization Initial Fixtures (17T-30)
+// ==========================================
+
+export const INITIAL_PREFERENCES: UserPreferences = {
+  revision: 1,
+  preferredLanguage: 'en',
+  responseLength: 'balanced',
+  responseStyle: 'technical',
+  customInstructions: 'Focus on production-grade TypeScript strict patterns, explicit error handling, and minimal dependencies.',
+};
+
+export const INITIAL_SKILLS: SkillListItem[] = [
+  {
+    id: 'skl_11111111-1111-4111-8111-111111111111',
+    ownerId: null,
+    slug: 'giga-code-explainer',
+    title: 'Explain Code & Architecture',
+    description: 'Breaks down complex code, explains control flows, and details architecture decisions.',
+    visibility: 'built_in',
+    supportedProducts: ['chat', 'agent'],
+    createdAt: '2026-10-10T08:00:00.000Z',
+    installed: true,
+    enabled: true,
+    selectedVersionId: 'ver_11111111-1111-4111-8111-111111111111',
+  },
+  {
+    id: 'skl_22222222-2222-4222-8222-222222222222',
+    ownerId: null,
+    slug: 'security-auditor',
+    title: 'Security & Invariant Auditor',
+    description: 'Audits endpoints and database queries for SQL injection, CSRF, and authorization leaks.',
+    visibility: 'built_in',
+    supportedProducts: ['chat', 'agent'],
+    createdAt: '2026-10-11T09:00:00.000Z',
+    installed: true,
+    enabled: true,
+    selectedVersionId: 'ver_22222222-2222-4222-8222-222222222222',
+  },
+  {
+    id: 'skl_33333333-3333-4333-8333-333333333333',
+    ownerId: null,
+    slug: 'test-generator',
+    title: 'Automated Test Generator',
+    description: 'Synthesizes rigorous regression unit and integration tests using Vitest and testing-library.',
+    visibility: 'built_in',
+    supportedProducts: ['chat', 'agent'],
+    createdAt: '2026-10-12T10:00:00.000Z',
+    installed: false,
+    enabled: false,
+    selectedVersionId: null,
+  },
+  {
+    id: 'skl_44444444-4444-4444-8444-444444444444',
+    ownerId: 'usr_9b1c7a82-4f32-4e58-9a67-8c3b7a5d1092',
+    slug: 'neon-hono-patterns',
+    title: 'Neon & Hono Cloud Standards',
+    description: 'Enforces Neon WebSocket pooling, Hono middleware lifecycle, and transaction rollback rules.',
+    visibility: 'private',
+    supportedProducts: ['chat', 'agent'],
+    revision: 2,
+    createdAt: '2026-10-13T12:00:00.000Z',
+    installed: true,
+    enabled: true,
+    selectedVersionId: 'ver_44444444-4444-4444-8444-444444444442',
+  },
+];
+
+export const INITIAL_SKILL_VERSIONS: Record<string, SkillVersion[]> = {
+  'skl_11111111-1111-4111-8111-111111111111': [
+    {
+      id: 'ver_11111111-1111-4111-8111-111111111111',
+      skillId: 'skl_11111111-1111-4111-8111-111111111111',
+      versionNumber: 1,
+      contentHash: 'hash-code-explainer-v1',
+      instructions: '# Code Explainer\n\nWhen explaining code:\n1. Provide high-level context before line-by-line inspection.\n2. Highlight non-obvious design decisions.\n3. Mention performance implications and edge cases.',
+      createdAt: '2026-10-10T08:00:00.000Z',
+    },
+  ],
+  'skl_22222222-2222-4222-8222-222222222222': [
+    {
+      id: 'ver_22222222-2222-4222-8222-222222222222',
+      skillId: 'skl_22222222-2222-4222-8222-222222222222',
+      versionNumber: 1,
+      contentHash: 'hash-security-auditor-v1',
+      instructions: '# Security Auditor\n\nAlways verify:\n1. Input validation on boundaries.\n2. Authentication and authorization checks on all mutating routes.\n3. Safe SQL query parameterization.',
+      createdAt: '2026-10-11T09:00:00.000Z',
+    },
+  ],
+  'skl_33333333-3333-4333-8333-333333333333': [
+    {
+      id: 'ver_33333333-3333-4333-8333-333333333333',
+      skillId: 'skl_33333333-3333-4333-8333-333333333333',
+      versionNumber: 1,
+      contentHash: 'hash-test-generator-v1',
+      instructions: '# Test Generator\n\nGuidelines for tests:\n1. Use Vitest and React Testing Library.\n2. Write isolated unit tests and integration tests.\n3. Assert edge cases, error conditions, and concurrency.',
+      createdAt: '2026-10-12T10:00:00.000Z',
+    },
+  ],
+  'skl_44444444-4444-4444-8444-444444444444': [
+    {
+      id: 'ver_44444444-4444-4444-8444-444444444441',
+      skillId: 'skl_44444444-4444-4444-8444-444444444444',
+      versionNumber: 1,
+      contentHash: 'hash-neon-hono-v1',
+      instructions: '# Neon & Hono Standards v1\n\nInitial rules for database pooling in Hono.',
+      createdAt: '2026-10-13T12:00:00.000Z',
+    },
+    {
+      id: 'ver_44444444-4444-4444-8444-444444444442',
+      skillId: 'skl_44444444-4444-4444-8444-444444444444',
+      versionNumber: 2,
+      contentHash: 'hash-neon-hono-v2',
+      instructions: '# Neon & Hono Standards v2\n\n1. Always set idleTimeoutMillis: 30000 on Pool.\n2. Handle connection error events to prevent process crash.\n3. Execute database transactions with atomic rollback.',
+      createdAt: '2026-10-13T14:30:00.000Z',
+    },
+  ],
 };
 
 /**
@@ -134,6 +266,11 @@ export class MockDataAdapter {
   private messages: Record<string, Message[]> = { ...INITIAL_MESSAGES };
   private runs = [...INITIAL_RUNS];
   private proposal = { ...MOCK_PROPOSAL };
+
+  // Skills & Personalization State
+  private preferences: UserPreferences = { ...INITIAL_PREFERENCES };
+  private skills: SkillListItem[] = INITIAL_SKILLS.map((s) => ({ ...s }));
+  private skillVersions: Record<string, SkillVersion[]> = JSON.parse(JSON.stringify(INITIAL_SKILL_VERSIONS));
 
   constructor(initialUser: User | null = null) {
     if (initialUser) {
@@ -214,6 +351,13 @@ export class MockDataAdapter {
         // Ignore
       }
     }
+  }
+
+  // Reset skills and preferences for test isolation
+  resetSkillsAndPreferences(): void {
+    this.preferences = { ...INITIAL_PREFERENCES };
+    this.skills = INITIAL_SKILLS.map((s) => ({ ...s }));
+    this.skillVersions = JSON.parse(JSON.stringify(INITIAL_SKILL_VERSIONS));
   }
 
   // Conversations
@@ -391,6 +535,243 @@ export class MockDataAdapter {
     }
     run.status = 'cancelled';
     return { run: { ...run } };
+  }
+
+  // ==========================================
+  // Skills & Personalization Operations (17T-30)
+  // ==========================================
+
+  // User Preferences
+  async getPreferences(): Promise<{ preferences: UserPreferences }> {
+    await this.delay(120);
+    return { preferences: { ...this.preferences } };
+  }
+
+  async updatePreferences(dto: UpdatePreferencesDto): Promise<{ preferences: UserPreferences }> {
+    await this.delay(200);
+    if (dto.expectedRevision !== this.preferences.revision) {
+      throw new ApiException(
+        409,
+        'VERSION_CONFLICT',
+        `Preferences revision conflict: expected revision ${dto.expectedRevision} but current revision on server is ${this.preferences.revision}.`
+      );
+    }
+
+    const nextRevision = this.preferences.revision + 1;
+    this.preferences = {
+      ...this.preferences,
+      ...dto,
+      revision: nextRevision,
+    };
+    return { preferences: { ...this.preferences } };
+  }
+
+  // Skills Operations
+  async listSkills(options?: {
+    scope?: 'installed' | 'builtIn';
+    limit?: number;
+    cursor?: string;
+  }): Promise<{ items: SkillListItem[]; nextCursor: string | null }> {
+    await this.delay(120);
+    let items = this.skills.map((s) => ({ ...s }));
+    if (options?.scope === 'installed') {
+      items = items.filter((s) => s.installed);
+    } else if (options?.scope === 'builtIn') {
+      items = items.filter((s) => s.visibility === 'built_in');
+    }
+    return { items, nextCursor: null };
+  }
+
+  async getSkill(
+    id: string
+  ): Promise<{ skill: SkillDefinition & { versions?: SkillVersion[]; installation?: SkillInstallation } }> {
+    await this.delay(100);
+    const skill = this.skills.find((s) => s.id === id);
+    if (!skill) {
+      throw new ApiException(404, 'SKILL_NOT_FOUND', `Skill with ID '${id}' was not found.`);
+    }
+
+    const versions = this.skillVersions[id] || [];
+    const installation: SkillInstallation | undefined = skill.installed
+      ? {
+          id: `inst_${id.slice(-6)}`,
+          userId: this.currentUser?.id || MOCK_USER.id,
+          skillId: id,
+          selectedVersionId: skill.selectedVersionId || (versions[0]?.id ?? 'ver_default'),
+          enabled: skill.enabled,
+          installedAt: skill.createdAt,
+        }
+      : undefined;
+
+    return {
+      skill: {
+        ...skill,
+        versions,
+        installation,
+      },
+    };
+  }
+
+  async createSkill(dto: CreateSkillDto): Promise<{ skill: SkillDefinition }> {
+    await this.delay(250);
+    if (!dto.title.trim()) {
+      throw new ApiException(400, 'VALIDATION_ERROR', 'Title is required');
+    }
+    const cleanSlug = dto.slug.trim().toLowerCase().replace(/[^a-z0-9-]/g, '-') || `skill-${Date.now().toString().slice(-4)}`;
+    const skillId = `skl_${Date.now()}`;
+    const versionId = `ver_${Date.now()}`;
+
+    const newSkill: SkillListItem = {
+      id: skillId,
+      ownerId: this.currentUser?.id || MOCK_USER.id,
+      slug: cleanSlug,
+      title: dto.title.trim(),
+      description: dto.description.trim(),
+      visibility: 'private',
+      supportedProducts: dto.supportedProducts && dto.supportedProducts.length > 0 ? dto.supportedProducts : ['chat', 'agent'],
+      revision: 1,
+      createdAt: new Date().toISOString(),
+      installed: true,
+      enabled: true,
+      selectedVersionId: versionId,
+    };
+
+    const initialVersion: SkillVersion = {
+      id: versionId,
+      skillId,
+      versionNumber: 1,
+      contentHash: `hash-${cleanSlug}-v1`,
+      instructions: dto.instructions?.trim() || `# ${dto.title}\n\nCustom instructions for ${dto.title}.`,
+      createdAt: new Date().toISOString(),
+    };
+
+    this.skills.unshift(newSkill);
+    this.skillVersions[skillId] = [initialVersion];
+
+    return { skill: newSkill };
+  }
+
+  async updateSkill(id: string, dto: UpdateSkillDto): Promise<{ skill: SkillDefinition }> {
+    await this.delay(200);
+    const skillIndex = this.skills.findIndex((s) => s.id === id);
+    if (skillIndex === -1) {
+      throw new ApiException(404, 'SKILL_NOT_FOUND', `Skill with ID '${id}' not found.`);
+    }
+
+    const currentSkill = this.skills[skillIndex];
+    const currentRevision = currentSkill.revision ?? 1;
+
+    // Strict CAS check
+    if (dto.expectedRevision !== currentRevision) {
+      throw new ApiException(
+        409,
+        'VERSION_CONFLICT',
+        `Skill metadata revision conflict: expected revision ${dto.expectedRevision} but current revision is ${currentRevision}.`
+      );
+    }
+
+    const updatedSkill: SkillListItem = {
+      ...currentSkill,
+      title: dto.title !== undefined ? dto.title.trim() : currentSkill.title,
+      description: dto.description !== undefined ? dto.description.trim() : currentSkill.description,
+      supportedProducts: dto.supportedProducts || currentSkill.supportedProducts,
+      revision: currentRevision + 1,
+    };
+
+    this.skills[skillIndex] = updatedSkill;
+    return { skill: updatedSkill };
+  }
+
+  async deleteSkill(id: string): Promise<void> {
+    await this.delay(150);
+    const skill = this.skills.find((s) => s.id === id);
+    if (!skill) {
+      throw new ApiException(404, 'SKILL_NOT_FOUND', `Skill with ID '${id}' not found.`);
+    }
+    if (skill.visibility === 'built_in') {
+      throw new ApiException(403, 'FORBIDDEN', 'Built-in skills cannot be deleted.');
+    }
+
+    this.skills = this.skills.filter((s) => s.id !== id);
+    delete this.skillVersions[id];
+  }
+
+  async publishSkillVersion(id: string, dto: CreateVersionDto): Promise<{ version: SkillVersion }> {
+    await this.delay(200);
+    const skill = this.skills.find((s) => s.id === id);
+    if (!skill) {
+      throw new ApiException(404, 'SKILL_NOT_FOUND', `Skill with ID '${id}' not found.`);
+    }
+
+    const existingVersions = this.skillVersions[id] || [];
+    const nextNumber = existingVersions.length + 1;
+    const newVersion: SkillVersion = {
+      id: `ver_${id.slice(-6)}_${nextNumber}`,
+      skillId: id,
+      versionNumber: nextNumber,
+      contentHash: `hash-${skill.slug}-v${nextNumber}`,
+      instructions: dto.instructions.trim(),
+      createdAt: new Date().toISOString(),
+    };
+
+    existingVersions.unshift(newVersion);
+    this.skillVersions[id] = existingVersions;
+    skill.selectedVersionId = newVersion.id;
+
+    return { version: newVersion };
+  }
+
+  async installSkill(id: string, dto?: InstallSkillDto): Promise<{ installation: SkillInstallation }> {
+    await this.delay(150);
+    const skill = this.skills.find((s) => s.id === id);
+    if (!skill) {
+      throw new ApiException(404, 'SKILL_NOT_FOUND', `Skill with ID '${id}' not found.`);
+    }
+
+    skill.installed = true;
+    skill.enabled = dto?.enabled !== undefined ? dto.enabled : true;
+    if (dto?.versionId) {
+      skill.selectedVersionId = dto.versionId;
+    } else if (!skill.selectedVersionId && this.skillVersions[id]?.length > 0) {
+      skill.selectedVersionId = this.skillVersions[id][0].id;
+    }
+
+    const installation: SkillInstallation = {
+      id: `inst_${id.slice(-6)}`,
+      userId: this.currentUser?.id || MOCK_USER.id,
+      skillId: id,
+      selectedVersionId: skill.selectedVersionId || 'ver_default',
+      enabled: skill.enabled,
+      installedAt: new Date().toISOString(),
+    };
+
+    return { installation };
+  }
+
+  async updateInstallation(id: string, dto: UpdateInstallationDto): Promise<{ installation: SkillInstallation }> {
+    await this.delay(120);
+    const skill = this.skills.find((s) => s.id === id);
+    if (!skill) {
+      throw new ApiException(404, 'SKILL_NOT_FOUND', `Skill with ID '${id}' not found.`);
+    }
+
+    if (dto.enabled !== undefined) {
+      skill.enabled = dto.enabled;
+    }
+    if (dto.selectedVersionId !== undefined) {
+      skill.selectedVersionId = dto.selectedVersionId;
+    }
+
+    const installation: SkillInstallation = {
+      id: `inst_${id.slice(-6)}`,
+      userId: this.currentUser?.id || MOCK_USER.id,
+      skillId: id,
+      selectedVersionId: skill.selectedVersionId || 'ver_default',
+      enabled: skill.enabled,
+      installedAt: new Date().toISOString(),
+    };
+
+    return { installation };
   }
 
   private delay(ms: number): Promise<void> {

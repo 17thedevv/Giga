@@ -4,7 +4,7 @@ import { useAuth } from './context/AuthContext.js';
 import { useApiMode } from './context/ApiModeContext.js';
 import { useTheme } from './context/ThemeContext.js';
 import { GigaLogo } from '../components/GigaLogo.js';
-import { ChatIcon, AgentIcon, MenuIcon, XIcon, SunIcon, MoonIcon } from '../components/Icons.js';
+import { ChatIcon, AgentIcon, WorkflowIcon, MenuIcon, XIcon, SunIcon, MoonIcon } from '../components/Icons.js';
 import { Badge } from '../components/Badge.js';
 import { Button } from '../components/Button.js';
 import { SessionExpiredModal } from '../features/auth/SessionExpiredModal.js';
@@ -18,6 +18,7 @@ export const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) =>
 
   const isChat = path.startsWith('/chat');
   const isAgent = path.startsWith('/agent');
+  const isSkills = path.startsWith('/skills') || path.startsWith('/personalization');
 
   return (
     <div
@@ -105,6 +106,29 @@ export const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) =>
             aria-current={isAgent ? 'page' : undefined}
           >
             <AgentIcon size={20} />
+          </button>
+
+          <button
+            onClick={() => navigate('/skills')}
+            style={{
+              width: '42px',
+              height: '42px',
+              borderRadius: 'var(--giga-radius-md, 8px)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              backgroundColor: isSkills ? 'var(--giga-primary-subtle, rgba(59, 130, 246, 0.15))' : 'transparent',
+              color: isSkills ? 'var(--giga-primary, #3B82F6)' : 'var(--giga-text-secondary, #94A3B8)',
+              border: `1px solid ${isSkills ? 'var(--giga-primary, #3B82F6)' : 'transparent'}`,
+              cursor: 'pointer',
+              transition: 'all 0.15s ease',
+            }}
+            title="Skills & Personalization"
+            aria-label="Skills & Personalization"
+            aria-current={isSkills ? 'page' : undefined}
+            data-testid="nav-skills"
+          >
+            <WorkflowIcon size={20} />
           </button>
         </nav>
 
@@ -273,6 +297,16 @@ export const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) =>
               icon={<AgentIcon size={18} />}
             >
               Coding Agent
+            </Button>
+            <Button
+              variant={isSkills ? 'primary' : 'outline'}
+              onClick={() => {
+                navigate('/skills');
+                setMobileMenuOpen(false);
+              }}
+              icon={<WorkflowIcon size={18} />}
+            >
+              Skills & Personalization
             </Button>
             <div style={{ marginTop: 'auto', display: 'flex', flexDirection: 'column', gap: '12px' }}>
               <Button variant="secondary" onClick={toggleTheme}>
