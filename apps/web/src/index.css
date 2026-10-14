@@ -84,15 +84,24 @@ pre, code {
   font-family: var(--giga-font-mono);
 }
 
-/* Responsive containers */
+/* Responsive containers and navigation visibility */
 .app-container {
   display: flex;
   height: 100vh;
   overflow: hidden;
 }
 
+@media (min-width: 769px) {
+  .mobile-header {
+    display: none !important;
+  }
+}
+
 @media (max-width: 768px) {
   .app-container {
     flex-direction: column;
+  }
+  .desktop-nav {
+    display: none !important;
   }
 }
