@@ -30,7 +30,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({ message, isStreami
     >
       <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
         <Badge status={isUser ? 'user' : 'assistant'} />
-        <span style={{ fontSize: '11px', color: '#64748b' }}>
+        <span style={{ fontSize: '11px', color: 'var(--giga-text-muted, #94A3B8)' }}>
           {new Date(message.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
         </span>
       </div>
@@ -39,15 +39,18 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({ message, isStreami
         style={{
           maxWidth: '85%',
           padding: '14px 18px',
-          borderRadius: '10px',
-          backgroundColor: isUser ? '#1e1b4b' : '#0f172a',
-          border: `1px solid ${isUser ? '#4338ca' : '#1e293b'}`,
-          color: '#f1f5f9',
+          borderRadius: 'var(--giga-radius-lg, 12px)',
+          backgroundColor: isUser
+            ? 'var(--giga-primary, #3B82F6)'
+            : 'var(--giga-surface, #111C2D)',
+          border: `1px solid ${isUser ? 'var(--giga-primary, #3B82F6)' : 'var(--giga-border, #1E293B)'}`,
+          color: isUser ? '#FFFFFF' : 'var(--giga-text, #F8FAFC)',
           fontSize: '14px',
           lineHeight: 1.6,
           whiteSpace: 'pre-wrap',
           wordBreak: 'break-word',
           position: 'relative',
+          boxShadow: 'var(--giga-shadow-sm, 0 1px 2px rgba(0,0,0,0.05))',
         }}
       >
         {message.content}
@@ -57,7 +60,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({ message, isStreami
               display: 'inline-block',
               width: '8px',
               height: '14px',
-              backgroundColor: '#38bdf8',
+              backgroundColor: isUser ? '#FFFFFF' : 'var(--giga-primary, #3B82F6)',
               marginLeft: '4px',
               verticalAlign: 'middle',
               animation: 'pulse 0.8s infinite',
@@ -75,12 +78,12 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({ message, isStreami
             gap: '4px',
             background: 'transparent',
             border: 'none',
-            color: '#64748b',
+            color: 'var(--giga-text-muted, #94A3B8)',
             fontSize: '12px',
             cursor: 'pointer',
             marginTop: '6px',
             padding: '2px 4px',
-            borderRadius: '4px',
+            borderRadius: 'var(--giga-radius-sm, 4px)',
           }}
           title="Copy message content"
         >

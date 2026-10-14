@@ -37,7 +37,6 @@ export const Composer: React.FC<ComposerProps> = ({
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    // Enter to submit (without Shift), Shift+Enter for newline
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSubmit();
@@ -51,9 +50,9 @@ export const Composer: React.FC<ComposerProps> = ({
         display: 'flex',
         alignItems: 'flex-end',
         gap: '10px',
-        padding: '16px',
-        backgroundColor: '#0f172a',
-        borderTop: '1px solid #1e293b',
+        padding: '16px 20px',
+        backgroundColor: 'var(--giga-surface, #111C2D)',
+        borderTop: '1px solid var(--giga-border, #1E293B)',
       }}
     >
       <div style={{ flex: 1, position: 'relative' }}>
@@ -65,21 +64,18 @@ export const Composer: React.FC<ComposerProps> = ({
           placeholder={disabled ? 'Chat is disabled' : isStreaming ? 'Generating response...' : 'Ask Giga anything... (Enter to send, Shift+Enter for newline)'}
           disabled={disabled || isStreaming}
           rows={1}
+          className="g-textarea"
           style={{
-            width: '100%',
-            padding: '12px 14px',
-            backgroundColor: '#182234',
-            color: '#f1f5f9',
-            border: '1px solid #334155',
-            borderRadius: '8px',
-            fontSize: '14px',
-            lineHeight: 1.5,
-            outline: 'none',
-            fontFamily: 'inherit',
-            resize: 'none',
             minHeight: '44px',
             maxHeight: '200px',
-            boxSizing: 'border-box',
+            resize: 'none',
+            fontSize: '14px',
+            lineHeight: 1.5,
+            padding: '11px 14px',
+            backgroundColor: 'var(--giga-surface-muted, #18263A)',
+            borderColor: 'var(--giga-border, #334155)',
+            color: 'var(--giga-text, #F8FAFC)',
+            borderRadius: 'var(--giga-radius-md, 8px)',
           }}
         />
       </div>

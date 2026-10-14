@@ -8,6 +8,7 @@ import { MessageBubble } from './MessageBubble.js';
 import { Composer } from './Composer.js';
 import { Alert } from '../../components/Alert.js';
 import { Button } from '../../components/Button.js';
+import { GigaLogo } from '../../components/GigaLogo.js';
 
 export const ChatView: React.FC = () => {
   const { params, navigate } = useRouter();
@@ -188,16 +189,25 @@ export const ChatView: React.FC = () => {
       />
 
       {/* Main Chat Workspace */}
-      <div style={{ display: 'flex', flexDirection: 'column', flex: 1, height: '100%', backgroundColor: '#090d16', minWidth: 0 }}>
+      <div
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          flex: 1,
+          height: '100%',
+          backgroundColor: 'var(--giga-bg, #0B1220)',
+          minWidth: 0,
+        }}
+      >
         {/* Banner notification for Mock Mode */}
         {mode === 'mock' && (
           <div
             style={{
               padding: '8px 16px',
-              backgroundColor: '#431407',
-              borderBottom: '1px solid #7c2d12',
+              backgroundColor: 'rgba(217, 119, 6, 0.12)',
+              borderBottom: '1px solid rgba(217, 119, 6, 0.25)',
               fontSize: '12px',
-              color: '#fdba74',
+              color: 'var(--giga-warning, #D97706)',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'space-between',
@@ -211,7 +221,7 @@ export const ChatView: React.FC = () => {
 
         {/* Error Alert Banner */}
         {errorBanner && (
-          <div style={{ padding: '12px 16px', borderBottom: '1px solid #1e293b' }}>
+          <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--giga-border, #1E293B)' }}>
             <Alert
               type="warning"
               title={mode === 'real' ? 'Real Backend Status' : 'Notice'}
@@ -232,18 +242,21 @@ export const ChatView: React.FC = () => {
         <div style={{ flex: 1, overflowY: 'auto', padding: '24px 20px', display: 'flex', flexDirection: 'column' }}>
           {messages.length === 0 && !isStreaming && (
             <div
+              className="g-empty"
               style={{
                 margin: 'auto',
                 textAlign: 'center',
                 maxWidth: '480px',
                 padding: '32px 16px',
-                color: '#94a3b8',
               }}
             >
-              <h2 style={{ fontSize: '18px', fontWeight: 600, color: '#f1f5f9', marginBottom: '8px' }}>
-                Welcome to Giga Developer Chat
+              <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '16px' }}>
+                <GigaLogo variant="mark" tone="color" width={48} />
+              </div>
+              <h2 style={{ fontSize: '18px', fontWeight: 600, color: 'var(--giga-text, #F8FAFC)', marginBottom: '8px' }}>
+                Welcome to GIGA Developer Chat
               </h2>
-              <p style={{ fontSize: '13px', lineHeight: 1.6, marginBottom: '20px' }}>
+              <p style={{ fontSize: '13px', lineHeight: 1.6, marginBottom: '20px', color: 'var(--giga-text-secondary, #94A3B8)' }}>
                 Explore codebase architecture, troubleshoot cloud deployments, or delegate autonomous coding tasks.
               </p>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>

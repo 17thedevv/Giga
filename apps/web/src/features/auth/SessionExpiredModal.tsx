@@ -35,7 +35,7 @@ export const SessionExpiredModal: React.FC = () => {
   return (
     <Modal isOpen={sessionExpired} onClose={dismissSessionExpired} title="Session Expired">
       <form onSubmit={handleReauth} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-        <p style={{ fontSize: '14px', color: '#94a3b8', lineHeight: 1.5 }}>
+        <p style={{ fontSize: '14px', color: 'var(--giga-text-secondary, #94A3B8)', lineHeight: 1.5, margin: 0 }}>
           Your authenticated session has expired. To protect workspace state and prevent loss of uncommitted diffs, please re-authenticate:
         </p>
 

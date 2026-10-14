@@ -6,7 +6,7 @@ import { Input } from '../../components/Input.js';
 import { Button } from '../../components/Button.js';
 import { Alert } from '../../components/Alert.js';
 import { Badge } from '../../components/Badge.js';
-import { LogoIcon } from '../../components/Icons.js';
+import { GigaLogo } from '../../components/GigaLogo.js';
 
 export const LoginView: React.FC = () => {
   const { login, error, clearError } = useAuth();
@@ -60,31 +60,27 @@ export const LoginView: React.FC = () => {
         alignItems: 'center',
         justifyContent: 'center',
         padding: '24px',
-        backgroundColor: '#090d16',
+        backgroundColor: 'var(--giga-bg, #0B1220)',
       }}
     >
       <div
+        className="g-card"
         style={{
           width: '100%',
-          maxWidth: '420px',
-          backgroundColor: '#0f172a',
-          border: '1px solid #1e293b',
-          borderRadius: '12px',
-          padding: '32px',
-          boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.5)',
+          maxWidth: '440px',
+          backgroundColor: 'var(--giga-surface, #111C2D)',
+          border: '1px solid var(--giga-border, #1E293B)',
+          borderRadius: 'var(--giga-radius-xl, 16px)',
+          padding: '36px',
+          boxShadow: 'var(--giga-shadow-md, 0 25px 50px -12px rgba(0, 0, 0, 0.5))',
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '24px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-            <LogoIcon size={28} />
-            <span style={{ fontSize: '18px', fontWeight: 700, letterSpacing: '0.05em', color: '#f1f5f9' }}>
-              G I G A
-            </span>
-          </div>
+          <GigaLogo variant="horizontal" tone="color" width={140} />
           <button
             type="button"
             onClick={toggleMode}
-            style={{ background: 'transparent', border: 'none', cursor: 'pointer' }}
+            style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: 0 }}
             title="Toggle between Real API and Mock Fixtures"
           >
             <Badge status={mode === 'real' ? 'real' : 'demo'}>
@@ -93,11 +89,11 @@ export const LoginView: React.FC = () => {
           </button>
         </div>
 
-        <div style={{ marginBottom: '20px' }}>
-          <h1 style={{ fontSize: '20px', fontWeight: 600, color: '#f1f5f9', marginBottom: '6px' }}>
+        <div style={{ marginBottom: '24px' }}>
+          <h1 style={{ fontSize: '20px', fontWeight: 700, color: 'var(--giga-text, #F8FAFC)', margin: '0 0 6px' }}>
             Developer Workspace
           </h1>
-          <p style={{ fontSize: '13px', color: '#94a3b8' }}>
+          <p style={{ fontSize: '13px', color: 'var(--giga-text-secondary, #94A3B8)', margin: 0 }}>
             Sign in to access AI Chat and Autonomous Coding Agent.
           </p>
         </div>
@@ -105,16 +101,16 @@ export const LoginView: React.FC = () => {
         {mode === 'mock' && (
           <div
             style={{
-              padding: '10px 12px',
-              backgroundColor: '#172554',
-              border: '1px solid #1e40af',
-              borderRadius: '6px',
+              padding: '12px 14px',
+              backgroundColor: 'var(--giga-primary-subtle, rgba(59, 130, 246, 0.12))',
+              border: '1px solid rgba(59, 130, 246, 0.3)',
+              borderRadius: 'var(--giga-radius-md, 8px)',
               fontSize: '12px',
-              color: '#bfdbfe',
+              color: 'var(--giga-text, #F8FAFC)',
               marginBottom: '20px',
             }}
           >
-            <strong>Demo Environment:</strong> Using test fixtures. You may click Sign In with prefilled credentials.
+            <strong style={{ color: 'var(--giga-primary, #3B82F6)' }}>Demo Environment:</strong> Using test fixtures. You may click Sign In with prefilled credentials.
           </div>
         )}
 
@@ -154,9 +150,9 @@ export const LoginView: React.FC = () => {
           </Button>
         </form>
 
-        <div style={{ marginTop: '24px', paddingTop: '16px', borderTop: '1px solid #1e293b', textAlign: 'center' }}>
-          <span style={{ fontSize: '12px', color: '#64748b' }}>
-            Giga v0.1 • Linear 17T-11 • Tráng A Thư
+        <div style={{ marginTop: '28px', paddingTop: '16px', borderTop: '1px solid var(--giga-border, #1E293B)', textAlign: 'center' }}>
+          <span style={{ fontSize: '12px', color: 'var(--giga-text-muted, #94A3B8)' }}>
+            GIGA AI Cloud • Design System v1.0 • Tráng A Thư
           </span>
         </div>
       </div>

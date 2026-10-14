@@ -123,7 +123,7 @@ export const AgentRunView: React.FC = () => {
 
   if (isLoading) {
     return (
-      <div style={{ padding: '32px', color: '#94a3b8', textAlign: 'center' }}>
+      <div style={{ padding: '32px', color: 'var(--giga-text-muted, #94A3B8)', textAlign: 'center' }}>
         Loading execution timeline...
       </div>
     );
@@ -142,14 +142,24 @@ export const AgentRunView: React.FC = () => {
 
   if (!run) {
     return (
-      <div style={{ padding: '32px', textAlign: 'center', color: '#64748b' }}>
+      <div style={{ padding: '32px', textAlign: 'center', color: 'var(--giga-text-muted, #94A3B8)' }}>
         Run not found.
       </div>
     );
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', width: '100%', overflowY: 'auto', backgroundColor: '#090d16', padding: '24px 32px' }}>
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        height: '100%',
+        width: '100%',
+        overflowY: 'auto',
+        backgroundColor: 'var(--giga-bg, #0B1220)',
+        padding: '24px 32px',
+      }}
+    >
       <div style={{ maxWidth: '1000px', margin: '0 auto', width: '100%' }}>
         {/* Navigation & Header */}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px' }}>
@@ -169,23 +179,24 @@ export const AgentRunView: React.FC = () => {
 
         {/* Run Details Banner */}
         <div
+          className="g-card"
           style={{
-            backgroundColor: '#0f172a',
-            border: '1px solid #1e293b',
-            borderRadius: '8px',
+            backgroundColor: 'var(--giga-surface, #111C2D)',
+            border: '1px solid var(--giga-border, #1E293B)',
+            borderRadius: 'var(--giga-radius-md, 8px)',
             padding: '20px',
             marginBottom: '20px',
           }}
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '6px' }}>
-            <span style={{ fontSize: '16px', fontWeight: 700, color: '#f1f5f9' }}>
+            <span style={{ fontSize: '16px', fontWeight: 700, color: 'var(--giga-text, #F8FAFC)' }}>
               Run #{run.id.slice(-6)}
             </span>
-            <span style={{ color: '#64748b', fontSize: '13px' }}>
+            <span style={{ color: 'var(--giga-text-muted, #94A3B8)', fontSize: '13px' }}>
               on <code>{run.repository}</code> ({run.baseRef || 'main'})
             </span>
           </div>
-          <p style={{ fontSize: '14px', color: '#cbd5e1', lineHeight: 1.5 }}>
+          <p style={{ fontSize: '14px', color: 'var(--giga-text-secondary, #CBD5E1)', lineHeight: 1.5, margin: 0 }}>
             <strong>Task:</strong> {run.task}
           </p>
         </div>
