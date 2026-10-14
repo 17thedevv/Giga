@@ -870,7 +870,8 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
       `,
     };
 
-    const [mig1, mig3] = MIGRATIONS;
+    const mig1 = MIGRATIONS.find((m) => m.version === 1);
+    const mig3 = MIGRATIONS.find((m) => m.version === 3);
     assert.ok(mig1 && mig3, 'Canonical migrations 1 and 3 must exist');
 
     const testSkill = await skillStorage.createSkill({
@@ -882,6 +883,17 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
       supportedProducts: ['chat'],
       actor: { userId: userAId },
     });
+
+    // 0. Ensure version 2 is unapplied initially to simulate late arrival after 1 and 3
+    await testDb.pool.query('DROP TABLE IF EXISTS messages CASCADE;');
+    await testDb.pool.query('DROP TABLE IF EXISTS conversations CASCADE;');
+    try {
+      await testDb.pool.query('DROP INDEX IF EXISTS messages_pkey;');
+      await testDb.pool.query('DROP INDEX IF EXISTS conversations_pkey;');
+    } catch {
+      // Ignore index drop in real Postgres where CASCADE already removed it
+    }
+    await testDb.pool.query('DELETE FROM schema_migrations WHERE version = 2;');
 
     try {
       // 1. Run migrations with version 2 registered between versions 1 and 3
@@ -932,6 +944,12 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
       // Clean up simulated 17T-21 migration tables and schema_migrations entry
       await testDb.pool.query('DROP TABLE IF EXISTS messages CASCADE;');
       await testDb.pool.query('DROP TABLE IF EXISTS conversations CASCADE;');
+      try {
+        await testDb.pool.query('DROP INDEX IF EXISTS messages_pkey;');
+        await testDb.pool.query('DROP INDEX IF EXISTS conversations_pkey;');
+      } catch {
+        // Ignore index drop in real Postgres
+      }
       await testDb.pool.query('DELETE FROM schema_migrations WHERE version = 2;');
     }
   });
