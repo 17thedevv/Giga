@@ -29,6 +29,7 @@ export interface FakeProviderOptions {
   readonly omitCompleted?: boolean;
   readonly emitDuplicateCompleted?: boolean;
   readonly emitTokensAfterAbort?: boolean;
+  readonly errorAfterCompleted?: Error;
   readonly generateResult?: ModelResult;
   readonly generateError?: Error;
 }
@@ -57,6 +58,7 @@ export class FakeProvider implements ProviderAdapter {
   private readonly omitCompleted: boolean;
   private readonly emitDuplicateCompleted: boolean;
   private readonly emitTokensAfterAbort: boolean;
+  private readonly errorAfterCompleted?: Error;
   private readonly generateResult?: ModelResult;
   private readonly generateError?: Error;
 
@@ -80,6 +82,7 @@ export class FakeProvider implements ProviderAdapter {
     this.omitCompleted = options.omitCompleted ?? false;
     this.emitDuplicateCompleted = options.emitDuplicateCompleted ?? false;
     this.emitTokensAfterAbort = options.emitTokensAfterAbort ?? false;
+    this.errorAfterCompleted = options.errorAfterCompleted;
     this.generateResult = options.generateResult;
     this.generateError = options.generateError;
   }
@@ -140,6 +143,9 @@ export class FakeProvider implements ProviderAdapter {
 
     if (!this.omitCompleted) {
       yield { type: 'completed', finishReason: this.finishReason };
+      if (this.errorAfterCompleted) {
+        throw this.errorAfterCompleted;
+      }
       if (this.emitDuplicateCompleted) {
         yield { type: 'completed', finishReason: this.finishReason };
       }

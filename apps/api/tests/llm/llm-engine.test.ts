@@ -118,6 +118,31 @@ describe('Shared LLM Engine v0.1', () => {
       const completedEvents = events.filter((e) => e.type === 'completed');
       assert.strictEqual(completedEvents.length, 1);
     });
+
+    it('stops consuming iterator immediately on completed and suppresses post-terminal provider errors', async () => {
+      const { engine, fakeProvider } = createTestSetup({
+        chunks: ['Stream', ' output'],
+        finishReason: 'stop',
+        errorAfterCompleted: new Error('Simulated upstream crash after completed event'),
+      });
+
+      const events: LLMStreamEvent[] = [];
+      // Iteration must complete cleanly without throwing post-completed error
+      for await (const event of engine.streamText(makeRequest())) {
+        events.push(event);
+      }
+
+      assert.strictEqual(fakeProvider.streamCallCount, 1);
+      assert.strictEqual(events.length, 4); // 2 deltas + 1 usage + 1 completed
+      assert.strictEqual(events[0]?.type, 'text.delta');
+      assert.strictEqual(events[1]?.type, 'text.delta');
+      assert.strictEqual(events[2]?.type, 'usage');
+      assert.deepStrictEqual(events[3], { type: 'completed', finishReason: 'stop' });
+
+      // Completed was the absolute terminal event
+      const lastEvent = events[events.length - 1];
+      assert.strictEqual(lastEvent?.type, 'completed');
+    });
   });
 
   describe('Model Alias & Capability Resolution', () => {

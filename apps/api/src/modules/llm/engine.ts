@@ -175,9 +175,10 @@ export class LLMEngine {
         if (event.type === 'completed') {
           hasCompleted = true;
           yield event;
-        } else {
-          yield event;
+          return;
         }
+
+        yield event;
       }
 
       if (signal.aborted) {
@@ -192,6 +193,11 @@ export class LLMEngine {
         );
       }
     } catch (err) {
+      // Completed is the absolute terminal event. Suppress any subsequent errors
+      // thrown during provider iterator cleanup/teardown.
+      if (hasCompleted) {
+        return;
+      }
       if (signal.aborted) {
         throw new LLMCancelledError('LLM operation was cancelled');
       }
