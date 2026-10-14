@@ -23,6 +23,7 @@ export const Modal: React.FC<ModalProps> = ({ isOpen, onClose, title, children }
 
   return (
     <div
+      className="g-modal-backdrop"
       style={{
         position: 'fixed',
         inset: 0,
@@ -38,14 +39,16 @@ export const Modal: React.FC<ModalProps> = ({ isOpen, onClose, title, children }
       aria-labelledby="modal-title"
     >
       <div
+        className="g-modal"
         style={{
-          backgroundColor: '#0f172a',
-          border: '1px solid #334155',
-          borderRadius: '10px',
+          backgroundColor: 'var(--giga-surface, #111C2D)',
+          border: '1px solid var(--giga-border, #1E293B)',
+          borderRadius: 'var(--giga-radius-lg, 12px)',
           width: '100%',
           maxWidth: '520px',
-          boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.5)',
+          boxShadow: 'var(--giga-shadow-lg, 0 20px 25px -5px rgba(0, 0, 0, 0.5))',
           overflow: 'hidden',
+          padding: 0,
         }}
       >
         <div
@@ -54,22 +57,25 @@ export const Modal: React.FC<ModalProps> = ({ isOpen, onClose, title, children }
             alignItems: 'center',
             justifyContent: 'space-between',
             padding: '16px 20px',
-            borderBottom: '1px solid #1e293b',
+            borderBottom: '1px solid var(--giga-border, #1E293B)',
           }}
         >
-          <h3 id="modal-title" style={{ fontSize: '16px', fontWeight: 600, color: '#f1f5f9' }}>
+          <h3 id="modal-title" style={{ fontSize: '16px', fontWeight: 600, color: 'var(--giga-text, #F8FAFC)', margin: 0 }}>
             {title}
           </h3>
           <button
             onClick={onClose}
+            className="g-iconbtn"
             style={{
               background: 'transparent',
               border: 'none',
-              color: '#94a3b8',
+              color: 'var(--giga-text-secondary, #94A3B8)',
               cursor: 'pointer',
-              padding: '4px',
-              borderRadius: '4px',
+              padding: '6px',
+              borderRadius: 'var(--giga-radius-md, 8px)',
               display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
             }}
             aria-label="Close modal"
           >

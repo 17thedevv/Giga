@@ -1,4 +1,5 @@
 import React from 'react';
+import { ThemeProvider } from './context/ThemeContext.js';
 import { ApiModeProvider } from './context/ApiModeContext.js';
 import { AuthProvider } from './context/AuthContext.js';
 import { RouterProvider, useRouter } from './router.js';
@@ -30,12 +31,14 @@ const AppRoutes: React.FC = () => {
 
 export const App: React.FC = () => {
   return (
-    <ApiModeProvider>
-      <AuthProvider>
-        <RouterProvider>
-          <AppRoutes />
-        </RouterProvider>
-      </AuthProvider>
-    </ApiModeProvider>
+    <ThemeProvider>
+      <ApiModeProvider>
+        <AuthProvider>
+          <RouterProvider>
+            <AppRoutes />
+          </RouterProvider>
+        </AuthProvider>
+      </ApiModeProvider>
+    </ThemeProvider>
   );
 };

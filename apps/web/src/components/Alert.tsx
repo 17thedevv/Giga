@@ -18,27 +18,27 @@ export const Alert: React.FC<AlertProps> = ({
 }) => {
   const styles: Record<string, { bg: string; border: string; text: string; icon: React.ReactNode }> = {
     error: {
-      bg: '#4c0519',
-      border: '#be123c',
-      text: '#fecdd3',
+      bg: 'rgba(220, 38, 38, 0.12)',
+      border: 'rgba(220, 38, 38, 0.35)',
+      text: '#F87171',
       icon: <AlertTriangleIcon size={18} />,
     },
     warning: {
-      bg: '#451a03',
-      border: '#b45309',
-      text: '#fef3c7',
+      bg: 'rgba(217, 119, 6, 0.12)',
+      border: 'rgba(217, 119, 6, 0.35)',
+      text: '#FBBF24',
       icon: <AlertTriangleIcon size={18} />,
     },
     info: {
-      bg: '#082f49',
-      border: '#0284c7',
-      text: '#e0f2fe',
+      bg: 'rgba(59, 130, 246, 0.12)',
+      border: 'rgba(59, 130, 246, 0.35)',
+      text: '#60A5FA',
       icon: <AlertTriangleIcon size={18} />,
     },
     success: {
-      bg: '#064e3b',
-      border: '#059669',
-      text: '#d1fae5',
+      bg: 'rgba(22, 163, 74, 0.12)',
+      border: 'rgba(22, 163, 74, 0.35)',
+      text: '#4ADE80',
       icon: <CheckIcon size={18} />,
     },
   };
@@ -47,6 +47,7 @@ export const Alert: React.FC<AlertProps> = ({
 
   return (
     <div
+      className={`g-alert g-alert--${type}`}
       style={{
         display: 'flex',
         alignItems: 'flex-start',
@@ -54,7 +55,7 @@ export const Alert: React.FC<AlertProps> = ({
         padding: '12px 16px',
         backgroundColor: current.bg,
         border: `1px solid ${current.border}`,
-        borderRadius: '8px',
+        borderRadius: 'var(--giga-radius-md, 8px)',
         color: current.text,
         fontSize: '14px',
         width: '100%',

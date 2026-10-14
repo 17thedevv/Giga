@@ -1,21 +1,25 @@
+@import './styles/tokens.css';
+@import './styles/components.css';
+
 :root {
-  --bg-app: #090d16;
-  --bg-surface: #0f172a;
-  --bg-card: #182234;
-  --bg-input: #101928;
-  --border-subtle: #1e293b;
-  --border-focus: #6366f1;
-  --text-primary: #f1f5f9;
-  --text-muted: #94a3b8;
-  --text-subtle: #64748b;
-  --brand-primary: #6366f1;
-  --brand-cyan: #06b6d4;
-  --status-emerald: #10b981;
-  --status-amber: #f59e0b;
-  --status-rose: #f43f5e;
-  --status-purple: #a855f7;
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  --font-mono: "JetBrains Mono", "Fira Code", monospace;
+  /* Backward-compatible alias mappings to authoritative GIGA design tokens */
+  --bg-app: var(--giga-bg);
+  --bg-surface: var(--giga-surface);
+  --bg-card: var(--giga-surface-muted);
+  --bg-input: var(--giga-surface);
+  --border-subtle: var(--giga-border);
+  --border-focus: var(--giga-primary);
+  --text-primary: var(--giga-text);
+  --text-muted: var(--giga-text-secondary);
+  --text-subtle: var(--giga-text-muted);
+  --brand-primary: var(--giga-primary);
+  --brand-cyan: #0ea5e9;
+  --status-emerald: var(--giga-success);
+  --status-amber: var(--giga-warning);
+  --status-rose: var(--giga-danger);
+  --status-purple: #8b5cf6;
+  --font-sans: var(--giga-font-sans);
+  --font-mono: var(--giga-font-mono);
 }
 
 * {
@@ -25,17 +29,18 @@
 }
 
 body {
-  background-color: var(--bg-app);
-  color: var(--text-primary);
-  font-family: var(--font-sans);
+  background-color: var(--giga-bg);
+  color: var(--giga-text);
+  font-family: var(--giga-font-sans);
   -webkit-font-smoothing: antialiased;
   min-height: 100vh;
   overflow-x: hidden;
+  transition: background-color 0.15s ease, color 0.15s ease;
 }
 
 /* Accessible Focus States */
 :focus-visible {
-  outline: 2px solid var(--border-focus);
+  outline: 2px solid var(--giga-primary);
   outline-offset: 2px;
 }
 
@@ -67,16 +72,16 @@ body {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: var(--border-subtle);
+  background: var(--giga-border);
   border-radius: 3px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--text-subtle);
+  background: var(--giga-border-strong);
 }
 
 /* Code & Pre */
 pre, code {
-  font-family: var(--font-mono);
+  font-family: var(--giga-font-mono);
 }
 
 /* Responsive containers */
