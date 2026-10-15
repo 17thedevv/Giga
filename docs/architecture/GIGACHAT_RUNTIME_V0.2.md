@@ -6,11 +6,19 @@
 
 Implementation candidate [17T-32](https://linear.app/17thedev/issue/17T-32) adds the first
 persisted new-prompt streaming slice under `apps/api/src/modules/chat/`, using migration
-005 and the injected Shared LLM Engine. Only new prompts and GET reconciliation are in
-scope. Stop, Retry/Regenerate, Memory, Skills, usage/quota accounting and real providers
+005 and the injected Shared LLM Engine. [17T-34](https://linear.app/17thedev/issue/17T-34)
+adds a durable Stop candidate with migration 006. Retry/Regenerate, Memory, Skills, usage/quota accounting and real providers
 remain future work; the broader lifecycle below is still proposed. See the
 [API implementation candidate](../contracts/GIGACHAT_RUNTIME_API_V0.2.md#implementation-candidate--17t-32)
 for its limits and recovery behavior. The API remains DRAFT pending independent review.
+
+The [durable Stop candidate](../contracts/GIGACHAT_RUNTIME_API_V0.2.md#durable-stop-implementation-candidate--17t-34)
+commits intent before local abort. Completion and failure/interruption finalizers lock
+conversation then generation and preserve one terminal winner. Local Stop persists the
+runner's bounded buffer; remote Stop uses persisted checkpoints and is observed at the
+next event/deadline. No instant cross-worker abort or background polling/sweeper is claimed.
+Operation-key identity is retained separately from content to reject reuse after deletion.
+Stop and browser disconnect remain distinct persisted states.
 
 GigaChat Runtime owns authorization, user-turn admission, context preparation, generation lifecycle, provider abort, SSE delivery, persistence and memory-extraction eligibility. Shared LLM Engine (a different module) owns model registry, provider calls, normalization and metering. GigaAgent calls LLM Engine but **never** Chat Runtime or GigaChat private memories implicitly. Nothing in this design implies running terminal commands on the Hono host.
 

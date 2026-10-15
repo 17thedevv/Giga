@@ -890,6 +890,7 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
       await testDb.pool.query('DROP INDEX IF EXISTS uq_chat_owner_key;');
     }
     await testDb.pool.query('DELETE FROM schema_migrations WHERE version = 5;');
+    await testDb.pool.query('DELETE FROM schema_migrations WHERE version = 6;');
     await testDb.pool.query('DROP TABLE IF EXISTS messages CASCADE;');
     await testDb.pool.query('DROP TABLE IF EXISTS conversations CASCADE;');
     try {

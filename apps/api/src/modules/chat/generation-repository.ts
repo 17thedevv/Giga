@@ -5,7 +5,7 @@ import type { ModelMessage } from '../llm/types.js';
 import {
   GENERATION_LIFETIME_MS, MAX_CONTEXT_BYTES, SAFE_GENERATION_ERROR,
   type Admission, type AdmissionInput, type ChatFinishReason, type ChatGeneration,
-  type GenerationRepository, type GenerationStatus,
+  type GenerationRepository, type GenerationStatus, type Cancellation,
 } from './types.js';
 
 interface GenerationRow {
@@ -13,6 +13,7 @@ interface GenerationRow {
   assistant_message_id: string | null; model_alias: string; status: GenerationStatus;
   partial_content: string; finish_reason: ChatFinishReason | null; error_code: string | null;
   request_fingerprint: string; created_at: Date; started_at: Date | null; finished_at: Date | null;
+  cancel_requested_at: Date | null;
 }
 const iso = (value: Date): string => new Date(value).toISOString();
 function map(row: GenerationRow): ChatGeneration {
@@ -25,6 +26,7 @@ function map(row: GenerationRow): ChatGeneration {
     createdAt: iso(row.created_at),
     ...(row.started_at ? { startedAt: iso(row.started_at) } : {}),
     ...(row.finished_at ? { finishedAt: iso(row.finished_at) } : {}),
+    ...(row.cancel_requested_at ? { cancelRequestedAt: iso(row.cancel_requested_at) } : {}),
   };
 }
 
@@ -59,6 +61,36 @@ export class PostgresGenerationRepository implements GenerationRepository {
     return map(result.rows[0]);
   }
 
+  private async lockGeneration(client: pg.PoolClient, ownerId: string, conversationId: string, id: string): Promise<GenerationRow> {
+    // Same lock order as admission/completion and the conversation-delete FK boundary.
+    const owned = await client.query('SELECT id FROM conversations WHERE id = $1 AND user_id = $2 FOR UPDATE', [conversationId, ownerId]);
+    if (!owned.rows[0]) throw new NotFoundError();
+    const result = await client.query<GenerationRow>('SELECT * FROM chat_generations WHERE id = $1 AND conversation_id = $2 AND owner_id = $3 FOR UPDATE', [id, conversationId, ownerId]);
+    if (!result.rows[0]) throw new NotFoundError();
+    return result.rows[0];
+  }
+
+  private async bindKey(client: pg.PoolClient, ownerId: string, id: string, key: string, operation: 'prompt' | 'cancel'): Promise<void> {
+    await client.query(`INSERT INTO chat_operation_keys (owner_id, idempotency_key, generation_id, operation)
+      VALUES ($1, $2, $3, $4) ON CONFLICT (owner_id, idempotency_key) DO NOTHING`, [ownerId, key, id, operation]);
+    const binding = await client.query<{ generation_id: string; operation: string }>('SELECT generation_id, operation FROM chat_operation_keys WHERE owner_id = $1 AND idempotency_key = $2', [ownerId, key]);
+    if (binding.rows[0]?.generation_id !== id || binding.rows[0]?.operation !== operation) {
+      throw new ConflictError('Idempotency key was used for a different operation');
+    }
+  }
+
+  async requestCancel(ownerId: string, conversationId: string, id: string, key: string): Promise<Cancellation> {
+    return this.transaction(async (client) => {
+      const row = await this.lockGeneration(client, ownerId, conversationId, id);
+      await this.bindKey(client, ownerId, id, key, 'cancel');
+      if (row.status !== 'pending' && row.status !== 'streaming') return { generation: map(row), accepted: false };
+      if (row.cancel_requested_at) return { generation: map(row), accepted: true };
+      const result = await client.query<GenerationRow>(`UPDATE chat_generations SET cancel_requested_at = NOW()
+        WHERE id = $1 AND owner_id = $2 AND status IN ('pending', 'streaming') RETURNING *`, [id, ownerId]);
+      return { generation: map(result.rows[0]!), accepted: true };
+    });
+  }
+
   async admit(input: AdmissionInput): Promise<Admission> {
     try {
       return await this.transaction(async (client) => {
@@ -70,7 +102,10 @@ export class PostgresGenerationRepository implements GenerationRepository {
           if (existing.rows[0].request_fingerprint !== input.fingerprint) throw new ConflictError('Idempotency key was used for a different request');
           return { generation: map(existing.rows[0]), duplicate: true };
         }
-        await client.query(`UPDATE chat_generations SET status = 'interrupted', error_code = 'INTERRUPTED', finished_at = NOW()
+        await client.query(`UPDATE chat_generations SET
+          status = CASE WHEN cancel_requested_at IS NOT NULL THEN 'stopped' ELSE 'interrupted' END,
+          finish_reason = CASE WHEN cancel_requested_at IS NOT NULL THEN 'cancelled' ELSE NULL END,
+          error_code = CASE WHEN cancel_requested_at IS NOT NULL THEN NULL ELSE 'INTERRUPTED' END, finished_at = NOW()
           WHERE conversation_id = $1 AND owner_id = $2 AND status IN ('pending', 'streaming') AND created_at < $3`,
         [input.conversationId, input.ownerId, new Date(Date.now() - GENERATION_LIFETIME_MS)]);
         const active = await client.query("SELECT id FROM chat_generations WHERE conversation_id = $1 AND status IN ('pending', 'streaming')", [input.conversationId]);
@@ -81,6 +116,7 @@ export class PostgresGenerationRepository implements GenerationRepository {
           (owner_id, conversation_id, user_message_id, model_alias, status, idempotency_key, request_fingerprint)
           VALUES ($1, $2, $3, $4, 'pending', $5, $6) RETURNING *`,
         [input.ownerId, input.conversationId, userMessageId, input.modelId, input.key, input.fingerprint]);
+        await this.bindKey(client, input.ownerId, result.rows[0]!.id, input.key, 'prompt');
         await client.query('UPDATE conversations SET updated_at = NOW() WHERE id = $1 AND user_id = $2', [input.conversationId, input.ownerId]);
         return { generation: map(result.rows[0]!), duplicate: false };
       });
@@ -118,12 +154,12 @@ export class PostgresGenerationRepository implements GenerationRepository {
   }
 
   async start(ownerId: string, id: string): Promise<void> {
-    const result = await this.pool.query("UPDATE chat_generations SET status = 'streaming', started_at = NOW() WHERE id = $1 AND owner_id = $2 AND status = 'pending' RETURNING id", [id, ownerId]);
+    const result = await this.pool.query("UPDATE chat_generations SET status = 'streaming', started_at = NOW() WHERE id = $1 AND owner_id = $2 AND status = 'pending' AND cancel_requested_at IS NULL RETURNING id", [id, ownerId]);
     if (!result.rows[0]) throw new ConflictError('Generation is no longer pending');
   }
 
   async checkpoint(ownerId: string, id: string, text: string): Promise<void> {
-    const result = await this.pool.query("UPDATE chat_generations SET partial_content = $3 WHERE id = $1 AND owner_id = $2 AND status = 'streaming' RETURNING id", [id, ownerId, text]);
+    const result = await this.pool.query("UPDATE chat_generations SET partial_content = $3 WHERE id = $1 AND owner_id = $2 AND status = 'streaming' AND cancel_requested_at IS NULL RETURNING id", [id, ownerId, text]);
     if (!result.rows[0]) throw new ConflictError('Generation is no longer streaming');
   }
 
@@ -134,20 +170,26 @@ export class PostgresGenerationRepository implements GenerationRepository {
 
   async complete(ownerId: string, generation: ChatGeneration, text: string, reason: ChatFinishReason): Promise<ChatGeneration> {
     return this.transaction(async (client) => {
-      const owned = await client.query('SELECT id FROM conversations WHERE id = $1 AND user_id = $2 FOR UPDATE', [generation.conversationId, ownerId]);
-      if (!owned.rows[0]) throw new NotFoundError();
-      const active = await client.query("SELECT id FROM chat_generations WHERE id = $1 AND owner_id = $2 AND status = 'streaming' FOR UPDATE", [generation.id, ownerId]);
-      if (!active.rows[0]) throw new ConflictError('Generation is no longer streaming');
+      const active = await this.lockGeneration(client, ownerId, generation.conversationId, generation.id);
+      if (active.status !== 'streaming' || active.cancel_requested_at) throw new ConflictError('Generation is no longer eligible for completion');
       await this.insertAssistant(client, generation, text);
       const result = await client.query<GenerationRow>(`UPDATE chat_generations SET status = 'completed', assistant_message_id = $1,
-        partial_content = $3, finish_reason = $4, finished_at = NOW() WHERE id = $1 AND owner_id = $2 AND status = 'streaming' RETURNING *`, [generation.id, ownerId, text, reason]);
+        partial_content = $3, finish_reason = $4, finished_at = NOW() WHERE id = $1 AND owner_id = $2 AND status = 'streaming' AND cancel_requested_at IS NULL RETURNING *`, [generation.id, ownerId, text, reason]);
       await client.query('UPDATE conversations SET updated_at = NOW() WHERE id = $1 AND user_id = $2', [generation.conversationId, ownerId]);
       return map(result.rows[0]!);
     });
   }
 
-  async fail(ownerId: string, id: string, text: string, status: 'failed' | 'interrupted', code: string): Promise<void> {
-    await this.pool.query(`UPDATE chat_generations SET status = $3, partial_content = $4, error_code = $5, finished_at = NOW()
-      WHERE id = $1 AND owner_id = $2 AND status IN ('pending', 'streaming')`, [id, ownerId, status, text, code]);
+  async finalize(ownerId: string, generation: ChatGeneration, text: string, status: 'failed' | 'interrupted', code: string): Promise<ChatGeneration> {
+    return this.transaction(async (client) => {
+      const row = await this.lockGeneration(client, ownerId, generation.conversationId, generation.id);
+      if (row.status !== 'pending' && row.status !== 'streaming') return map(row);
+      const stopped = row.cancel_requested_at !== null;
+      const result = await client.query<GenerationRow>(`UPDATE chat_generations SET status = $3, partial_content = $4,
+        error_code = $5, finish_reason = $6, finished_at = NOW()
+        WHERE id = $1 AND owner_id = $2 AND status IN ('pending', 'streaming') RETURNING *`,
+      [generation.id, ownerId, stopped ? 'stopped' : status, text, stopped ? null : code, stopped ? 'cancelled' : null]);
+      return map(result.rows[0]!);
+    });
   }
 }

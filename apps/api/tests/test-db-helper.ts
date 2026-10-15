@@ -145,6 +145,9 @@ export async function createTestDatabase(migrations?: readonly Migration[]): Pro
   let activeTxBackup: ReturnType<typeof db.backup> | null = null;
 
   db.public.interceptQueries((sql) => {
+    // Match the names PostgreSQL generates for migration 005's anonymous CHECKs.
+    sql = sql.replace("status VARCHAR(20) NOT NULL CHECK", "status VARCHAR(20) NOT NULL CONSTRAINT chat_generations_status_check CHECK")
+      .replace("finish_reason VARCHAR(20) CHECK", "finish_reason VARCHAR(20) CONSTRAINT chat_generations_finish_reason_check CHECK");
     // pg-mem incorrectly uses a partial index for queries without its predicate,
     // hiding terminal rows. Real PostgreSQL tests prove this DB guard.
     if (sql.includes('CREATE UNIQUE INDEX IF NOT EXISTS uq_chat_active_conversation')) {
@@ -225,6 +228,7 @@ export async function createTestDatabase(migrations?: readonly Migration[]): Pro
 
   const cleanup = async (): Promise<void> => {
     try {
+      await pool.query('DELETE FROM chat_operation_keys;');
       await pool.query('DELETE FROM chat_generations;');
       await pool.query('DELETE FROM messages;');
       await pool.query('DELETE FROM conversations;');

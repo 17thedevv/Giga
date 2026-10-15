@@ -1,4 +1,4 @@
-import { after, before, beforeEach, describe, it } from 'node:test';
+import { after, afterEach, before, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
@@ -72,6 +72,7 @@ describe('Persisted Chat Runtime', { timeout: 30000 }, () => {
   }
 
   before(async () => { db = await createTestDatabase(); });
+  afterEach(() => { assert.equal(runtime.activeGenerationCount, 0, 'controller registry must be empty after every terminal path'); });
   after(async () => { await db.cleanup(); await db.pool.end(); });
   beforeEach(async () => {
     await db.cleanup();
@@ -387,5 +388,367 @@ describe('Persisted Chat Runtime', { timeout: 30000 }, () => {
     assert.equal(await messageCount('user'), 0);
     const admitted = await runtime.admit(owner, conversationId, { content: 'Hello' }, randomUUID());
     await assert.rejects(db.pool.query('UPDATE chat_generations SET partial_content = $2 WHERE id = $1', [admitted.generation.id, '🙂'.repeat(16385)]));
+  });
+
+  async function cancelPost(id: string, key: string = randomUUID(), options: { body?: string; headers?: Record<string, string> } = {}): Promise<Response> {
+    return app.request(`/api/v1/conversations/${conversationId}/generations/${id}/cancel`, {
+      method: 'POST', headers: { Origin: origin, Cookie: cookie, 'Idempotency-Key': key, ...options.headers },
+      ...(options.body === undefined ? {} : { body: options.body }),
+    });
+  }
+
+  it('cancel pending commits stopped before provider invocation and GET reconciles it', async () => {
+    const admitted = await runtime.admit(owner, conversationId, { content: 'Hello' }, randomUUID());
+    const response = await cancelPost(admitted.generation.id);
+    assert.equal(response.status, 202);
+    const stored = (await response.json() as { generation: ChatGeneration }).generation;
+    assert.equal(stored.status, 'stopped');
+    assert.equal(stored.finishReason, 'cancelled');
+    assert.ok(stored.finishedAt && stored.cancelRequestedAt);
+    assert.equal(stored.assistantMessageId, undefined);
+    const events: ChatEvent[] = [];
+    await runtime.run(owner, admitted.generation, async (e) => { events.push(e); }, new AbortController().signal);
+    assert.deepEqual(events.map((e) => e.event), ['message.started', 'message.stopped']);
+    const get = await app.request(`/api/v1/conversations/${conversationId}/generations/${stored.id}`, { headers: { Cookie: cookie } });
+    assert.equal(get.status, 200);
+    assert.deepEqual(await get.json(), { generation: stored });
+    assert.equal(provider.callCount, 0);
+    assert.equal(await messageCount('assistant'), 0);
+  });
+
+  it('durable Stop preserves the full local partial and emits one stopped without an error', async () => {
+    const admitted = await runtime.admit(owner, conversationId, { content: 'Hello' }, randomUUID());
+    const events: ChatEvent[] = [];
+    let abortObserved = false;
+    await runtime.run(owner, admitted.generation, async (event) => {
+      events.push(event);
+      if (event.event === 'message.delta') {
+        assert.equal((await generation()).partialContent, ''); // below the checkpoint threshold
+        provider.lastRequest!.signal.addEventListener('abort', () => { abortObserved = true; }, { once: true });
+        const result = await runtime.cancel(owner, conversationId, admitted.generation.id, randomUUID());
+        assert.equal(result.accepted, true);
+        assert.ok(result.generation.cancelRequestedAt); // durable before provider abort
+        assert.equal(abortObserved, true);
+      }
+    }, new AbortController().signal);
+    assert.deepEqual(events.map((e) => e.event), ['message.started', 'message.delta', 'message.stopped']);
+    const stored = await generation();
+    assert.equal(stored.status, 'stopped');
+    assert.equal(stored.partialContent, 'Hello');
+    assert.equal(stored.error, undefined);
+    assert.equal(await messageCount('assistant'), 0);
+  });
+
+  it('original HTTP SSE receives exactly one stopped event after the cancel endpoint', { timeout: 5000 }, async () => {
+    setup({ chunkDelayMs: 150 });
+    const response = await post();
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    let stream = '';
+    while (!stream.includes('event: message.delta')) stream += decoder.decode((await reader.read()).value, { stream: true });
+    const stored = await generation();
+    assert.equal((await cancelPost(stored.id)).status, 202);
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      stream += decoder.decode(next.value, { stream: true });
+    }
+    const events = eventsFrom(stream);
+    assert.deepEqual(events.map((e) => e.event), ['message.started', 'message.delta', 'message.stopped']);
+    assert.deepEqual(events.at(-1)!.data, { messageId: stored.id, generationId: stored.id, finishReason: 'cancelled' });
+    assert.equal((await generation()).status, 'stopped');
+    assert.equal(provider.lastRequest!.signal.aborted, true);
+  });
+
+  it('same cancel key reconciles without changing timestamps or terminal state', async () => {
+    const admitted = await runtime.admit(owner, conversationId, { content: 'Hello' }, randomUUID());
+    const key = randomUUID();
+    const first = await cancelPost(admitted.generation.id, key);
+    assert.equal(first.status, 202);
+    const result = await first.json();
+    const repeat = await cancelPost(admitted.generation.id, key);
+    assert.equal(repeat.status, 200);
+    assert.deepEqual(await repeat.json(), result);
+    const bindings = await db.pool.query("SELECT * FROM chat_operation_keys WHERE operation = 'cancel'");
+    assert.equal(bindings.rows.length, 1);
+  });
+
+  it('cancel keys cannot be reused for another generation or a prompt operation', async () => {
+    const promptKey = randomUUID();
+    const first = await runtime.admit(owner, conversationId, { content: 'Hello' }, promptKey);
+    assert.equal((await cancelPost(first.generation.id, promptKey)).status, 409);
+    assert.equal((await generation()).status, 'pending');
+    const key = randomUUID();
+    assert.equal((await cancelPost(first.generation.id, key)).status, 202);
+    const next = await runtime.admit(owner, conversationId, { content: 'Next' }, randomUUID());
+    assert.equal((await cancelPost(next.generation.id, key)).status, 409);
+    assert.equal((await repository.get(owner, conversationId, next.generation.id)).status, 'pending');
+    await runtime.cancel(owner, conversationId, next.generation.id, randomUUID());
+    await assert.rejects(runtime.admit(owner, conversationId, { content: 'Next' }, key), { statusCode: 409 });
+    assert.equal(await messageCount('user'), 2);
+  });
+
+  it('cross-owner cancel returns 404 and does not abort the active provider', async () => {
+    const admitted = await runtime.admit(owner, conversationId, { content: 'Hello' }, randomUUID());
+    await runtime.run(owner, admitted.generation, async (event) => {
+      if (event.event === 'message.delta') {
+        assert.equal((await cancelPost(admitted.generation.id, randomUUID(), { headers: { Cookie: otherCookie } })).status, 404);
+        assert.equal(provider.lastRequest!.signal.aborted, false);
+        assert.equal((await generation()).cancelRequestedAt, undefined);
+      }
+    }, new AbortController().signal);
+    assert.equal((await generation()).status, 'completed');
+  });
+
+  it('cancel enforces empty body, bounded keys, authentication and strict CSRF', async () => {
+    const admitted = await runtime.admit(owner, conversationId, { content: 'Hello' }, randomUUID());
+    const id = admitted.generation.id;
+    for (const body of ['{}', ' ', '\n', 'null', '{"modelId":"raw"}']) assert.equal((await cancelPost(id, randomUUID(), { body })).status, 400);
+    for (const key of ['', 'with spaces', 'a'.repeat(129)]) assert.equal((await cancelPost(id, key)).status, 400);
+    const missing = await app.request(`/api/v1/conversations/${conversationId}/generations/${id}/cancel`, { method: 'POST', headers: { Origin: origin, Cookie: cookie } });
+    assert.equal(missing.status, 400);
+    assert.equal((await cancelPost(id, randomUUID(), { headers: { Cookie: '' } })).status, 401);
+    assert.equal((await cancelPost(id, randomUUID(), { headers: { Origin: '' } })).status, 403);
+    assert.equal((await cancelPost(id, randomUUID(), { headers: { Origin: 'https://untrusted.example' } })).status, 403);
+    assert.equal((await generation()).cancelRequestedAt, undefined);
+    assert.equal(provider.callCount, 0);
+  });
+
+  for (const terminal of ['failed', 'interrupted', 'completed'] as const) {
+    it(`cancel cannot downgrade an already ${terminal} generation`, async () => {
+      if (terminal === 'failed') setup({ errorBeforeFirstToken: new Error('failure') });
+      const admitted = await runtime.admit(owner, conversationId, { content: 'Hello' }, randomUUID());
+      const abort = new AbortController();
+      if (terminal === 'interrupted') abort.abort();
+      await runtime.run(owner, admitted.generation, async () => {}, abort.signal);
+      const before = await generation();
+      assert.equal(before.status, terminal);
+      const response = await cancelPost(before.id);
+      assert.equal(response.status, 200);
+      assert.deepEqual(await response.json(), { generation: before });
+      assert.deepEqual(await generation(), before);
+    });
+  }
+
+  it('a Stop handled by another coordinator fences completion and late tokens', async () => {
+    const remote = new ChatRuntime(new PostgresGenerationRepository(db.pool), engineFor(provider));
+    const admitted = await runtime.admit(owner, conversationId, { content: 'Hello' }, randomUUID());
+    const events: ChatEvent[] = [];
+    await runtime.run(owner, admitted.generation, async (event) => {
+      events.push(event);
+      if (event.event === 'message.delta') {
+        await remote.cancel(owner, conversationId, admitted.generation.id, randomUUID());
+        assert.equal(provider.lastRequest!.signal.aborted, false, 'another coordinator cannot instantly signal this provider');
+      }
+    }, new AbortController().signal);
+    assert.deepEqual(events.map((e) => e.event), ['message.started', 'message.delta', 'message.stopped']);
+    assert.equal((await generation()).status, 'stopped');
+    assert.equal(await messageCount('assistant'), 0);
+    assert.equal(remote.activeGenerationCount, 0);
+  });
+
+  it('durably recorded intent alone fences completion before any abort/finalization', async () => {
+    const admitted = await runtime.admit(owner, conversationId, { content: 'Hello' }, randomUUID());
+    await repository.start(owner, admitted.generation.id);
+    await repository.checkpoint(owner, admitted.generation.id, 'partial');
+    await repository.requestCancel(owner, conversationId, admitted.generation.id, randomUUID());
+    await assert.rejects(repository.complete(owner, admitted.generation, 'must not commit', 'stop'), { statusCode: 409 });
+    const stopped = await repository.finalize(owner, admitted.generation, 'partial', 'failed', 'GENERATION_FAILED');
+    assert.equal(stopped.status, 'stopped');
+    assert.equal(stopped.partialContent, 'partial');
+    assert.equal(await messageCount('assistant'), 0);
+  });
+
+  it('late provider output after local Stop cannot emit or change stopped state', { timeout: 5000 }, async () => {
+    setup({ emitTokensAfterAbort: true, chunkDelayMs: 20 });
+    const admitted = await runtime.admit(owner, conversationId, { content: 'Hello' }, randomUUID());
+    const events: ChatEvent[] = [];
+    await runtime.run(owner, admitted.generation, async (event) => {
+      events.push(event);
+      if (event.event === 'message.delta') await runtime.cancel(owner, conversationId, admitted.generation.id, randomUUID());
+    }, new AbortController().signal);
+    const stopped = await generation();
+    await assert.rejects(repository.checkpoint(owner, stopped.id, 'late'));
+    await assert.rejects(repository.complete(owner, stopped, 'late', 'stop'));
+    assert.deepEqual(await generation(), stopped);
+    assert.equal(events.filter((e) => e.event === 'message.delta').length, 1);
+    assert.equal(events.filter((e) => e.event === 'message.stopped').length, 1);
+  });
+
+  it('cancel after conversation deletion is 404 and cannot resurrect state or bind keys', async () => {
+    const admitted = await runtime.admit(owner, conversationId, { content: 'Hello' }, randomUUID());
+    await db.pool.query('DELETE FROM conversations WHERE id = $1', [conversationId]);
+    assert.equal((await cancelPost(admitted.generation.id)).status, 404);
+    assert.equal((await db.pool.query("SELECT * FROM chat_operation_keys WHERE operation = 'cancel'")).rows.length, 0);
+    assert.equal(provider.callCount, 0);
+  });
+
+  it('terminal transition guard and stopped/completed constraints hold on Real PostgreSQL', async (t) => {
+    if (db.isMemory) return t.skip('PostgreSQL trigger/constraint enforcement is not emulated');
+    const admitted = await runtime.admit(owner, conversationId, { content: 'Hello' }, randomUUID());
+    await assert.rejects(db.pool.query("UPDATE chat_generations SET status = 'stopped' WHERE id = $1", [admitted.generation.id]));
+    await assert.rejects(db.pool.query("UPDATE chat_generations SET status = 'completed', finished_at = NOW() WHERE id = $1", [admitted.generation.id]));
+    await runtime.cancel(owner, conversationId, admitted.generation.id, randomUUID());
+    for (const status of ['pending', 'streaming', 'completed', 'failed', 'interrupted']) {
+      await assert.rejects(db.pool.query('UPDATE chat_generations SET status = $2 WHERE id = $1', [admitted.generation.id, status]));
+    }
+    assert.equal((await generation()).status, 'stopped');
+  });
+
+  // Each gate rejects after two seconds and is released in finally: race tests cannot
+  // leave a PoolClient or an unresolved test promise behind after an assertion failure.
+  function gate(): { promise: Promise<void>; release: () => void } {
+    let release: () => void = () => {};
+    const promise = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Race gate timed out')), 2000);
+      release = () => { clearTimeout(timer); resolve(); };
+    });
+    void promise.catch(() => {});
+    return { promise, release };
+  }
+
+  it('Real PostgreSQL Stop wins while completion is ready but has not locked the row', { timeout: 6000 }, async (t) => {
+    if (db.isMemory) return t.skip('Real PostgreSQL transaction race');
+    const atCompletion = gate(); const releaseCompletion = gate();
+    class PausedCompletion extends PostgresGenerationRepository {
+      override async complete(userId: string, item: ChatGeneration, text: string, reason: 'stop' | 'length' | 'other' | 'cancelled'): Promise<ChatGeneration> {
+        atCompletion.release();
+        await releaseCompletion.promise;
+        return super.complete(userId, item, text, reason);
+      }
+    }
+    setup({}, new PausedCompletion(db.pool));
+    const admitted = await runtime.admit(owner, conversationId, { content: 'Hello' }, randomUUID());
+    const events: ChatEvent[] = [];
+    const running = runtime.run(owner, admitted.generation, async (e) => { events.push(e); }, new AbortController().signal);
+    try {
+      await atCompletion.promise;
+      await runtime.cancel(owner, conversationId, admitted.generation.id, randomUUID());
+    } finally { releaseCompletion.release(); await running; }
+    assert.equal((await generation()).status, 'stopped');
+    assert.equal((await generation()).partialContent, 'Hello world!');
+    assert.equal(await messageCount('assistant'), 0);
+    assert.equal(events.at(-1)!.event, 'message.stopped');
+    assert.equal(events.filter((e) => e.event === 'message.stopped').length, 1);
+    assert.ok(!events.some((e) => e.event === 'message.completed' || e.event === 'message.failed' || e.event === 'stream.error'));
+  });
+
+  it('Real PostgreSQL Completion wins when cancel waits on its transaction lock', { timeout: 6000 }, async (t) => {
+    if (db.isMemory) return t.skip('Real PostgreSQL row locks');
+    const insideTransaction = gate(); const releaseCommit = gate(); const cancelEntered = gate();
+    class PausedCommit extends PostgresGenerationRepository {
+      protected override async insertAssistant(client: pg.PoolClient, item: ChatGeneration, text: string): Promise<void> {
+        await super.insertAssistant(client, item, text);
+        insideTransaction.release();
+        await releaseCommit.promise;
+      }
+      override async requestCancel(userId: string, conv: string, id: string, key: string) {
+        cancelEntered.release();
+        return super.requestCancel(userId, conv, id, key);
+      }
+    }
+    setup({}, new PausedCommit(db.pool));
+    const admitted = await runtime.admit(owner, conversationId, { content: 'Hello' }, randomUUID());
+    const events: ChatEvent[] = [];
+    const running = runtime.run(owner, admitted.generation, async (e) => { events.push(e); }, new AbortController().signal);
+    let cancelling: ReturnType<ChatRuntime['cancel']> | undefined;
+    try {
+      await insideTransaction.promise;
+      cancelling = runtime.cancel(owner, conversationId, admitted.generation.id, randomUUID());
+      await cancelEntered.promise;
+      const lockDeadline = Date.now() + 1000;
+      let blocked = false;
+      while (Date.now() < lockDeadline) {
+        const waiting = await db.pool.query(`SELECT pid FROM pg_stat_activity WHERE datname = current_database()
+          AND wait_event_type = 'Lock' AND query LIKE '%FROM conversations%FOR UPDATE%'`);
+        if (waiting.rows.length > 0) { blocked = true; break; }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      assert.equal(blocked, true, 'cancel must actually wait for the completion transaction lock');
+    } finally { releaseCommit.release(); await running; }
+    const result = await cancelling!;
+    assert.equal(result.accepted, false);
+    assert.equal(result.generation.status, 'completed');
+    assert.equal(result.generation.cancelRequestedAt, undefined);
+    assert.equal(await messageCount('assistant'), 1);
+    assert.equal(events.at(-1)!.event, 'message.completed');
+  });
+
+  it('Real PostgreSQL concurrent cancellation with the same key is idempotent', { timeout: 5000 }, async (t) => {
+    if (db.isMemory) return t.skip('Real PostgreSQL row locks/unique conflict arbitration');
+    const admitted = await runtime.admit(owner, conversationId, { content: 'Hello' }, randomUUID());
+    const key = randomUUID();
+    const results = await Promise.all([
+      runtime.cancel(owner, conversationId, admitted.generation.id, key),
+      runtime.cancel(owner, conversationId, admitted.generation.id, key),
+    ]);
+    assert.ok(results.every((r) => r.generation.id === admitted.generation.id));
+    assert.equal((await generation()).status, 'stopped');
+    const stored = await generation();
+    assert.deepEqual((await runtime.cancel(owner, conversationId, admitted.generation.id, key)).generation, stored);
+    assert.equal((await db.pool.query("SELECT * FROM chat_operation_keys WHERE operation = 'cancel'")).rows.length, 1);
+  });
+
+  it('records cancel keys on already-terminal rows and retains key identity after deletion', async () => {
+    await collect(await post());
+    const stored = await generation();
+    const key = randomUUID();
+    assert.equal((await cancelPost(stored.id, key)).status, 200);
+    await db.pool.query('DELETE FROM conversations WHERE id = $1', [conversationId]);
+    conversationId = randomUUID();
+    await db.pool.query('INSERT INTO conversations (id,user_id,title) VALUES ($1,$2,$3)', [conversationId, owner, 'New']);
+    await assert.rejects(runtime.admit(owner, conversationId, { content: 'Hello' }, key), { statusCode: 409 });
+    const next = await runtime.admit(owner, conversationId, { content: 'Hello' }, randomUUID());
+    assert.equal((await cancelPost(next.generation.id, key)).status, 409);
+    assert.equal(await messageCount('user'), 1);
+  });
+
+  it('a failure to record durable cancel intent never aborts the provider', async () => {
+    class FailingIntent extends PostgresGenerationRepository {
+      override async requestCancel(): Promise<never> { throw new Error('injected durable cancel failure'); }
+    }
+    setup({}, new FailingIntent(db.pool));
+    const admitted = await runtime.admit(owner, conversationId, { content: 'Hello' }, randomUUID());
+    await runtime.run(owner, admitted.generation, async (event) => {
+      if (event.event === 'message.delta') {
+        await assert.rejects(runtime.cancel(owner, conversationId, admitted.generation.id, randomUUID()));
+        assert.equal(provider.lastRequest!.signal.aborted, false);
+      }
+    }, new AbortController().signal);
+    assert.equal((await generation()).status, 'completed');
+  });
+
+  it('durable Stop survives downstream disconnect without fabricating terminal delivery', async () => {
+    const admitted = await runtime.admit(owner, conversationId, { content: 'Hello' }, randomUUID());
+    const abort = new AbortController();
+    const events: ChatEvent[] = [];
+    await runtime.run(owner, admitted.generation, async (event) => {
+      events.push(event);
+      if (event.event === 'message.delta') {
+        await runtime.cancel(owner, conversationId, admitted.generation.id, randomUUID());
+        abort.abort();
+      }
+    }, abort.signal);
+    assert.equal((await generation()).status, 'stopped');
+    assert.equal((await generation()).partialContent, 'Hello');
+    assert.deepEqual(events.map((e) => e.event), ['message.started', 'message.delta']);
+  });
+
+  it('conversation deletion after durable intent cannot resurrect a stopped conversation', async () => {
+    class DeleteAfterIntent extends PostgresGenerationRepository {
+      override async requestCancel(userId: string, conv: string, id: string, key: string) {
+        const result = await super.requestCancel(userId, conv, id, key);
+        await db.pool.query('DELETE FROM conversations WHERE id = $1 AND user_id = $2', [conv, userId]);
+        return result;
+      }
+    }
+    setup({}, new DeleteAfterIntent(db.pool));
+    const admitted = await runtime.admit(owner, conversationId, { content: 'Hello' }, randomUUID());
+    await runtime.run(owner, admitted.generation, async (event) => {
+      if (event.event === 'message.delta') await runtime.cancel(owner, conversationId, admitted.generation.id, randomUUID());
+    }, new AbortController().signal);
+    await assert.rejects(repository.get(owner, conversationId, admitted.generation.id), { statusCode: 404 });
+    assert.equal(await messageCount('assistant'), 0);
+    assert.equal(provider.lastRequest!.signal.aborted, true);
   });
 });

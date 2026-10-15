@@ -239,7 +239,16 @@ server alias `giga-chat-default`. No provider is configured by default: unconfig
 admission returns 503 and never falls back to a fake response. FakeProvider is test-only.
 
 GET `/api/v1/conversations/:id/generations/:generationId` reconciles durable state after
-refresh/disconnect without repeating the provider. Apply migration 005 with the existing
+refresh/disconnect without repeating the provider. Apply migrations through 006 with the existing
 migration runner before enabling these routes. See the [DRAFT contract](../../docs/contracts/GIGACHAT_RUNTIME_API_V0.2.md)
 and [verification/handoff](../../docs/evidence/17t-32-chat-runtime.md) for limits and review gates.
+
+POST `/api/v1/conversations/:id/generations/:generationId/cancel` accepts an empty body
+and a distinct required `Idempotency-Key`. A 202 `{generation}` confirms durable intent;
+200 reconciles an already-terminal generation. The original stream emits `message.stopped`
+when Stop wins and delivery is available; GET reconciles after disconnect. Connection
+abort alone remains `interrupted`. Keys cannot switch prompt/cancel operation or generation.
+Immediate provider abort is local to the owning coordinator; remote cancellation uses DB
+fencing and checkpointed partial text. See the [Stop candidate](../../docs/contracts/GIGACHAT_RUNTIME_API_V0.2.md#durable-stop-implementation-candidate--17t-34)
+and [cancel handoff](../../docs/evidence/17t-34-chat-cancel.md). API v1 remains DRAFT.
 

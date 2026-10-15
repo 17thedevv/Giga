@@ -1,6 +1,6 @@
 # GigaChat Runtime / LLM Engine — Verification v0.2
 
-> **Broader test plan; only the 17T-32 backend subset below has execution evidence.** [17T-25](https://linear.app/17thedev/issue/17T-25/specify-gigachat-runtime-and-shared-llm-engine-v02). Owner Trà, frontend reviewer Thư. [Runtime](GIGACHAT_RUNTIME_V0.2.md) · [LLM Engine](LLM_ENGINE_V0.1.md) · [API](../contracts/GIGACHAT_RUNTIME_API_V0.2.md).
+> **Broader test plan; the 17T-32/34 backend subsets have scoped execution evidence.** [17T-25](https://linear.app/17thedev/issue/17T-25/specify-gigachat-runtime-and-shared-llm-engine-v02). Owner Trà, frontend reviewer Thư. [Runtime](GIGACHAT_RUNTIME_V0.2.md) · [LLM Engine](LLM_ENGINE_V0.1.md) · [API](../contracts/GIGACHAT_RUNTIME_API_V0.2.md).
 
 17T-32 implements automated coverage under `apps/api/tests/chat/chat-runtime.test.ts` for
 CHAT-01/02/05/06/07/08/09/12/19/20, strict model/key/body validation, auth/CSRF, bounded
@@ -11,6 +11,15 @@ This does not establish Stop, Retry/Regenerate, Memory, quotas, real provider or
 browser acceptance from the broader matrix.
 
 ## Test levels
+
+17T-34 adds backend tests for CHAT-03/18/21: pending and active cancellation, original HTTP
+SSE stopped delivery, partial preservation, owner/CSRF/key guards, operation-key conflicts,
+unchanged terminal rows, disconnect versus Stop, deletion and empty controller registry
+after every terminal path. PostgreSQL tests prove both race winners (including observed
+cancel lock waiting), concurrent duplicate cancellation and terminal transition constraints.
+A populated migration-005 schema is upgraded by 006 and reapplied without row loss.
+See [17T-34 evidence](../evidence/17t-34-chat-cancel.md). Browser/real-provider acceptance
+and Retry/Regenerate remain outside this backend slice.
 
 - Unit: deterministic fake provider stream, token budgeting, AbortSignal, error and malformed output.
 - Contract: runtime-validated JSON/SSE fixtures, UTF-8 parser split across arbitrary chunks, unknown-event tolerance.
