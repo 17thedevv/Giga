@@ -4,12 +4,17 @@ import { createApp } from './create-app.js';
 import { loadConfig, type AppConfig } from './config.js';
 import { createDatabasePool, redactDatabaseUrl } from '../db/client.js';
 import { runMigrations } from '../db/migrate.js';
+import { createChatEngine } from '../modules/llm/chat-bootstrap.js';
+import type { ProviderTransport } from '../modules/llm/providers/gemini/gemini-provider.js';
+import type { LLMEngine } from '../modules/llm/engine.js';
 
 export interface StartServerOptions {
   readonly port?: number;
   readonly pool?: pg.Pool;
   readonly config?: AppConfig;
   readonly skipMigrations?: boolean;
+  readonly llmEngine?: LLMEngine;
+  readonly providerTransport?: ProviderTransport;
 }
 
 export async function startServer(options: StartServerOptions = {}): Promise<{
@@ -19,6 +24,13 @@ export async function startServer(options: StartServerOptions = {}): Promise<{
 }> {
   const config = options.config ?? loadConfig();
   const port = options.port ?? config.port;
+  if ((config.chatEnabled === true || (config.nodeEnv === 'production' && config.chatEnabled !== false)) && !config.chat) {
+    throw new Error('Enabled Chat requires server provider configuration');
+  }
+  if (config.chatEnabled === false && config.chat) throw new Error('Conflicting Chat enable configuration');
+  // Fail configuration before opening DB connections or listening on a socket.
+  const configuredEngine = createChatEngine(config.chat, options.providerTransport);
+  const llmEngine = options.llmEngine ?? configuredEngine;
 
   let pool = options.pool;
 
@@ -44,6 +56,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<{
   const app = createApp({
     pool,
     config,
+    llmEngine,
   });
 
   const server = serve(

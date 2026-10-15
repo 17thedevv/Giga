@@ -1,8 +1,14 @@
 # Shared LLM Engine v0.1 — Provider-neutral AI capabilities
 
-> **Product direction approved 2026-10-13. Technical implementation PROPOSED, not present in code.** [17T-25](https://linear.app/17thedev/issue/17T-25/specify-gigachat-runtime-and-shared-llm-engine-v02). Owner Trà; Frontend consumer reviewer Thư. See [Chat Runtime](GIGACHAT_RUNTIME_V0.2.md), [Memory](AI_MEMORY_RAG_V0.1.md) and [Agent](GIGA_AGENT_ARCHITECTURE_V0.2.md).
+> **Product direction approved 2026-10-13. Core engine implemented; broader technical design PROPOSED.** [17T-25](https://linear.app/17thedev/issue/17T-25/specify-gigachat-runtime-and-shared-llm-engine-v02). Owner Trà; Frontend consumer reviewer Thư. See [Chat Runtime](GIGACHAT_RUNTIME_V0.2.md), [Memory](AI_MEMORY_RAG_V0.1.md) and [Agent](GIGA_AGENT_ARCHITECTURE_V0.2.md).
 
 ## 1. Purpose and trust boundaries
+
+Implementation status: 17T-31 supplies the core registry/engine and test-only FakeProvider;
+17T-36 adds the first real Gemini adapter and normal startup bootstrap. See
+[ADR-005](../decisions/ADR-005-first-chat-provider.md) for the reviewed candidate selection,
+configuration, transport, cost/usage and retry limits. Broader quota/Memory/tool design
+below remains proposed. Independent review and public API freeze are not implied.
 
 One internal model access layer for GigaChat, GigaAgent Orchestrator and Memory workers. Engine owns model alias resolution, capability checks, provider integration, normalized model events, latency/usage accounting, server-enforced quotas and safe error classification. It **does not** own Chat conversation storage, Agent tool execution, sandbox privileges, user-memory retrieval consent, agent planning or public SSE framing.
 
@@ -108,4 +114,6 @@ Provider keys remain server-side. Validate incoming model alias, request size, a
 
 Trà implements Engine/internal provider port and tests; Thư reviews Chat SSE/consumer contract and usage UI. Validate fake adapter first, then one real provider against staging, recorded resolved model/capabilities/tokenization and cancellation. Additional providers are replaceable internals as long as public contract and usage truthfulness remain stable.
 
-**Still undecided:** which model/provider, exact context/output limits, real quota/cost, pricing config, browser/cloud idle/proxy behavior and memory embedding dimensions. Product architecture is accepted; vendor choices are not automatically approved.
+**Chat provider candidate:** ADR-005 selects Gemini for 17T-36; independent review remains
+pending. Real quotas/cost controls, pricing configuration, browser/cloud proxy behavior
+and embedding dimensions remain deferred. Broader architecture is not automatically approved.

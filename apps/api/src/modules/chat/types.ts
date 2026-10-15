@@ -1,4 +1,4 @@
-import type { ModelMessage } from '../llm/types.js';
+import type { ModelMessage, ResolvedModelIdentity } from '../llm/types.js';
 
 export type GenerationStatus = 'pending' | 'streaming' | 'completed' | 'failed' | 'interrupted' | 'stopped';
 export type ChatFinishReason = 'stop' | 'length' | 'other' | 'cancelled';
@@ -57,6 +57,7 @@ export interface GenerationRepository {
   variants(ownerId: string, conversationId: string, userMessageId: string): Promise<ChatTurnVariants>;
   context(ownerId: string, generation: ChatGeneration): Promise<readonly ModelMessage[]>;
   start(ownerId: string, id: string): Promise<void>;
+  recordResolvedModel(ownerId: string, id: string, identity: ResolvedModelIdentity): Promise<void>;
   checkpoint(ownerId: string, id: string, text: string): Promise<void>;
   requestCancel(ownerId: string, conversationId: string, id: string, key: string): Promise<Cancellation>;
   complete(ownerId: string, generation: ChatGeneration, text: string, reason: ChatFinishReason): Promise<ChatGeneration>;

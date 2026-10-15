@@ -4,6 +4,14 @@
 
 ## Streamed Retry / Regenerate candidate — 17T-35
 
+17T-36 integration note: normal server startup can supply the real engine using server-only
+Gemini configuration ([ADR-005](../decisions/ADR-005-first-chat-provider.md)). Disabled or
+unconfigured development still returns the existing 503. Production defaults to enabled
+and requires valid provider/model configuration, or explicit CHAT_ENABLED=false. Migration
+008 records internal resolved identity once at streaming start before network I/O; legacy
+rows remain null. Public DTOs, alias validation, errors, SSE order and usage exposure are
+unchanged. Provider-reported usage stays internal and is not a new REST/SSE billing surface.
+
 **DRAFT; Thư compatibility review pending.** This additive candidate resolves the
 transport/variant gate for 17T-35, building on 17T-32/34 and consumed by 17T-33.
 No plain creation-plus-polling transport is implemented.
@@ -191,7 +199,8 @@ Candidate details under review:
   pending, active or terminal generations. No SSE replay or provider repeat. Same key with
   another payload/conversation returns ordinary 409 without the original generation.
 - Without an injected LLM Engine, admission returns 503 `SERVICE_UNAVAILABLE` before
-  inserting a prompt. GET remains available. No automatic fake or live provider exists.
+  inserting a prompt. GET remains available. 17T-36 adds configured real startup; there
+  is no automatic fake fallback.
 - Persisted statuses in this slice are `pending | streaming | completed | failed | interrupted`.
   GET always returns `partialContent` (empty initially, complete text on success), and
   omits absent optional fields. It exposes no owner ID, fingerprint, key or provider data.

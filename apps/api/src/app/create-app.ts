@@ -114,7 +114,8 @@ export function createApp(dependencies: AppDependencies = {}): Hono {
 
   // Chat uses only the explicitly injected LLM Engine; unconfigured admission fails closed.
   const chatRuntime = dependencies.chatRuntime ?? (dependencies.pool
-    ? new ChatRuntime(new PostgresGenerationRepository(dependencies.pool), dependencies.llmEngine)
+    ? new ChatRuntime(new PostgresGenerationRepository(dependencies.pool), dependencies.llmEngine,
+      { maxOutputTokens: dependencies.config?.chat?.maxOutputTokens })
     : undefined);
   if (chatRuntime && authService) {
     app.route('/api/v1/conversations', createChatRoutes(chatRuntime, authService));

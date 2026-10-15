@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { ConflictError, NotFoundError } from '../auth/auth-validation.js';
-import type { ModelMessage } from '../llm/types.js';
+import type { ModelMessage, ResolvedModelIdentity } from '../llm/types.js';
 import { CHAT_HISTORY_FROM, CHAT_HISTORY_VISIBLE } from './chat-history.js';
 import {
   GENERATION_LIFETIME_MS, MAX_CONTEXT_BYTES, SAFE_GENERATION_ERROR,
@@ -212,6 +212,14 @@ export class PostgresGenerationRepository implements GenerationRepository {
   async checkpoint(ownerId: string, id: string, text: string): Promise<void> {
     const result = await this.pool.query("UPDATE chat_generations SET partial_content = $3 WHERE id = $1 AND owner_id = $2 AND status = 'streaming' AND cancel_requested_at IS NULL RETURNING id", [id, ownerId, text]);
     if (!result.rows[0]) throw new ConflictError('Generation is no longer streaming');
+  }
+
+  async recordResolvedModel(ownerId: string, id: string, identity: ResolvedModelIdentity): Promise<void> {
+    const result = await this.pool.query(`UPDATE chat_generations SET resolved_provider_id = $3, resolved_model_id = $4
+      WHERE id = $1 AND owner_id = $2 AND status = 'streaming' AND cancel_requested_at IS NULL
+        AND (resolved_provider_id IS NULL OR (resolved_provider_id = $3 AND resolved_model_id = $4)) RETURNING id`,
+    [id, ownerId, identity.providerId, identity.modelId]);
+    if (!result.rows[0]) throw new ConflictError('Generation cannot record resolved identity');
   }
 
   // Protected transaction step permits deterministic rollback fault injection without patching pg internals.

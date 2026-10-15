@@ -19,6 +19,12 @@ Conversation + Message rows alone do not express a generated answer that was par
 
 ## Proposed implementation choices
 
+17T-36 selects Gemini with one server-only chat model and direct HTTP text adapter in
+[ADR-005](ADR-005-first-chat-provider.md). Normal startup validates configuration and
+constructs the existing engine. Migration 008 records provider/model identity at start,
+without reconstructing legacy rows or adding public DTO fields. This does not implement
+the broader usage ledger, quota, Memory or Agent proposals below.
+
 17T-35 narrows the Retry/Regenerate candidate to a dedicated fetch SSE POST, a latest-turn
 variant list and migration-007 selection table. The existing streaming coordinator and
 durable cancellation fences are reused. Selection moves only in the successful completion
