@@ -1,6 +1,66 @@
 # GigaChat Generation REST + SSE API v0.2
 
-> **DRAFT, NOT IMPLEMENTED OR FROZEN.** Product design accepted on 2026-10-13; exact endpoints, DTOs, new SSE event types and browser compatibility still require Trà/Thư review. Tracking [17T-25](https://linear.app/17thedev/issue/17T-25/specify-gigachat-runtime-and-shared-llm-engine-v02). Read [Runtime](../architecture/GIGACHAT_RUNTIME_V0.2.md), [LLM Engine](../architecture/LLM_ENGINE_V0.1.md), [API v0.1](API_CONTRACT_V0.1.md) and ADR-001.
+> **DRAFT, NOT FROZEN.** Product design accepted on 2026-10-13; exact endpoints, DTOs, new SSE event types and browser compatibility still require Trà/Thư review. Tracking [17T-25](https://linear.app/17thedev/issue/17T-25/specify-gigachat-runtime-and-shared-llm-engine-v02). Read [Runtime](../architecture/GIGACHAT_RUNTIME_V0.2.md), [LLM Engine](../architecture/LLM_ENGINE_V0.1.md), [API v0.1](API_CONTRACT_V0.1.md) and ADR-001.
+
+## Implementation candidate — 17T-32
+
+This first backend slice implements only POST `messages:stream` and GET generation reconciliation.
+The sections below continue to describe future design candidates. Cancel, Retry/Regenerate,
+model discovery, assistant variants, Memory, Skills composition, usage and quotas are deferred.
+
+| Previous draft/mock behavior | This implementation candidate | Consumers / compatibility |
+|---|---|---|
+| POST content/modelId without an idempotency header | Same route/body, required `Idempotency-Key` | Draft mock clients must add the header; requires Thư review |
+| started/delta/completed | Existing fields preserved, `generationId` added | Fetch SSE parser must tolerate the added field |
+| stream.error and close | `stream.error` immediately followed by terminal `message.failed` | New terminal event requires consumer review |
+| No generation reconciliation | Owner-scoped GET returns `{generation}` | Additive; no existing history DTO changes |
+| Existing session + strict Origin/CSRF | Same middleware and non-disclosing cross-owner 404 | Auth semantics preserved |
+
+Candidate details under review:
+
+- Body is a strict object with nonblank `content` (at most 16,384 UTF-8 bytes), optional
+  `modelId` equal to `giga-chat-default`. Content is preserved verbatim. Unknown fields,
+  null model aliases, unsupported aliases and invalid JSON return 400 `VALIDATION_ERROR`.
+  Encoded request body limit is 100,000 bytes.
+- Key is 1–128 ASCII characters: first a letter/digit, then letters/digits or `._:-`.
+  Missing/malformed keys return 400. Uniqueness is scoped to the authenticated owner.
+  Fingerprint covers conversation ID, exact content and normalized model alias. Omitted
+  alias and explicit default alias are equivalent.
+- Same key/fingerprint returns 409 `{error:{code:'CONFLICT',message},generation}` for
+  pending, active or terminal generations. No SSE replay or provider repeat. Same key with
+  another payload/conversation returns ordinary 409 without the original generation.
+- Without an injected LLM Engine, admission returns 503 `SERVICE_UNAVAILABLE` before
+  inserting a prompt. GET remains available. No automatic fake or live provider exists.
+- Persisted statuses in this slice are `pending | streaming | completed | failed | interrupted`.
+  GET always returns `partialContent` (empty initially, complete text on success), and
+  omits absent optional fields. It exposes no owner ID, fingerprint, key or provider data.
+  `assistantMessageId` exists only after successful final commit. The provisional SSE
+  `messageId` equals the generation UUID; that UUID becomes the persisted assistant ID.
+- Every connected stream emits one started, zero or more deltas, and one completed or
+  failed terminal event. A post-header error emits diagnostic `stream.error` immediately
+  before `message.failed`; both include `{messageId,generationId,error:{code,message}}`.
+  Error text is fixed and redacted. Candidate safe codes are `GENERATION_FAILED`,
+  `UPSTREAM_ERROR`, `GENERATION_TIMEOUT`, `OUTPUT_LIMIT`, `INTERRUPTED` and
+  `SERVICE_UNAVAILABLE`. Raw provider errors never appear in SSE/GET.
+- Completion commits assistant insertion + generation state atomically before emitting
+  `message.completed`. A terminal write failure cannot downgrade completed DB state.
+  A disconnect may prevent terminal delivery; GET is authoritative.
+- Output/partial content is capped at 65,536 UTF-8 bytes. Context contains at most 40
+  previous complete persisted messages plus the current persisted prompt, capped at
+  65,536 UTF-8 bytes; old messages are removed whole. Failed/interrupted user turns and
+  partial output are excluded. These are transport bounds, not a claim of model token fit.
+- Provider reads use 15s idle and 90s total deadlines; downstream writes are bounded at 5s.
+  Disconnect aborts the provider and records interrupted when the DB is available. Partial
+  checkpoints occur after 4KiB growth or 1s elapsed at the next delta, plus finalization.
+  Admission reclaims active rows older than 120s as interrupted; stale writes are fenced by
+  terminal status. There is no background sweeper in this slice. After worker loss, GET
+  may remain active until the next admission reclaims it. Persistent DB outages can delay
+  finalization; no completed event is fabricated.
+
+Review questions remain open: duplicate reconciliation status/envelope, byte/context limits,
+deadline/recovery policy, provisional IDs and safe error codes, frontend terminal parser
+fixtures, real model token budget, and the separate Retry/Regenerate transport/variant design.
+No deployed-browser or contract-freeze approval is implied.
 
 ## 1. Compatibility impact
 

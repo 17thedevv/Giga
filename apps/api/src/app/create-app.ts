@@ -16,6 +16,10 @@ import { SkillsService } from '../modules/skills/skills-service.js';
 import { createSkillsRoutes } from '../modules/skills/skills-routes.js';
 import { createPreferencesRoutes } from '../modules/skills/preferences-routes.js';
 import { SkillError } from '../modules/skills/types.js';
+import type { LLMEngine } from '../modules/llm/engine.js';
+import { ChatRuntime } from '../modules/chat/chat-runtime.js';
+import { PostgresGenerationRepository } from '../modules/chat/generation-repository.js';
+import { createChatRoutes } from '../modules/chat/chat-routes.js';
 import { DEFAULT_DEV_ORIGINS, type AppConfig } from './config.js';
 
 export interface HealthResponse {
@@ -38,6 +42,8 @@ export interface AppDependencies {
   readonly skillStorage?: PostgresSkillStorage;
   readonly preferencesStorage?: PostgresUserPreferencesStorage;
   readonly skillsService?: SkillsService;
+  readonly llmEngine?: LLMEngine;
+  readonly chatRuntime?: ChatRuntime;
   readonly config?: Partial<AppConfig>;
 }
 
@@ -104,6 +110,14 @@ export function createApp(dependencies: AppDependencies = {}): Hono {
       authService,
     });
     app.route('/api/v1/conversations', conversationsRouter);
+  }
+
+  // Chat uses only the explicitly injected LLM Engine; unconfigured admission fails closed.
+  const chatRuntime = dependencies.chatRuntime ?? (dependencies.pool
+    ? new ChatRuntime(new PostgresGenerationRepository(dependencies.pool), dependencies.llmEngine)
+    : undefined);
+  if (chatRuntime && authService) {
+    app.route('/api/v1/conversations', createChatRoutes(chatRuntime, authService));
   }
 
   // Mount Skills and Preferences modules if dependencies/pool are available
