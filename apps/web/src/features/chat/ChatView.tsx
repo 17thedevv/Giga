@@ -47,6 +47,8 @@ export const ChatView: React.FC = () => {
   const createdConversationIdRef = useRef<string | null>(null);
   const stopTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messageLoadRequestIdRef = useRef(0);
+  const conversationsLoadRequestIdRef = useRef(0);
 
   // Auto-scroll helper
   const scrollToBottom = () => {
@@ -87,11 +89,13 @@ export const ChatView: React.FC = () => {
 
   // Load conversations list
   const loadConversations = useCallback(async () => {
+    const reqId = ++conversationsLoadRequestIdRef.current;
     setIsLoading(true);
     setErrorBanner(null);
     try {
       if (mode === 'real') {
         const res = await realApiClient.listConversations();
+        if (conversationsLoadRequestIdRef.current !== reqId) return;
         setConversations(res.items);
         if (
           !conversationIdRef.current &&
@@ -102,6 +106,7 @@ export const ChatView: React.FC = () => {
         }
       } else {
         const res = await mockDataAdapter.listConversations();
+        if (conversationsLoadRequestIdRef.current !== reqId) return;
         setConversations(res.items);
         if (
           !conversationIdRef.current &&
@@ -112,6 +117,7 @@ export const ChatView: React.FC = () => {
         }
       }
     } catch (err: unknown) {
+      if (conversationsLoadRequestIdRef.current !== reqId) return;
       const message =
         err instanceof ApiException
           ? err.message
@@ -121,7 +127,9 @@ export const ChatView: React.FC = () => {
       setErrorBanner(message);
       setConversations([]);
     } finally {
-      setIsLoading(false);
+      if (conversationsLoadRequestIdRef.current === reqId) {
+        setIsLoading(false);
+      }
     }
   }, [mode, conversationId, navigate]);
 
@@ -327,16 +335,28 @@ export const ChatView: React.FC = () => {
         return;
       }
 
+      const requestId = ++messageLoadRequestIdRef.current;
       setIsMessagesLoading(true);
       try {
-        if (mode === 'real') {
-          const res = await realApiClient.getConversation(id);
-          setMessages(res.messages);
-        } else {
-          const res = await mockDataAdapter.getConversation(id);
-          setMessages(res.messages);
+        const res =
+          mode === 'real'
+            ? await realApiClient.getConversation(id)
+            : await mockDataAdapter.getConversation(id);
+
+        if (
+          conversationIdRef.current !== id ||
+          messageLoadRequestIdRef.current !== requestId
+        ) {
+          return;
         }
+        setMessages(res.messages);
       } catch (err: unknown) {
+        if (
+          conversationIdRef.current !== id ||
+          messageLoadRequestIdRef.current !== requestId
+        ) {
+          return;
+        }
         const message =
           err instanceof ApiException
             ? err.message
@@ -346,7 +366,9 @@ export const ChatView: React.FC = () => {
         setErrorBanner(message);
         setMessages([]);
       } finally {
-        setIsMessagesLoading(false);
+        if (messageLoadRequestIdRef.current === requestId) {
+          setIsMessagesLoading(false);
+        }
       }
     },
     [mode]
@@ -358,6 +380,7 @@ export const ChatView: React.FC = () => {
         loadMessages(conversationId);
       }
     } else {
+      messageLoadRequestIdRef.current++;
       createdConversationIdRef.current = null;
       setMessages([]);
     }
@@ -393,7 +416,7 @@ export const ChatView: React.FC = () => {
         await mockDataAdapter.deleteConversation(id);
       }
       setConversations((prev) => prev.filter((c) => c.id !== id));
-      if (conversationId === id) {
+      if (conversationIdRef.current === id) {
         navigate('/chat');
       }
     } catch (err: unknown) {
@@ -642,6 +665,7 @@ export const ChatView: React.FC = () => {
                 'assistant',
                 fullText
               );
+              if (conversationIdRef.current !== targetConvId) return;
               setMessages((prev) => {
                 const withoutOpt = prev.filter((m) => m.id !== tempUserMsgId);
                 return [...withoutOpt, { ...optimisticMsg, isOptimistic: false }, assistantMsg];

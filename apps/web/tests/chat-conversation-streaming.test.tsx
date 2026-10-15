@@ -15,8 +15,11 @@ import type { Conversation, Message, ChatGeneration } from '../src/lib/api/types
 
 describe('17T-33 — GigaChat Conversation & Streaming UI Tests', () => {
   beforeEach(() => {
-    if (typeof window !== 'undefined' && window.sessionStorage) {
-      window.sessionStorage.clear();
+    if (typeof window !== 'undefined') {
+      if (window.sessionStorage) {
+        window.sessionStorage.clear();
+      }
+      window.history.replaceState({}, '', '/');
     }
     mockDataAdapter.setMockSession({
       id: 'usr_test',
@@ -1220,6 +1223,243 @@ describe('17T-33 — GigaChat Conversation & Streaming UI Tests', () => {
       expect(
         screen.queryByText('Stale conv 1 answer that should NOT appear in conv 2')
       ).toBeNull();
+    });
+
+    it('fencing stale history: response for conversation A resolving after conversation B does not overwrite B', async () => {
+      const convA: Conversation = {
+        id: 'conv_a',
+        title: 'Conversation A',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      const convB: Conversation = {
+        id: 'conv_b',
+        title: 'Conversation B',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      vi.spyOn(realApiClient, 'listConversations').mockResolvedValue({
+        items: [convA, convB],
+        nextCursor: null,
+      });
+
+      const messageA: Message = {
+        id: 'msg_a',
+        conversationId: 'conv_a',
+        role: 'assistant',
+        content: 'Historical message from Conversation A',
+        createdAt: new Date().toISOString(),
+      };
+      const messageB: Message = {
+        id: 'msg_b',
+        conversationId: 'conv_b',
+        role: 'assistant',
+        content: 'Historical message from Conversation B',
+        createdAt: new Date().toISOString(),
+      };
+
+      const resolveRef = {
+        current: null as ((val: { conversation: Conversation; messages: Message[] }) => void) | null,
+      };
+      vi.spyOn(realApiClient, 'getConversation').mockImplementation(async (id: string) => {
+        if (id === 'conv_a') {
+          return new Promise<{ conversation: Conversation; messages: Message[] }>((resolve) => {
+            resolveRef.current = resolve;
+          });
+        }
+        if (id === 'conv_b') {
+          return { conversation: convB, messages: [messageB] };
+        }
+        return { conversation: convA, messages: [] };
+      });
+
+      render(
+        <ApiModeProvider initialMode="real">
+          <AuthProvider>
+            <RouterProvider initialPath="/chat/conv_a">
+              <ChatView />
+            </RouterProvider>
+          </AuthProvider>
+        </ApiModeProvider>
+      );
+
+      // Verify Conversation B appears in sidebar
+      await waitFor(() => {
+        expect(screen.getByText('Conversation B')).toBeDefined();
+      });
+
+      // User navigates from Conversation A to Conversation B while A's history fetch is still in-flight
+      fireEvent.click(screen.getByText('Conversation B'));
+
+      // In Conversation B, B's messages resolve immediately and render
+      await waitFor(() => {
+        expect(screen.getByText('Historical message from Conversation B')).toBeDefined();
+      });
+
+      // Now, Conversation A's deferred history request resolves late
+      resolveRef.current?.({ conversation: convA, messages: [messageA] });
+
+      // Give event loop time to settle
+      await new Promise((r) => setTimeout(r, 60));
+
+      // Assert B's messages remain in view and A's stale response did not overwrite B
+      expect(screen.getByText('Historical message from Conversation B')).toBeDefined();
+      expect(screen.queryByText('Historical message from Conversation A')).toBeNull();
+    });
+
+    it('fencing stale history failures: failure loading conversation A after user navigated to conversation B does not clear B or display error', async () => {
+      const convA: Conversation = {
+        id: 'conv_a',
+        title: 'Conversation A',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      const convB: Conversation = {
+        id: 'conv_b',
+        title: 'Conversation B',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      vi.spyOn(realApiClient, 'listConversations').mockResolvedValue({
+        items: [convA, convB],
+        nextCursor: null,
+      });
+
+      const messageB: Message = {
+        id: 'msg_b',
+        conversationId: 'conv_b',
+        role: 'assistant',
+        content: 'Active messages for Conversation B',
+        createdAt: new Date().toISOString(),
+      };
+
+      const rejectRef = {
+        current: null as ((err: unknown) => void) | null,
+      };
+      vi.spyOn(realApiClient, 'getConversation').mockImplementation(async (id: string) => {
+        if (id === 'conv_a') {
+          return new Promise<{ conversation: Conversation; messages: Message[] }>((_resolve, reject) => {
+            rejectRef.current = reject;
+          });
+        }
+        if (id === 'conv_b') {
+          return { conversation: convB, messages: [messageB] };
+        }
+        return { conversation: convA, messages: [] };
+      });
+
+      render(
+        <ApiModeProvider initialMode="real">
+          <AuthProvider>
+            <RouterProvider initialPath="/chat/conv_a">
+              <ChatView />
+            </RouterProvider>
+          </AuthProvider>
+        </ApiModeProvider>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText('Conversation B')).toBeDefined();
+      });
+
+      // Navigate to Conversation B
+      fireEvent.click(screen.getByText('Conversation B'));
+
+      await waitFor(() => {
+        expect(screen.getByText('Active messages for Conversation B')).toBeDefined();
+      });
+
+      // Now Conversation A fails with network error
+      rejectRef.current?.(new ApiException(500, 'INTERNAL_SERVER_ERROR', 'Conversation A history unavailable'));
+
+      // Wait for microtasks
+      await new Promise((r) => setTimeout(r, 60));
+
+      // Assert Conversation B's messages are still displayed and no error banner for Conversation A appears
+      expect(screen.getByText('Active messages for Conversation B')).toBeDefined();
+      expect(screen.queryByText(/Conversation A history unavailable/i)).toBeNull();
+    });
+
+    it('fencing stale history: works identically in mock mode when navigating between conversations', async () => {
+      const convA: Conversation = {
+        id: 'conv_a',
+        title: 'Conversation A',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      const convB: Conversation = {
+        id: 'conv_b',
+        title: 'Conversation B',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      vi.spyOn(mockDataAdapter, 'listConversations').mockResolvedValue({
+        items: [convA, convB],
+        nextCursor: null,
+      });
+
+      const messageA: Message = {
+        id: 'msg_mock_a',
+        conversationId: 'conv_a',
+        role: 'assistant',
+        content: 'Mock message from Conversation A',
+        createdAt: new Date().toISOString(),
+      };
+      const messageB: Message = {
+        id: 'msg_mock_b',
+        conversationId: 'conv_b',
+        role: 'assistant',
+        content: 'Mock message from Conversation B',
+        createdAt: new Date().toISOString(),
+      };
+
+      const resolveMockRef = {
+        current: null as ((val: { conversation: Conversation; messages: Message[] }) => void) | null,
+      };
+      vi.spyOn(mockDataAdapter, 'getConversation').mockImplementation(async (id: string) => {
+        if (id === 'conv_a') {
+          return new Promise<{ conversation: Conversation; messages: Message[] }>((resolve) => {
+            resolveMockRef.current = resolve;
+          });
+        }
+        if (id === 'conv_b') {
+          return { conversation: convB, messages: [messageB] };
+        }
+        return { conversation: convA, messages: [] };
+      });
+
+      render(
+        <ApiModeProvider initialMode="mock">
+          <AuthProvider>
+            <RouterProvider initialPath="/chat/conv_a">
+              <ChatView />
+            </RouterProvider>
+          </AuthProvider>
+        </ApiModeProvider>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText('Conversation B')).toBeDefined();
+      });
+
+      // Navigate to Conversation B
+      fireEvent.click(screen.getByText('Conversation B'));
+
+      await waitFor(() => {
+        expect(screen.getByText('Mock message from Conversation B')).toBeDefined();
+      });
+
+      // Conversation A resolves late
+      resolveMockRef.current?.({ conversation: convA, messages: [messageA] });
+
+      await new Promise((r) => setTimeout(r, 60));
+
+      // Assert B's messages remain visible and A's message is not rendered
+      expect(screen.getByText('Mock message from Conversation B')).toBeDefined();
+      expect(screen.queryByText('Mock message from Conversation A')).toBeNull();
     });
 
     it('fencing conversation creation: starting from /chat creates conversation and preserves optimistic user turn', async () => {
