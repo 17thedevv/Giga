@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useRouter } from '../../app/router.js';
 import { useApiMode } from '../../app/context/ApiModeContext.js';
 import type { Conversation, Message } from '../../lib/api/types.js';
+import { realApiClient, ApiException } from '../../lib/api/client.js';
 import { mockDataAdapter } from '../../lib/api/mock-adapter.js';
 import { ConversationSidebar } from './ConversationSidebar.js';
 import { MessageBubble } from './MessageBubble.js';
@@ -12,18 +13,20 @@ import { GigaLogo } from '../../components/GigaLogo.js';
 
 export const ChatView: React.FC = () => {
   const { params, navigate } = useRouter();
-  const { mode, setMode } = useApiMode();
+  const { mode } = useApiMode();
   const conversationId = params.conversationId;
 
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [isMessagesLoading, setIsMessagesLoading] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamingText, setStreamingText] = useState('');
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
 
   const abortControllerRef = useRef<AbortController | null>(null);
   const accumulatedTextRef = useRef('');
+  const activeGenerationIdRef = useRef<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Auto-scroll helper
@@ -35,7 +38,7 @@ export const ChatView: React.FC = () => {
     scrollToBottom();
   }, [messages, streamingText]);
 
-  // Cleanup abort controller on component unmount
+  // Cleanup abort controller on component unmount or mode switch
   useEffect(() => {
     return () => {
       if (abortControllerRef.current) {
@@ -44,14 +47,29 @@ export const ChatView: React.FC = () => {
     };
   }, []);
 
+  // When API mode switches, abort ongoing stream and reset state
+  useEffect(() => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    setIsStreaming(false);
+    setStreamingText('');
+    accumulatedTextRef.current = '';
+    activeGenerationIdRef.current = null;
+    setErrorBanner(null);
+  }, [mode]);
+
   // Load conversations list
   const loadConversations = useCallback(async () => {
     setIsLoading(true);
     setErrorBanner(null);
     try {
       if (mode === 'real') {
-        setErrorBanner('Backend Chat CRUD endpoints (/api/v1/conversations) are currently in development under Linear 17T-21. Toggle to MOCK mode to interact with the full demo.');
-        setConversations([]);
+        const res = await realApiClient.listConversations();
+        setConversations(res.items);
+        if (!conversationId && res.items.length > 0) {
+          navigate(`/chat/${res.items[0].id}`);
+        }
       } else {
         const res = await mockDataAdapter.listConversations();
         setConversations(res.items);
@@ -60,7 +78,15 @@ export const ChatView: React.FC = () => {
         }
       }
     } catch (err: unknown) {
-      setErrorBanner(err instanceof Error ? err.message : 'Failed to load conversations');
+      // Never fallback to mock mode silently; surface error clearly
+      const message =
+        err instanceof ApiException
+          ? err.message
+          : err instanceof Error
+            ? err.message
+            : 'Failed to load conversations';
+      setErrorBanner(message);
+      setConversations([]);
     } finally {
       setIsLoading(false);
     }
@@ -71,15 +97,32 @@ export const ChatView: React.FC = () => {
   }, [loadConversations]);
 
   // Load specific conversation messages
-  const loadMessages = useCallback(async (id: string) => {
-    if (mode === 'real') return;
-    try {
-      const res = await mockDataAdapter.getConversation(id);
-      setMessages(res.messages);
-    } catch {
-      setMessages([]);
-    }
-  }, [mode]);
+  const loadMessages = useCallback(
+    async (id: string) => {
+      setIsMessagesLoading(true);
+      try {
+        if (mode === 'real') {
+          const res = await realApiClient.getConversation(id);
+          setMessages(res.messages);
+        } else {
+          const res = await mockDataAdapter.getConversation(id);
+          setMessages(res.messages);
+        }
+      } catch (err: unknown) {
+        const message =
+          err instanceof ApiException
+            ? err.message
+            : err instanceof Error
+              ? err.message
+              : 'Failed to load conversation messages';
+        setErrorBanner(message);
+        setMessages([]);
+      } finally {
+        setIsMessagesLoading(false);
+      }
+    },
+    [mode]
+  );
 
   useEffect(() => {
     if (conversationId) {
@@ -90,90 +133,246 @@ export const ChatView: React.FC = () => {
   }, [conversationId, loadMessages]);
 
   const handleCreateConversation = async () => {
-    if (mode === 'real') {
-      setErrorBanner('Create conversation API is under development on backend.');
-      return;
+    try {
+      if (mode === 'real') {
+        const res = await realApiClient.createConversation();
+        setConversations((prev) => [res.conversation, ...prev]);
+        navigate(`/chat/${res.conversation.id}`);
+      } else {
+        const res = await mockDataAdapter.createConversation('New Architecture Discussion');
+        setConversations((prev) => [res.conversation, ...prev]);
+        navigate(`/chat/${res.conversation.id}`);
+      }
+    } catch (err: unknown) {
+      const message =
+        err instanceof ApiException
+          ? err.message
+          : err instanceof Error
+            ? err.message
+            : 'Failed to create conversation';
+      setErrorBanner(message);
     }
-    const res = await mockDataAdapter.createConversation('New Architecture Discussion');
-    setConversations((prev) => [res.conversation, ...prev]);
-    navigate(`/chat/${res.conversation.id}`);
   };
 
   const handleDeleteConversation = async (id: string) => {
-    if (mode === 'real') return;
-    await mockDataAdapter.deleteConversation(id);
-    setConversations((prev) => prev.filter((c) => c.id !== id));
-    if (conversationId === id) {
-      navigate('/chat');
+    try {
+      if (mode === 'real') {
+        await realApiClient.deleteConversation(id);
+      } else {
+        await mockDataAdapter.deleteConversation(id);
+      }
+      setConversations((prev) => prev.filter((c) => c.id !== id));
+      if (conversationId === id) {
+        navigate('/chat');
+      }
+    } catch (err: unknown) {
+      const message =
+        err instanceof ApiException
+          ? err.message
+          : err instanceof Error
+            ? err.message
+            : 'Failed to delete conversation';
+      setErrorBanner(message);
     }
   };
 
   const handleSendMessage = async (content: string) => {
+    // Prevent double-submit while an active stream is ongoing
     if (isStreaming) return;
 
     let targetConvId = conversationId;
     if (!targetConvId) {
-      const newConv = await mockDataAdapter.createConversation(content.slice(0, 30));
-      setConversations((prev) => [newConv.conversation, ...prev]);
-      targetConvId = newConv.conversation.id;
-      navigate(`/chat/${targetConvId}`);
+      try {
+        const titleSnippet = content.trim().slice(0, 32);
+        if (mode === 'real') {
+          const newConv = await realApiClient.createConversation(titleSnippet);
+          setConversations((prev) => [newConv.conversation, ...prev]);
+          targetConvId = newConv.conversation.id;
+          navigate(`/chat/${targetConvId}`);
+        } else {
+          const newConv = await mockDataAdapter.createConversation(titleSnippet);
+          setConversations((prev) => [newConv.conversation, ...prev]);
+          targetConvId = newConv.conversation.id;
+          navigate(`/chat/${targetConvId}`);
+        }
+      } catch (err: unknown) {
+        const message =
+          err instanceof ApiException
+            ? err.message
+            : err instanceof Error
+              ? err.message
+              : 'Failed to initialize conversation';
+        setErrorBanner(message);
+        return;
+      }
     }
 
-    // Add user message
-    const userMsg = await mockDataAdapter.addMessage(targetConvId, 'user', content);
-    setMessages((prev) => [...prev, userMsg]);
+    // Provision optimistic user message turn
+    const tempUserMsgId = `opt_${Date.now()}`;
+    const optimisticMsg: Message = {
+      id: tempUserMsgId,
+      conversationId: targetConvId,
+      role: 'user',
+      content,
+      createdAt: new Date().toISOString(),
+      isOptimistic: true,
+    };
+    setMessages((prev) => [...prev, optimisticMsg]);
 
-    // Start streaming simulation
     setIsStreaming(true);
     setStreamingText('');
     accumulatedTextRef.current = '';
-    let accumulated = '';
+    activeGenerationIdRef.current = null;
     abortControllerRef.current = new AbortController();
 
-    try {
-      await mockDataAdapter.simulateChatStream(
-        content,
-        (chunk) => {
-          accumulated += chunk;
-          accumulatedTextRef.current = accumulated;
-          setStreamingText(accumulated);
-        },
-        async () => {
-          // Finalize assistant message with accumulated content (immune to stale closure)
-          const fullText = accumulated.trim();
-          setIsStreaming(false);
-          setStreamingText('');
-          accumulatedTextRef.current = '';
-          if (fullText) {
-            const assistantMsg = await mockDataAdapter.addMessage(targetConvId!, 'assistant', fullText);
-            setMessages((prev) => [...prev, assistantMsg]);
-          }
-        },
-        abortControllerRef.current.signal
-      );
-    } catch (err) {
-      setIsStreaming(false);
-      setStreamingText('');
-      accumulatedTextRef.current = '';
-      setErrorBanner(err instanceof Error ? err.message : 'Stream error');
+    if (mode === 'real') {
+      try {
+        await realApiClient.streamMessage(
+          targetConvId,
+          content,
+          (event) => {
+            if (event.event === 'message.started') {
+              activeGenerationIdRef.current = event.data.generationId;
+            } else if (event.event === 'message.delta') {
+              accumulatedTextRef.current += event.data.text;
+              setStreamingText(accumulatedTextRef.current);
+            } else if (event.event === 'message.completed') {
+              const fullText = accumulatedTextRef.current;
+              setIsStreaming(false);
+              setStreamingText('');
+              accumulatedTextRef.current = '';
+
+              // Reconcile messages from backend to prevent duplicate optimistic messages
+              realApiClient
+                .getConversation(targetConvId!)
+                .then((convRes) => {
+                  setMessages(convRes.messages);
+                })
+                .catch(() => {
+                  setMessages((prev) => {
+                    const withoutOpt = prev.filter((m) => m.id !== tempUserMsgId);
+                    return [
+                      ...withoutOpt,
+                      { ...optimisticMsg, isOptimistic: false },
+                      {
+                        id: event.data.messageId,
+                        conversationId: targetConvId!,
+                        role: 'assistant',
+                        content: fullText,
+                        createdAt: event.data.createdAt || new Date().toISOString(),
+                        status: 'completed',
+                      },
+                    ];
+                  });
+                });
+            } else if (event.event === 'stream.error' || event.event === 'message.failed') {
+              setIsStreaming(false);
+              const partial = accumulatedTextRef.current;
+              setStreamingText('');
+              accumulatedTextRef.current = '';
+              setErrorBanner(event.data.error?.message || 'Chat generation failed');
+              if (partial) {
+                setMessages((prev) => [
+                  ...prev,
+                  {
+                    id: event.data.messageId || `fail_${Date.now()}`,
+                    conversationId: targetConvId!,
+                    role: 'assistant',
+                    content: partial,
+                    createdAt: new Date().toISOString(),
+                    status: 'failed',
+                  },
+                ]);
+              }
+            } else if (event.event === 'message.stopped') {
+              setIsStreaming(false);
+              setStreamingText('');
+              accumulatedTextRef.current = '';
+            }
+          },
+          { signal: abortControllerRef.current.signal }
+        );
+      } catch (err: unknown) {
+        setIsStreaming(false);
+        setStreamingText('');
+        accumulatedTextRef.current = '';
+        const errMsg =
+          err instanceof ApiException
+            ? err.message
+            : err instanceof Error
+              ? err.message
+              : 'Stream error';
+        setErrorBanner(errMsg);
+      }
+    } else {
+      // Mock mode: maintain backward-compatible simulation for existing regression tests
+      let accumulated = '';
+      try {
+        await mockDataAdapter.simulateChatStream(
+          content,
+          (chunk) => {
+            accumulated += chunk;
+            accumulatedTextRef.current = accumulated;
+            setStreamingText(accumulated);
+          },
+          async () => {
+            const fullText = accumulated.trim();
+            setIsStreaming(false);
+            setStreamingText('');
+            accumulatedTextRef.current = '';
+            if (fullText) {
+              const assistantMsg = await mockDataAdapter.addMessage(
+                targetConvId!,
+                'assistant',
+                fullText
+              );
+              setMessages((prev) => {
+                const withoutOpt = prev.filter((m) => m.id !== tempUserMsgId);
+                return [...withoutOpt, { ...optimisticMsg, isOptimistic: false }, assistantMsg];
+              });
+            }
+          },
+          abortControllerRef.current.signal
+        );
+      } catch (err) {
+        setIsStreaming(false);
+        setStreamingText('');
+        accumulatedTextRef.current = '';
+        setErrorBanner(err instanceof Error ? err.message : 'Stream error');
+      }
     }
   };
 
   const handleStopStreaming = () => {
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
+    if (mode === 'real') {
+      if (activeGenerationIdRef.current && conversationId) {
+        realApiClient
+          .cancelGeneration(conversationId, activeGenerationIdRef.current)
+          .catch(() => {});
+      }
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+      setIsStreaming(false);
+      setStreamingText('');
+      accumulatedTextRef.current = '';
+      activeGenerationIdRef.current = null;
+    } else {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+      const stoppedPartial = accumulatedTextRef.current.trim();
+      const targetId = conversationId;
+      if (stoppedPartial && targetId) {
+        const stoppedText = stoppedPartial + '\n\n*[Response stopped by user]*';
+        mockDataAdapter.addMessage(targetId, 'assistant', stoppedText).then((msg) => {
+          setMessages((prev) => [...prev, msg]);
+        });
+      }
+      accumulatedTextRef.current = '';
+      setIsStreaming(false);
+      setStreamingText('');
     }
-    const stoppedPartial = accumulatedTextRef.current.trim();
-    const targetId = conversationId;
-    if (stoppedPartial && targetId) {
-      const stoppedText = stoppedPartial + '\n\n*[Response stopped by user]*';
-      mockDataAdapter.addMessage(targetId, 'assistant', stoppedText).then((msg) => {
-        setMessages((prev) => [...prev, msg]);
-      });
-    }
-    accumulatedTextRef.current = '';
-    setIsStreaming(false);
-    setStreamingText('');
   };
 
   return (
@@ -223,16 +422,9 @@ export const ChatView: React.FC = () => {
         {errorBanner && (
           <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--giga-border, #1E293B)' }}>
             <Alert
-              type="warning"
-              title={mode === 'real' ? 'Real Backend Status' : 'Notice'}
+              type="error"
+              title={mode === 'real' ? 'Chat API Error' : 'Notice'}
               message={errorBanner}
-              action={
-                mode === 'real' ? (
-                  <Button size="sm" variant="secondary" onClick={() => setMode('mock')}>
-                    Switch to MOCK Mode Demo
-                  </Button>
-                ) : undefined
-              }
               onDismiss={() => setErrorBanner(null)}
             />
           </div>
@@ -240,7 +432,13 @@ export const ChatView: React.FC = () => {
 
         {/* Message Feed */}
         <div style={{ flex: 1, overflowY: 'auto', padding: '24px 20px', display: 'flex', flexDirection: 'column' }}>
-          {messages.length === 0 && !isStreaming && (
+          {isMessagesLoading && messages.length === 0 && (
+            <div style={{ margin: 'auto', textAlign: 'center', color: 'var(--giga-text-muted, #94A3B8)', fontSize: '13px' }}>
+              Loading message history...
+            </div>
+          )}
+
+          {!isMessagesLoading && messages.length === 0 && !isStreaming && (
             <div
               className="g-empty"
               style={{
@@ -304,7 +502,7 @@ export const ChatView: React.FC = () => {
           onSend={handleSendMessage}
           onStop={handleStopStreaming}
           isStreaming={isStreaming}
-          disabled={mode === 'real' && Boolean(errorBanner)}
+          disabled={false}
         />
       </div>
     </div>
