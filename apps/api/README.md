@@ -230,3 +230,16 @@ npm test
 - **No Leaked Stack Traces:** All errors follow canonical JSON error shape (`{"error":{"code":"...","message":"..."}}`).
 - **Cross-Origin / Cookie Deployment Gate:** The final decision between same-origin reverse proxy vs cross-site `SameSite=None; Secure` cookies remains pending real browser testing at the W2 cloud deployment gate.
 
+## 8. Chat generation runtime (DRAFT)
+
+With a database and authenticated session, POST
+`/api/v1/conversations/:id/messages:stream` accepts `{content,modelId?}` and a required
+`Idempotency-Key`. Inject `llmEngine` into `createApp` to enable generation with the
+server alias `giga-chat-default`. No provider is configured by default: unconfigured
+admission returns 503 and never falls back to a fake response. FakeProvider is test-only.
+
+GET `/api/v1/conversations/:id/generations/:generationId` reconciles durable state after
+refresh/disconnect without repeating the provider. Apply migration 005 with the existing
+migration runner before enabling these routes. See the [DRAFT contract](../../docs/contracts/GIGACHAT_RUNTIME_API_V0.2.md)
+and [verification/handoff](../../docs/evidence/17t-32-chat-runtime.md) for limits and review gates.
+

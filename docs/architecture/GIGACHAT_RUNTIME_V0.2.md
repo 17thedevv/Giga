@@ -1,8 +1,16 @@
 # GigaChat Runtime v0.2 — Generation lifecycle
 
-> **Product direction approved 2026-10-13. Technical design PROPOSED; not implemented or API-frozen.** Backend: Trà; frontend/API reviewer: Thư. [17T-25](https://linear.app/17thedev/issue/17T-25/specify-gigachat-runtime-and-shared-llm-engine-v02). See [LLM Engine](LLM_ENGINE_V0.1.md), [API](../contracts/GIGACHAT_RUNTIME_API_V0.2.md), [ADR-004](../decisions/ADR-004-chat-generation-lifecycle.md) and [test plan](GIGACHAT_RUNTIME_TEST_PLAN_V0.2.md).
+> **Product direction approved 2026-10-13. Broader technical design PROPOSED; first implementation slice pending review; API not frozen.** Backend: Trà; frontend/API reviewer: Thư. [17T-25](https://linear.app/17thedev/issue/17T-25/specify-gigachat-runtime-and-shared-llm-engine-v02). See [LLM Engine](LLM_ENGINE_V0.1.md), [API](../contracts/GIGACHAT_RUNTIME_API_V0.2.md), [ADR-004](../decisions/ADR-004-chat-generation-lifecycle.md) and [test plan](GIGACHAT_RUNTIME_TEST_PLAN_V0.2.md).
 
 ## 1. Responsibilities
+
+Implementation candidate [17T-32](https://linear.app/17thedev/issue/17T-32) adds the first
+persisted new-prompt streaming slice under `apps/api/src/modules/chat/`, using migration
+005 and the injected Shared LLM Engine. Only new prompts and GET reconciliation are in
+scope. Stop, Retry/Regenerate, Memory, Skills, usage/quota accounting and real providers
+remain future work; the broader lifecycle below is still proposed. See the
+[API implementation candidate](../contracts/GIGACHAT_RUNTIME_API_V0.2.md#implementation-candidate--17t-32)
+for its limits and recovery behavior. The API remains DRAFT pending independent review.
 
 GigaChat Runtime owns authorization, user-turn admission, context preparation, generation lifecycle, provider abort, SSE delivery, persistence and memory-extraction eligibility. Shared LLM Engine (a different module) owns model registry, provider calls, normalization and metering. GigaAgent calls LLM Engine but **never** Chat Runtime or GigaChat private memories implicitly. Nothing in this design implies running terminal commands on the Hono host.
 

@@ -842,10 +842,7 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
   });
 
   it('Migration coordination: safely handles simulated out-of-order migration 002 runner registration', async () => {
-    // Both migration 1 and 3 are already applied in testDb setup.
-    // Note: This test verifies the migration runner mechanism for out-of-order backward execution
-    // using a simulated stand-in schema for migration 002. Canonical compatibility will be verified
-    // once 17T-21 merges.
+    // Exercise late registration without leaving later migrations' foreign keys detached.
     const migration002Conversations: Migration = {
       version: 2,
       name: '002_conversations_and_messages',
@@ -886,6 +883,13 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
     });
 
     // 0. Ensure version 2 is unapplied initially to simulate late arrival after 1 and 3
+    await testDb.pool.query('DROP TABLE IF EXISTS chat_generations;');
+    if (testDb.isMemory) {
+      // pg-mem leaves index names behind after DROP TABLE.
+      await testDb.pool.query('DROP INDEX IF EXISTS chat_generations_pkey;');
+      await testDb.pool.query('DROP INDEX IF EXISTS uq_chat_owner_key;');
+    }
+    await testDb.pool.query('DELETE FROM schema_migrations WHERE version = 5;');
     await testDb.pool.query('DROP TABLE IF EXISTS messages CASCADE;');
     await testDb.pool.query('DROP TABLE IF EXISTS conversations CASCADE;');
     try {
@@ -954,6 +958,7 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
         // Ignore index drop in real Postgres
       }
       await testDb.pool.query('DELETE FROM schema_migrations WHERE version = 2;');
+      await runMigrations(testDb.pool);
     }
   });
 });

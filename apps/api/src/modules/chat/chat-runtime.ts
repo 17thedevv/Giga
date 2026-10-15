@@ -1,0 +1,154 @@
+import { createHash } from 'node:crypto';
+import { AppError, ValidationError } from '../auth/auth-validation.js';
+import type { LLMEngine } from '../llm/engine.js';
+import type { LLMStreamEvent } from '../llm/types.js';
+import {
+  MAX_OUTPUT_BYTES, MAX_PROMPT_BYTES, SAFE_GENERATION_ERROR,
+  type Admission, type ChatGeneration, type EventSink, type GenerationRepository,
+} from './types.js';
+
+export const CHAT_MODEL_ALIAS = 'giga-chat-default';
+export interface RuntimeOptions {
+  readonly totalTimeoutMs?: number;
+  readonly idleTimeoutMs?: number;
+  readonly writeTimeoutMs?: number;
+}
+
+class RuntimeFailure extends Error {
+  constructor(readonly code: string) { super(SAFE_GENERATION_ERROR); }
+}
+
+/** Bounds individual provider reads and delivery even if the adapter ignores AbortSignal. */
+async function bounded<T>(promise: Promise<T>, signal: AbortSignal, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: () => void = () => {};
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        onAbort = () => reject(signal.reason ?? new RuntimeFailure('INTERRUPTED'));
+        signal.addEventListener('abort', onAbort, { once: true });
+        if (signal.aborted) onAbort();
+        timer = setTimeout(() => reject(new RuntimeFailure('GENERATION_TIMEOUT')), timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+    signal.removeEventListener('abort', onAbort);
+  }
+}
+
+export class ChatRuntime {
+  constructor(
+    private readonly repository: GenerationRepository,
+    private readonly engine: Pick<LLMEngine, 'streamText'> | undefined,
+    private readonly options: RuntimeOptions = {},
+  ) {}
+
+  async admit(ownerId: string, conversationId: string, body: unknown, key: string | undefined): Promise<Admission> {
+    await this.repository.authorize(ownerId, conversationId);
+    if (!key || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(key)) {
+      throw new ValidationError('Idempotency-Key must be 1-128 ASCII letters, digits, dots, underscores, colons or hyphens');
+    }
+    if (!body || typeof body !== 'object' || Array.isArray(body)) throw new ValidationError('Expected a JSON object');
+    const input = body as Record<string, unknown>;
+    if (Object.keys(input).some((name) => name !== 'content' && name !== 'modelId')) throw new ValidationError('Unknown request field');
+    if (typeof input.content !== 'string' || !input.content.trim() || Buffer.byteLength(input.content) > MAX_PROMPT_BYTES) {
+      throw new ValidationError('Content must be nonempty and at most 16384 UTF-8 bytes');
+    }
+    const modelId = input.modelId === undefined ? CHAT_MODEL_ALIAS : input.modelId;
+    if (modelId !== CHAT_MODEL_ALIAS) throw new ValidationError('Unsupported model alias');
+    if (!this.engine) throw new AppError('SERVICE_UNAVAILABLE', 'Chat model is not configured', 503);
+    const fingerprint = createHash('sha256').update(JSON.stringify([conversationId, input.content, modelId])).digest('hex');
+    return this.repository.admit({ ownerId, conversationId, content: input.content, modelId, key, fingerprint });
+  }
+
+  get(ownerId: string, conversationId: string, generationId: string): Promise<ChatGeneration> {
+    return this.repository.get(ownerId, conversationId, generationId);
+  }
+
+  async run(ownerId: string, generation: ChatGeneration, sink: EventSink, signal: AbortSignal): Promise<void> {
+    const controller = new AbortController();
+    const onAbort = (): void => controller.abort(new RuntimeFailure('INTERRUPTED'));
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) onAbort();
+    const totalTimer = setTimeout(() => controller.abort(new RuntimeFailure('GENERATION_TIMEOUT')), this.options.totalTimeoutMs ?? 90000);
+    const identity = { messageId: generation.id, generationId: generation.id };
+    let text = '';
+    let committed = false;
+    let deliveryFailed = false;
+    let iterator: AsyncIterator<LLMStreamEvent> | undefined;
+    const send: EventSink = async (event) => {
+      try {
+        // Diagnostics after a provider timeout may still be delivered to a connected client.
+        await bounded(sink(event), signal, this.options.writeTimeoutMs ?? 5000);
+      } catch (error) {
+        deliveryFailed = true;
+        controller.abort(new RuntimeFailure('INTERRUPTED'));
+        throw error;
+      }
+    };
+    try {
+      controller.signal.throwIfAborted();
+      await send({ event: 'message.started', data: { ...identity, conversationId: generation.conversationId } });
+      await this.repository.start(ownerId, generation.id);
+      const messages = await this.repository.context(ownerId, generation);
+      controller.signal.throwIfAborted();
+      if (!this.engine) throw new RuntimeFailure('SERVICE_UNAVAILABLE');
+      iterator = this.engine.streamText({
+        modelAlias: generation.modelId, messages, maxOutputTokens: 2048,
+        requestId: generation.id, caller: 'chat', signal: controller.signal,
+      })[Symbol.asyncIterator]();
+      let lastCheckpointBytes = 0;
+      let lastCheckpointAt = Date.now();
+      while (true) {
+        const next = await bounded(iterator.next(), controller.signal, this.options.idleTimeoutMs ?? 15000);
+        controller.signal.throwIfAborted();
+        if (next.done) throw new RuntimeFailure('UPSTREAM_ERROR');
+        const event = next.value;
+        if (event.type === 'text.delta') {
+          if (typeof event.text !== 'string') throw new RuntimeFailure('UPSTREAM_ERROR');
+          const bytes = Buffer.byteLength(text) + Buffer.byteLength(event.text);
+          if (bytes > MAX_OUTPUT_BYTES) throw new RuntimeFailure('OUTPUT_LIMIT');
+          text += event.text;
+          if (bytes - lastCheckpointBytes >= 4096 || Date.now() - lastCheckpointAt >= 1000) {
+            await this.repository.checkpoint(ownerId, generation.id, text);
+            lastCheckpointBytes = bytes;
+            lastCheckpointAt = Date.now();
+          }
+          await send({ event: 'message.delta', data: { ...identity, text: event.text } });
+        } else if (event.type === 'completed') {
+          const reason = event.finishReason === 'stop' || event.finishReason === 'length' ? event.finishReason : 'other';
+          // complete() returns only after COMMIT. Delivery errors must never undo this durable result.
+          const completed = await this.repository.complete(ownerId, generation, text, reason);
+          committed = true;
+          await send({ event: 'message.completed', data: { ...identity, createdAt: completed.finishedAt, finishReason: completed.finishReason } });
+          return;
+        } else if (event.type !== 'usage') {
+          throw new RuntimeFailure('UPSTREAM_ERROR');
+        }
+      }
+    } catch (error) {
+      controller.abort(error);
+      if (committed) return;
+      const interrupted = signal.aborted || deliveryFailed;
+      const code = interrupted ? 'INTERRUPTED' : error instanceof RuntimeFailure ? error.code : 'GENERATION_FAILED';
+      // A persistent DB outage can prevent failure persistence; GET remains authoritative.
+      // Never replace a committed terminal state, including an ambiguous COMMIT response.
+      try { await this.repository.fail(ownerId, generation.id, text, interrupted ? 'interrupted' : 'failed', code); } catch { /* no fabricated success */ }
+      if (!interrupted) {
+        const safeError = { code, message: SAFE_GENERATION_ERROR };
+        try {
+          await send({ event: 'stream.error', data: { ...identity, error: safeError } });
+          await send({ event: 'message.failed', data: { ...identity, error: safeError } });
+        } catch { /* disconnected: reconcile through GET */ }
+      }
+    } finally {
+      clearTimeout(totalTimer);
+      signal.removeEventListener('abort', onAbort);
+      controller.abort();
+      // Do not await teardown of an uncooperative provider. Late iterator results have no writer.
+      try { void iterator?.return?.().catch(() => {}); } catch { /* adapter teardown */ }
+    }
+  }
+}

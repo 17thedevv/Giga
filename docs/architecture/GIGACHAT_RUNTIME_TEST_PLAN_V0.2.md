@@ -1,6 +1,14 @@
 # GigaChat Runtime / LLM Engine — Verification v0.2
 
-> **TEST PLAN ONLY; NOT EXECUTED.** [17T-25](https://linear.app/17thedev/issue/17T-25/specify-gigachat-runtime-and-shared-llm-engine-v02). Owner Trà, frontend reviewer Thư. [Runtime](GIGACHAT_RUNTIME_V0.2.md) · [LLM Engine](LLM_ENGINE_V0.1.md) · [API](../contracts/GIGACHAT_RUNTIME_API_V0.2.md).
+> **Broader test plan; only the 17T-32 backend subset below has execution evidence.** [17T-25](https://linear.app/17thedev/issue/17T-25/specify-gigachat-runtime-and-shared-llm-engine-v02). Owner Trà, frontend reviewer Thư. [Runtime](GIGACHAT_RUNTIME_V0.2.md) · [LLM Engine](LLM_ENGINE_V0.1.md) · [API](../contracts/GIGACHAT_RUNTIME_API_V0.2.md).
+
+17T-32 implements automated coverage under `apps/api/tests/chat/chat-runtime.test.ts` for
+CHAT-01/02/05/06/07/08/09/12/19/20, strict model/key/body validation, auth/CSRF, bounded
+context/output/checkpoints, disconnect/deadline behavior, lazy stale-state recovery and
+deletion fencing. PostgreSQL-only assertions cover concurrent row locks, partial uniqueness
+and admission rollback. See [scoped execution evidence](../evidence/17t-32-chat-runtime.md).
+This does not establish Stop, Retry/Regenerate, Memory, quotas, real provider or deployed
+browser acceptance from the broader matrix.
 
 ## Test levels
 
