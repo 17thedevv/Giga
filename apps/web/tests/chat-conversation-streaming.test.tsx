@@ -1462,6 +1462,259 @@ describe('17T-33 — GigaChat Conversation & Streaming UI Tests', () => {
       expect(screen.queryByText('Mock message from Conversation A')).toBeNull();
     });
 
+    it('repeated getGeneration failures: frontend does not conclude terminal or clear tracking ID', async () => {
+      const activeConv: Conversation = {
+        id: 'conv_err_test',
+        title: 'Error Recovery Test',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      vi.spyOn(realApiClient, 'listConversations').mockResolvedValue({
+        items: [activeConv],
+        nextCursor: null,
+      });
+      vi.spyOn(realApiClient, 'getConversation').mockResolvedValue({
+        conversation: activeConv,
+        messages: [],
+      });
+
+      const cancelSpy = vi.spyOn(realApiClient, 'cancelGeneration').mockResolvedValue({
+        generation: {
+          id: 'gen_flaky',
+          conversationId: 'conv_err_test',
+          userMessageId: 'u1',
+          modelId: 'giga-chat-default',
+          status: 'stopped',
+          partialContent: '',
+          createdAt: new Date().toISOString(),
+        },
+      });
+
+      // getGeneration always fails with 500 error
+      const getGenSpy = vi.spyOn(realApiClient, 'getGeneration').mockRejectedValue(
+        new ApiException(500, 'INTERNAL_SERVER_ERROR', 'Service temporarily unavailable')
+      );
+
+      vi.spyOn(realApiClient, 'streamMessage').mockImplementation(
+        async (_convId, _content, onEvent) => {
+          onEvent({
+            event: 'message.started',
+            data: { messageId: 'm1', generationId: 'gen_flaky', conversationId: 'conv_err_test' },
+          });
+          onEvent({
+            event: 'message.delta',
+            data: { messageId: 'm1', generationId: 'gen_flaky', text: 'Partial text before glitch...' },
+          });
+          // Abrupt stream error triggers authoritative reconciliation
+          throw new TypeError('Network connection reset');
+        }
+      );
+
+      render(
+        <ApiModeProvider initialMode="real">
+          <AuthProvider>
+            <RouterProvider initialPath="/chat/conv_err_test">
+              <ChatView />
+            </RouterProvider>
+          </AuthProvider>
+        </ApiModeProvider>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByPlaceholderText(/Ask Giga anything/i)).toBeDefined();
+      });
+
+      const input = screen.getByPlaceholderText(/Ask Giga anything/i) as HTMLTextAreaElement;
+      const form = input.closest('form')!;
+      fireEvent.change(input, { target: { value: 'Trigger flaky reconciliation' } });
+      fireEvent.submit(form);
+
+      // When retries are exhausted for getGeneration failures:
+      // 1. Error alert is shown
+      await waitFor(
+        () => {
+          expect(
+            screen.getByText(/Unable to verify generation gen_flaky status/i)
+          ).toBeDefined();
+        },
+        { timeout: 3500 }
+      );
+
+      // 2. INVARIANT: Does NOT conclude terminal or add a fake terminal message
+      expect(screen.queryByText(/Generation failed/i)).toBeNull();
+      expect(getGenSpy).toHaveBeenCalled();
+
+      // 3. INVARIANT: Tracking ID is preserved and allows Retry Stop / Retry Status Check
+      const retryStopBtn = screen.getByRole('button', { name: /Retry Stop/i });
+      expect(retryStopBtn).toBeDefined();
+      expect(screen.getByRole('button', { name: /Retry Status Check/i })).toBeDefined();
+
+      // Clicking Retry Stop uses preserved activeGenerationIdRef to cancel generation
+      fireEvent.click(retryStopBtn);
+      await waitFor(() => {
+        expect(cancelSpy).toHaveBeenCalledWith('conv_err_test', 'gen_flaky');
+      });
+    });
+
+    it('lifecycle fencing: late completion of generation A does not clear tracking ID or corrupt lifecycle of generation B', async () => {
+      const activeConv: Conversation = {
+        id: 'conv_seq_test',
+        title: 'Sequential Generation Lifecycle Test',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      vi.spyOn(realApiClient, 'listConversations').mockResolvedValue({
+        items: [activeConv],
+        nextCursor: null,
+      });
+
+      const resolveConvARef = {
+        current: null as ((val: { conversation: Conversation; messages: Message[] }) => void) | null,
+      };
+
+      let getConvCall = 0;
+      vi.spyOn(realApiClient, 'getConversation').mockImplementation(async () => {
+        getConvCall++;
+        if (getConvCall === 1) {
+          // Initial conversation load
+          return { conversation: activeConv, messages: [] };
+        }
+        if (getConvCall === 2) {
+          // Delay Generation A authoritative reconciliation
+          return new Promise<{ conversation: Conversation; messages: Message[] }>((resolve) => {
+            resolveConvARef.current = resolve;
+          });
+        }
+        return { conversation: activeConv, messages: [] };
+      });
+
+      const cancelSpy = vi.spyOn(realApiClient, 'cancelGeneration').mockResolvedValue({
+        generation: {
+          id: 'gen_B',
+          conversationId: 'conv_seq_test',
+          userMessageId: 'u2',
+          modelId: 'giga-chat-default',
+          status: 'stopped',
+          partialContent: '',
+          createdAt: new Date().toISOString(),
+        },
+      });
+
+      let streamCall = 0;
+      vi.spyOn(realApiClient, 'streamMessage').mockImplementation(
+        async (_convId, _content, onEvent, options) => {
+          streamCall++;
+          if (streamCall === 1) {
+            // Generation A
+            onEvent({
+              event: 'message.started',
+              data: { messageId: 'mA', generationId: 'gen_A', conversationId: 'conv_seq_test' },
+            });
+            onEvent({
+              event: 'message.delta',
+              data: { messageId: 'mA', generationId: 'gen_A', text: 'Answer for Question A' },
+            });
+            onEvent({
+              event: 'message.completed',
+              data: { messageId: 'mA', generationId: 'gen_A' },
+            });
+            return;
+          }
+
+          // Generation B
+          onEvent({
+            event: 'message.started',
+            data: { messageId: 'mB', generationId: 'gen_B', conversationId: 'conv_seq_test' },
+          });
+          onEvent({
+            event: 'message.delta',
+            data: { messageId: 'mB', generationId: 'gen_B', text: 'Streaming answer for Question B...' },
+          });
+          // Generation B stays active and waits for abort
+          await new Promise<void>((resolve) => {
+            options?.signal?.addEventListener('abort', () => resolve());
+          });
+        }
+      );
+
+      render(
+        <ApiModeProvider initialMode="real">
+          <AuthProvider>
+            <RouterProvider initialPath="/chat/conv_seq_test">
+              <ChatView />
+            </RouterProvider>
+          </AuthProvider>
+        </ApiModeProvider>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByPlaceholderText(/Ask Giga anything/i)).toBeDefined();
+      });
+
+      const input = screen.getByPlaceholderText(/Ask Giga anything/i) as HTMLTextAreaElement;
+      const form = input.closest('form')!;
+
+      // 1. Submit Generation A
+      fireEvent.change(input, { target: { value: 'Question A' } });
+      fireEvent.submit(form);
+
+      // Verify Generation A completed locally
+      await waitFor(() => {
+        expect(screen.getByText('Answer for Question A')).toBeDefined();
+      });
+
+      // At this point, Generation A's getConversation reconciliation is still pending in resolveConvARef
+
+      // 2. Submit Generation B while Generation A's getConversation is still in-flight
+      fireEvent.change(input, { target: { value: 'Question B' } });
+      fireEvent.submit(form);
+
+      // Verify Generation B is actively streaming and Stop Generating button is rendered
+      await waitFor(() => {
+        expect(screen.getByText('Streaming answer for Question B...')).toBeDefined();
+        expect(screen.getByRole('button', { name: 'Stop Generating' })).toBeDefined();
+      });
+
+      // 3. Now Generation A's delayed getConversation resolves late
+      resolveConvARef.current?.({
+        conversation: activeConv,
+        messages: [
+          {
+            id: 'persisted_user_A',
+            conversationId: 'conv_seq_test',
+            role: 'user',
+            content: 'Question A',
+            createdAt: new Date().toISOString(),
+          },
+          {
+            id: 'persisted_mA',
+            conversationId: 'conv_seq_test',
+            role: 'assistant',
+            content: 'Answer for Question A',
+            createdAt: new Date().toISOString(),
+            status: 'completed',
+          },
+        ],
+      });
+
+      // Give event loop time to process Generation A's promise settlement
+      await new Promise((r) => setTimeout(r, 60));
+
+      // 4. INVARIANT: Generation B's active ID was NOT wiped by Generation A's .finally()!
+      // Generation B streaming text is still displayed and Stop Generating is still active
+      expect(screen.getByText('Streaming answer for Question B...')).toBeDefined();
+      const stopBtn = screen.getByRole('button', { name: 'Stop Generating' });
+      expect(stopBtn).toBeDefined();
+
+      // 5. User clicks Stop for Generation B -> cancelGeneration MUST be called with gen_B!
+      fireEvent.click(stopBtn);
+      await waitFor(() => {
+        expect(cancelSpy).toHaveBeenCalledWith('conv_seq_test', 'gen_B');
+      });
+    });
+
     it('fencing conversation creation: starting from /chat creates conversation and preserves optimistic user turn', async () => {
       vi.spyOn(realApiClient, 'listConversations').mockResolvedValue({
         items: [],
