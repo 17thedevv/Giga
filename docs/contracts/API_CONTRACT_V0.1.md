@@ -48,6 +48,10 @@ type ApiError = { code: string; message: string; details?: Record<string, unknow
 
 ## 4. Conversations & Chat
 
+The [17T-37 Chat BYOK candidate](CHAT_BYOK_API_V0.1.md) adds optional,
+owner-scoped encrypted Gemini credentials and a dedicated Chat preference.
+Platform mode stays the default; API v1 remains DRAFT.
+
 The [17T-32 implementation candidate](GIGACHAT_RUNTIME_API_V0.2.md#implementation-candidate--17t-32)
 specifies the first persisted POST stream + GET generation slice, required Idempotency-Key,
 duplicate reconciliation and failed terminal events. The

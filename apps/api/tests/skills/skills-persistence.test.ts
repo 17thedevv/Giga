@@ -925,7 +925,7 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
 
       // 2. Verify schema_migrations now records version 2 alongside 1, 3, and 4
       const checkVersions = await testDb.pool.query<{ version: number }>(
-        'SELECT version FROM schema_migrations ORDER BY version ASC;'
+        'SELECT version FROM schema_migrations WHERE version <= 4 ORDER BY version ASC;'
       );
       const versionNumbers = checkVersions.rows.map((r) => r.version);
       assert.deepStrictEqual(versionNumbers, [1, 2, 3, 4]);

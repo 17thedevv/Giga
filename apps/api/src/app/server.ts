@@ -57,6 +57,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<{
     pool,
     config,
     llmEngine,
+    providerTransport: options.providerTransport,
   });
 
   const server = serve(

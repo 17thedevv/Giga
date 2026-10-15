@@ -1,5 +1,6 @@
 import { CHAT_MODEL_ALIAS } from '../chat/chat-runtime.js';
 import { LLMEngine } from './engine.js';
+import { ProviderCredential } from './provider-credential.js';
 import { ModelRegistry } from './registry.js';
 import { CHAT_MODEL_ID, GeminiProvider, type ProviderTransport } from './providers/gemini/gemini-provider.js';
 
@@ -29,10 +30,10 @@ export function createChatEngine(config: ChatProviderConfig | undefined, transpo
   if (!config) return undefined;
   validateChatConfig(config);
   const registry = new ModelRegistry();
-  registry.registerAdapter(new GeminiProvider(config.apiKey, transport));
+  registry.registerAdapter(new GeminiProvider(transport));
   registry.registerAlias({ alias: CHAT_MODEL_ALIAS, providerId: 'gemini', modelId: config.modelId,
     requiredCapabilities: ['text', 'streaming'], maxOutputTokensLimit: config.maxOutputTokens });
   registry.validate();
   registry.resolve(CHAT_MODEL_ALIAS, 'streaming');
-  return new LLMEngine(registry);
+  return new LLMEngine(registry, new ProviderCredential(config.apiKey, 'platform'));
 }

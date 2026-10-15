@@ -1,4 +1,6 @@
 import type { ProviderAdapter } from '../../adapter.js';
+import type { ProviderCredential } from '../../provider-credential.js';
+import { BYOKCredentialInvalidError, BYOKProviderError } from '../../errors.js';
 import { LLMCancelledError, ProviderFailureError, ProviderRateLimitError, ProviderTimeoutError, ProviderUnavailableError } from '../../errors.js';
 import type { Capability, FinishReason, LLMStreamEvent, LLMUsage, ModelResult, ResolvedLLMRequest } from '../../types.js';
 
@@ -92,12 +94,11 @@ async function* frames(reader: ReadableStreamDefaultReader<Uint8Array>, signal: 
 export class GeminiProvider implements ProviderAdapter {
   readonly providerId = 'gemini';
   readonly capabilities: ReadonlySet<Capability> = new Set(['text', 'streaming']);
-  constructor(private readonly apiKey: string, private readonly transport: ProviderTransport = fetch, private readonly timeoutMs = 85000) {
-    if (!/^[\x21-\x7e]{16,512}$/.test(apiKey)) throw new Error('Invalid GEMINI_API_KEY configuration');
+  constructor(private readonly transport: ProviderTransport = fetch, private readonly timeoutMs = 85000) {
     if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 85000) throw new Error('Invalid provider timeout configuration');
   }
 
-  async *streamText(req: ResolvedLLMRequest): AsyncIterable<LLMStreamEvent> {
+  async *streamText(req: ResolvedLLMRequest, credential?: ProviderCredential): AsyncIterable<LLMStreamEvent> {
     const controller = new AbortController();
     const abort = (): void => controller.abort();
     req.signal.addEventListener('abort', abort, { once: true });
@@ -109,11 +110,12 @@ export class GeminiProvider implements ProviderAdapter {
     controller.signal.addEventListener('abort', closeReader, { once: true });
     try {
       if (controller.signal.aborted) throw new LLMCancelledError();
+      if (!credential || credential.providerId !== this.providerId || (credential.source === 'user' && req.caller !== 'chat')) throw failure();
       if (req.providerId !== this.providerId || req.modelId !== CHAT_MODEL_ID || !Number.isInteger(req.maxOutputTokens) || req.maxOutputTokens < 1 || req.maxOutputTokens > 2048) throw failure();
       const system = req.messages.filter((m) => m.role === 'system');
       const pending = this.transport(GEMINI_CHAT_ENDPOINT, {
         method: 'POST', redirect: 'error', signal: controller.signal,
-        headers: { 'x-goog-api-key': this.apiKey, 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+        headers: { ...credential.transportHeaders(), 'Content-Type': 'application/json', Accept: 'text/event-stream' },
         body: JSON.stringify({
           contents: req.messages.filter((m) => m.role !== 'system').map((m) => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] })),
           ...(system.length ? { systemInstruction: { parts: system.map((m) => ({ text: m.content })) } } : {}),
@@ -127,6 +129,7 @@ export class GeminiProvider implements ProviderAdapter {
       if (controller.signal.aborted) { void response.body?.cancel().catch(() => {}); throw new LLMCancelledError(); }
       if (!response.ok) {
         void response.body?.cancel().catch(() => {}); // Provider error bodies never reach logs/errors.
+        if ((response.status === 401 || response.status === 403) && credential.source === 'user') throw new BYOKCredentialInvalidError();
         if (response.status === 429) throw new ProviderRateLimitError('Provider rate limit reached', retryAfter(response.headers.get('retry-after')));
         if (response.status >= 500) throw new ProviderUnavailableError('Provider is temporarily unavailable');
         throw new ProviderFailureError('Provider rejected the request');
@@ -169,7 +172,12 @@ export class GeminiProvider implements ProviderAdapter {
       yield { type: 'completed', finishReason: reason };
     } catch (error) {
       if (req.signal.aborted) throw new LLMCancelledError();
+      if (credential?.source === 'user') {
+        if (timedOut) throw new BYOKProviderError('PROVIDER_TIMEOUT');
+        if (error instanceof ProviderRateLimitError || error instanceof ProviderUnavailableError) throw new BYOKProviderError(error.code);
+      }
       if (timedOut) throw new ProviderTimeoutError('Provider request deadline exceeded');
+      if (error instanceof BYOKCredentialInvalidError) throw new BYOKCredentialInvalidError();
       if (error instanceof ProviderRateLimitError) throw new ProviderRateLimitError('Provider rate limit reached',
         error.retryAfterMs === undefined ? undefined : Math.max(0, Math.min(60000, error.retryAfterMs)));
       if (error instanceof ProviderUnavailableError) throw new ProviderUnavailableError('Provider is temporarily unavailable');
@@ -181,9 +189,9 @@ export class GeminiProvider implements ProviderAdapter {
     }
   }
 
-  async generateText(req: ResolvedLLMRequest): Promise<ModelResult> {
+  async generateText(req: ResolvedLLMRequest, credential?: ProviderCredential): Promise<ModelResult> {
     let text = ''; let reported: LLMUsage | undefined;
-    for await (const event of this.streamText(req)) {
+    for await (const event of this.streamText(req, credential)) {
       if (event.type === 'text.delta') text += event.text;
       else if (event.type === 'usage') reported = { source: event.source, ...(event.inputTokens === undefined ? {} : { inputTokens: event.inputTokens }), ...(event.outputTokens === undefined ? {} : { outputTokens: event.outputTokens }) };
       else if (event.type === 'completed') return { text, finishReason: event.finishReason, ...(reported ? { usage: reported } : {}) };

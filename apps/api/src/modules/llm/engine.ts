@@ -12,6 +12,8 @@ import {
   toLLMError,
 } from './errors.js';
 import type { ModelRegistry } from './registry.js';
+import type { CredentialResolver, ProviderCredential } from './provider-credential.js';
+import type { ProviderAdapter } from './adapter.js';
 import type {
   LLMCaller,
   LLMRequest,
@@ -32,7 +34,7 @@ const VALID_CALLERS: ReadonlySet<LLMCaller> = new Set(['chat', 'agent', 'memory'
 const VALID_ROLES = new Set(['system', 'user', 'assistant']);
 
 export class LLMEngine {
-  constructor(private readonly registry: ModelRegistry) {}
+  constructor(private readonly registry: ModelRegistry, private readonly platformCredential?: ProviderCredential) {}
 
   /**
    * Validates common LLMRequest invariants and enforces conservative bounds.
@@ -134,8 +136,9 @@ export class LLMEngine {
   }
 
   /** Resolve once without network I/O so callers can durably record trusted identity. */
-  public prepareStream(req: LLMRequest): { readonly identity: ResolvedModelIdentity; readonly stream: AsyncIterable<LLMStreamEvent> } {
+  public prepareStream(req: LLMRequest, resolveCredential?: CredentialResolver): { readonly identity: ResolvedModelIdentity; readonly stream: AsyncIterable<LLMStreamEvent> } {
     this.validateRequest(req);
+    if (resolveCredential && req.caller !== 'chat') throw new LLMValidationError('Chat credentials require a Chat caller');
 
     const { adapter, config } = this.registry.resolve(req.modelAlias, 'streaming');
 
@@ -151,13 +154,14 @@ export class LLMEngine {
       modelId: config.modelId,
     };
 
-    return { identity: { providerId: config.providerId, modelId: config.modelId }, stream: this.createStream(adapter, resolvedReq, req.signal) };
+    return { identity: { providerId: config.providerId, modelId: config.modelId }, stream: this.createStream(adapter, resolvedReq, req.signal, resolveCredential) };
   }
 
   private async *createStream(
-    adapter: { streamText(req: ResolvedLLMRequest): AsyncIterable<LLMStreamEvent> },
+    adapter: ProviderAdapter,
     resolvedReq: ResolvedLLMRequest,
-    signal: AbortSignal
+    signal: AbortSignal,
+    resolveCredential?: CredentialResolver
   ): AsyncIterable<LLMStreamEvent> {
     if (signal.aborted) {
       throw new LLMCancelledError('LLM operation was cancelled before streaming');
@@ -166,7 +170,11 @@ export class LLMEngine {
     let hasCompleted = false;
 
     try {
-      const stream = adapter.streamText(resolvedReq);
+      // Resolve once after alias validation, immediately before transport. No fallback
+      // when an explicit resolver rejects or returns an unavailable credential.
+      const credential = resolveCredential ? await resolveCredential() : this.platformCredential;
+      if (signal.aborted) throw new LLMCancelledError();
+      const stream = adapter.streamText(resolvedReq, credential);
 
       for await (const event of stream) {
         if (signal.aborted) {
@@ -236,7 +244,7 @@ export class LLMEngine {
     }
 
     try {
-      const result = await adapter.generateText(resolvedReq);
+      const result = await adapter.generateText(resolvedReq, this.platformCredential);
 
       if (req.signal.aborted) {
         throw new LLMCancelledError('LLM operation was cancelled');

@@ -21,6 +21,10 @@ import { ChatRuntime } from '../modules/chat/chat-runtime.js';
 import { PostgresGenerationRepository } from '../modules/chat/generation-repository.js';
 import { createChatRoutes } from '../modules/chat/chat-routes.js';
 import { DEFAULT_DEV_ORIGINS, type AppConfig } from './config.js';
+import { ChatCredentialsService } from '../modules/credentials/service.js';
+import { createCredentialRoutes } from '../modules/credentials/routes.js';
+import { ProviderCredential } from '../modules/llm/provider-credential.js';
+import type { ProviderTransport } from '../modules/llm/providers/gemini/gemini-provider.js';
 
 export interface HealthResponse {
   readonly status: 'ok';
@@ -36,6 +40,7 @@ export interface ErrorResponse {
 }
 
 export interface AppDependencies {
+  readonly providerTransport?: ProviderTransport;
   readonly pool?: pg.Pool;
   readonly authService?: AuthService;
   readonly conversationsService?: ConversationsService;
@@ -112,10 +117,16 @@ export function createApp(dependencies: AppDependencies = {}): Hono {
     app.route('/api/v1/conversations', conversationsRouter);
   }
 
+  const credentials = dependencies.pool ? new ChatCredentialsService(dependencies.pool,
+    dependencies.config?.credentialEncryption, dependencies.config?.chat
+      ? new ProviderCredential(dependencies.config.chat.apiKey, 'platform') : undefined, dependencies.providerTransport) : undefined;
+  if (credentials && authService) app.route('/api/v1/me', createCredentialRoutes(credentials, authService));
+
   // Chat uses only the explicitly injected LLM Engine; unconfigured admission fails closed.
   const chatRuntime = dependencies.chatRuntime ?? (dependencies.pool
     ? new ChatRuntime(new PostgresGenerationRepository(dependencies.pool), dependencies.llmEngine,
-      { maxOutputTokens: dependencies.config?.chat?.maxOutputTokens })
+      { maxOutputTokens: dependencies.config?.chat?.maxOutputTokens,
+        resolveCredential: credentials ? (ownerId) => credentials.resolve(ownerId) : undefined })
     : undefined);
   if (chatRuntime && authService) {
     app.route('/api/v1/conversations', createChatRoutes(chatRuntime, authService));

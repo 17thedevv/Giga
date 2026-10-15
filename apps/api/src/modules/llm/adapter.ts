@@ -15,6 +15,7 @@ import type {
   ResolvedLLMRequest,
   ToolSchema,
 } from './types.js';
+import type { ProviderCredential } from './provider-credential.js';
 
 export interface ProviderAdapter {
   readonly providerId: string;
@@ -27,12 +28,12 @@ export interface ProviderAdapter {
    * when generation completes cleanly. If the stream terminates without emitting
    * a completed event, the engine classifies it as a premature truncation failure.
    */
-  streamText(req: ResolvedLLMRequest): AsyncIterable<LLMStreamEvent>;
+  streamText(req: ResolvedLLMRequest, credential?: ProviderCredential): AsyncIterable<LLMStreamEvent>;
 
   /**
    * Generates a single complete text completion.
    */
-  generateText(req: ResolvedLLMRequest): Promise<ModelResult>;
+  generateText(req: ResolvedLLMRequest, credential?: ProviderCredential): Promise<ModelResult>;
 
   /**
    * Generates structured output conforming to a schema (future milestone).

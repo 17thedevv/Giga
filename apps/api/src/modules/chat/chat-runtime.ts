@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import { AppError, ValidationError } from '../auth/auth-validation.js';
 import type { LLMEngine } from '../llm/engine.js';
+import { BYOKCredentialInvalidError, BYOKProviderError, ChatCredentialUnavailableError } from '../llm/errors.js';
+import type { ProviderCredential } from '../llm/provider-credential.js';
 import type { LLMStreamEvent } from '../llm/types.js';
 import {
   MAX_OUTPUT_BYTES, MAX_PROMPT_BYTES, SAFE_GENERATION_ERROR,
@@ -16,6 +18,7 @@ interface ActiveGeneration {
   readonly controller: AbortController;
 }
 export interface RuntimeOptions {
+  readonly resolveCredential?: (ownerId: string) => Promise<ProviderCredential | undefined>;
   readonly maxOutputTokens?: number;
   readonly totalTimeoutMs?: number;
   readonly idleTimeoutMs?: number;
@@ -149,7 +152,7 @@ export class ChatRuntime {
       const request = { modelAlias: generation.modelId, messages, maxOutputTokens: this.options.maxOutputTokens ?? 2048,
         requestId: generation.id, caller: 'chat' as const, signal: controller.signal };
       if (this.engine.prepareStream) {
-        const prepared = this.engine.prepareStream(request);
+        const prepared = this.engine.prepareStream(request, this.options.resolveCredential ? () => this.options.resolveCredential!(ownerId) : undefined);
         await this.repository.recordResolvedModel(ownerId, generation.id, prepared.identity);
         controller.signal.throwIfAborted();
         iterator = prepared.stream[Symbol.asyncIterator]();
@@ -194,7 +197,8 @@ export class ChatRuntime {
       controller.abort(error);
       if (committed) return;
       const interrupted = signal.aborted || deliveryFailed;
-      const code = interrupted ? 'INTERRUPTED' : error instanceof RuntimeFailure ? error.code : 'GENERATION_FAILED';
+      const code = interrupted ? 'INTERRUPTED' : error instanceof RuntimeFailure ? error.code
+        : error instanceof BYOKCredentialInvalidError || error instanceof BYOKProviderError || error instanceof ChatCredentialUnavailableError ? error.code : 'GENERATION_FAILED';
       // A persistent DB outage can prevent failure persistence; GET remains authoritative.
       // Never replace a committed terminal state, including an ambiguous COMMIT response.
       let persisted: ChatGeneration | undefined;

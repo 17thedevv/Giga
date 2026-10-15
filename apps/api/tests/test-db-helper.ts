@@ -233,6 +233,11 @@ export async function createTestDatabase(migrations?: readonly Migration[]): Pro
 
   const cleanup = async (): Promise<void> => {
     try {
+      // pg-mem cannot order account cascades across the composite credential FK.
+      await pool.query('DELETE FROM chat_credential_preferences;');
+      await pool.query('DELETE FROM user_provider_credentials;');
+    } catch { /* Older migration fixtures do not contain BYOK tables. */ }
+    try {
       await pool.query('DELETE FROM chat_turn_selections;');
       await pool.query('DELETE FROM chat_operation_keys;');
       await pool.query('DELETE FROM chat_generations;');
