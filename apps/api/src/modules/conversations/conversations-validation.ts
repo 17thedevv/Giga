@@ -48,7 +48,7 @@ export function decodeCursor(cursorStr: string): PaginationCursor {
       throw new ValidationError('Invalid pagination cursor');
     }
     return {
-      updatedAt: new Date(parsed.updatedAt).toISOString(),
+      updatedAt: parsed.updatedAt,
       id: parsed.id,
     };
   } catch (err) {

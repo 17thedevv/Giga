@@ -12,6 +12,15 @@ browser acceptance from the broader matrix.
 
 ## Test levels
 
+17T-35 adds CHAT-10/11 coverage for streamed latest-turn variants, retry eligibility,
+no duplicate user insertion, delayed successful selection, unsuccessful candidate
+preservation, one selected answer in bounded context/history, safe reconciliation DTOs,
+operation-key identity, auth/CSRF and deletion tombstones. PostgreSQL tests cover
+concurrent identical admission/provider deduplication, composite selection scope/status,
+MVCC visibility while completion holds locks, both Stop/Completion winners, and migration
+007 upgrading populated 006 without changing prior data. See
+[17T-35 execution evidence](../evidence/17t-35-chat-variants.md).
+
 17T-34 adds backend tests for CHAT-03/18/21: pending and active cancellation, original HTTP
 SSE stopped delivery, partial preservation, owner/CSRF/key guards, operation-key conflicts,
 unchanged terminal rows, disconnect versus Stop, deletion and empty controller registry

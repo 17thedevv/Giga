@@ -2,11 +2,102 @@
 
 > **DRAFT, NOT FROZEN.** Product design accepted on 2026-10-13; exact endpoints, DTOs, new SSE event types and browser compatibility still require Trà/Thư review. Tracking [17T-25](https://linear.app/17thedev/issue/17T-25/specify-gigachat-runtime-and-shared-llm-engine-v02). Read [Runtime](../architecture/GIGACHAT_RUNTIME_V0.2.md), [LLM Engine](../architecture/LLM_ENGINE_V0.1.md), [API v0.1](API_CONTRACT_V0.1.md) and ADR-001.
 
+## Streamed Retry / Regenerate candidate — 17T-35
+
+**DRAFT; Thư compatibility review pending.** This additive candidate resolves the
+transport/variant gate for 17T-35, building on 17T-32/34 and consumed by 17T-33.
+No plain creation-plus-polling transport is implemented.
+
+| Old behavior | Candidate behavior | Consumers / compatibility / evidence |
+|---|---|---|
+| New prompt POST stream only | Add POST `/api/v1/conversations/:id/generations:stream` | Additive fetch SSE; existing lifecycle fixtures reused |
+| Unresolved variants | Add GET `/api/v1/conversations/:id/messages/:userMessageId/generations` | Additive safe DTO; frontend review pending |
+| One assistant per ordinary turn | History includes only selected completed answer per turn | Existing envelope unchanged; alternatives remain queryable separately |
+| Prompt/cancel key namespace | Extend with retry/regenerate operation identity | Same key cannot change action, target, conversation or payload |
+
+POST accepts strict JSON `{userMessageId: UUID, action: 'retry' | 'regenerate', modelId?:
+'giga-chat-default'}`. Omitted modelId equals explicit default. Unknown fields (including
+source generation IDs), malformed UUIDs/actions/keys/JSON, unsupported models and bodies
+over 100,000 bytes return 400 `VALIDATION_ERROR`. Required Idempotency-Key uses the
+existing 1–128 ASCII policy. Session, strict Origin/CSRF, owner authorization and 503
+unconfigured-engine behavior match new-prompt admission. A source user message must be
+owned by this conversation; missing/cross-owner/mismatched IDs return 404 before provider
+I/O. An owned but earlier turn returns 409 `CONFLICT`.
+
+Only the latest user turn is eligible. Retry requires its latest attempt to be failed,
+stopped or interrupted; regenerate requires an existing completed variant. Ineligible
+state or another active generation returns 409. Each accepted request creates a new
+generation, reuses the exact user_message_id, and inserts no user message. Stale active
+attempts use the existing recovery policy before eligibility is checked.
+
+A fresh admission returns **200 text/event-stream** immediately, using the same runtime:
+one `message.started`, zero or more `message.delta`, then `message.completed`,
+`message.stopped` or `message.failed`. Failure retains `stream.error` immediately before
+`message.failed`; disconnect can prevent terminal delivery. IDs, deadlines, checkpoints,
+AbortSignal and durable Stop are unchanged. SSE completion follows the atomic commit of
+assistant output, completed state and turn selection. No old answer is included in the
+target's provider input: its original user message occurs once, last.
+
+Same key + normalized action/target/model/conversation returns the existing 409
+`{error:{code:'CONFLICT',message},generation}` reconciliation envelope, including while
+active or after a newer turn exists; never replay or repeat the provider. Changed
+action/target/model/payload, prompt/cancel key reuse or a deleted-generation tombstone
+returns ordinary 409 without disclosing the original generation. Tombstones survive
+conversation deletion until owner deletion. A deleted conversation itself returns 404.
+
+GET variants requires session/owner access, accepts only the latest owned user turn
+(earlier owned turn: 409), and works without an engine. Response:
+
+```ts
+interface ChatTurnVariants {
+  userMessageId: string;
+  selectedGenerationId: string | null;
+  items: Array<{
+    id: string;
+    action: 'new_prompt' | 'retry' | 'regenerate';
+    modelId: string;
+    status: GenerationStatus;
+    assistantMessageId?: string;
+    content?: string; // completed text only, omitted for other statuses
+    createdAt: string;
+    finishedAt?: string;
+  }>;
+}
+```
+
+Items are deterministically ordered by attempt creation timestamp then ID. No owner,
+key, fingerprint, provider/configuration or candidate partial output is exposed. Existing
+GET generation remains available for any owned generation and its partial reconciliation.
+No manual selection endpoint, earlier-turn branching or frontend implementation is added.
+
+Migration 007 leaves 001–006 unchanged. A small `chat_turn_selections` table selects at
+most one completed generation belonging to the same owner/conversation/user message,
+with database foreign keys enforcing identity and completed status. Existing completed
+attempts are backfilled without changing output. Conversation deletion cascades selection
+metadata. Completion updates selection under the existing conversation/generation locks;
+failed/stopped/interrupted candidates cannot change it. Prior completed variants remain
+durable. Prior context includes each user once and only its selected completed assistant
+once; excludes unsuccessful/active output and alternatives. Turn ordering uses user
+creation timestamp/ID, with assistant immediately following its user even after
+regeneration; existing whole-message byte/count bounds remain. Legacy messages without
+generation metadata retain their prior visibility. Ordinary flat history retains user
+messages, filters out non-selected variant assistants and preserves its existing DTO.
+
+Opaque conversation pagination cursors retain PostgreSQL timestamp precision; the
+conversation DTO and cursor envelope are unchanged. A regression test covers multiple
+updates within one millisecond (the prior JS Date conversion could skip rows).
+
+Review questions for Thư: latest-turn-only inspection, duplicate 409 reconciliation,
+completed-only candidate text, automatic selection on durable success, legacy history
+ordering and frontend parser fixtures. API v1 remains **DRAFT**, with browser integration
+and independent human compatibility review still required before any freeze.
+
 ## Durable Stop implementation candidate — 17T-34
 
 This DRAFT addition follows [17T-32](https://linear.app/17thedev/issue/17T-32) and is the
 backend candidate for [17T-33](https://linear.app/17thedev/issue/17T-33) consumers.
-Thư review is pending. No frontend control or Retry/Regenerate transport is added.
+Thư review is pending. No frontend control is added. The 17T-35 candidate above extends
+this runtime with streamed variants.
 
 | Existing behavior | Addition | Compatibility / review |
 |---|---|---|
@@ -75,8 +166,8 @@ retention, remote checkpoint behavior and deployed-browser compatibility. API v1
 ## Implementation candidate — 17T-32
 
 This first backend slice implements only POST `messages:stream` and GET generation reconciliation.
-The original slice deferred Cancel (now specified above). Retry/Regenerate,
-model discovery, assistant variants, Memory, Skills composition, usage and quotas are deferred.
+The original slice deferred Cancel and Retry/Regenerate (now specified above).
+Model discovery, Memory, Skills composition, usage and quotas remain deferred.
 
 | Previous draft/mock behavior | This implementation candidate | Consumers / compatibility |
 |---|---|---|
@@ -129,7 +220,7 @@ Candidate details under review:
 
 Review questions remain open: duplicate reconciliation status/envelope, byte/context limits,
 deadline/recovery policy, provisional IDs and safe error codes, frontend terminal parser
-fixtures, real model token budget, and the separate Retry/Regenerate transport/variant design.
+fixtures, real model token budget, and approval of the 17T-35 transport/variant candidate above.
 No deployed-browser or contract-freeze approval is implied.
 
 ## 1. Compatibility impact
@@ -152,10 +243,13 @@ Auth and Agent API are unaffected. The canonical public v1 remains **DRAFT** und
 | POST | /api/v1/conversations/:id/messages:stream | JSON {content,modelId?}; Idempotency-Key | 200 text/event-stream |
 | GET | /api/v1/conversations/:id/generations/:generationId | none | 200 {generation} |
 | POST | /api/v1/conversations/:id/generations/:generationId/cancel | empty; Idempotency-Key | 202 {generation} means stop requested, not necessarily finished |
-| POST | /api/v1/conversations/:id/generations | JSON {userMessageId,action:'retry' or 'regenerate',modelId?}; Idempotency-Key | **Transport unresolved**: cannot claim streamed regeneration from plain 202 without a companion stream channel |
+| POST | /api/v1/conversations/:id/generations:stream | JSON {userMessageId,action:'retry' or 'regenerate',modelId?}; Idempotency-Key | 200 text/event-stream; 17T-35 DRAFT candidate above |
+| GET | /api/v1/conversations/:id/messages/:userMessageId/generations | none | 200 ChatTurnVariants; latest turn only |
 | GET | /api/v1/models | none | Optional MVP discovery; server allowlisted aliases only |
 
-**Important:** The original POST messages:stream creates a *new user message*. Retry/Regenerate must reuse a prior user message, so whether to use a dedicated streaming POST or creation plus GET event stream is an **open contract gate**. Implementing plain 202 without a stream must not silently pretend regenerate provides tokens. Prioritize new messages and Stop in first functional slice; implement Regenerate after a reviewed transport/DTO decision.
+The original POST messages:stream creates a new user message. The 17T-35 candidate above
+uses a dedicated streaming POST to reuse a latest user message. The former plain POST
+`/generations` proposal is superseded; independent compatibility approval remains pending.
 
 All endpoints require session. POST uses hardened Origin/CSRF and ownership; guessed cross-user IDs yield non-disclosing 404. Model aliases cannot become arbitrary provider names.
 

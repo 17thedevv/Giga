@@ -7,7 +7,8 @@
 Implementation candidate [17T-32](https://linear.app/17thedev/issue/17T-32) adds the first
 persisted new-prompt streaming slice under `apps/api/src/modules/chat/`, using migration
 005 and the injected Shared LLM Engine. [17T-34](https://linear.app/17thedev/issue/17T-34)
-adds a durable Stop candidate with migration 006. Retry/Regenerate, Memory, Skills, usage/quota accounting and real providers
+adds a durable Stop candidate with migration 006. The 17T-35 candidate adds latest-turn
+Retry/Regenerate through the same coordinator and migration 007 selections. Memory, Skills, usage/quota accounting and real providers
 remain future work; the broader lifecycle below is still proposed. See the
 [API implementation candidate](../contracts/GIGACHAT_RUNTIME_API_V0.2.md#implementation-candidate--17t-32)
 for its limits and recovery behavior. The API remains DRAFT pending independent review.
@@ -19,6 +20,17 @@ runner's bounded buffer; remote Stop uses persisted checkpoints and is observed 
 next event/deadline. No instant cross-worker abort or background polling/sweeper is claimed.
 Operation-key identity is retained separately from content to reject reuse after deletion.
 Stop and browser disconnect remain distinct persisted states.
+
+The [17T-35 DRAFT contract](../contracts/GIGACHAT_RUNTIME_API_V0.2.md#streamed-retry--regenerate-candidate--17t-35)
+chooses POST `generations:stream` and latest-user-turn variant inspection. Admission locks
+the owned conversation, validates the latest target and action, and reuses its user message.
+Completion atomically inserts a new assistant, completes its generation and upserts one
+`chat_turn_selections` row. Composite PostgreSQL foreign keys enforce same owner,
+conversation and user plus completed status. Failure/Stop/interruption leaves selection
+unchanged; old completed answers remain durable. History shows one selected answer per
+turn; provider context excludes alternatives and the current target's old answer. Keys
+distinguish prompt/cancel/retry/regenerate and retain content-free deletion tombstones.
+Independent compatibility review by Thư remains pending; this is no API freeze.
 
 GigaChat Runtime owns authorization, user-turn admission, context preparation, generation lifecycle, provider abort, SSE delivery, persistence and memory-extraction eligibility. Shared LLM Engine (a different module) owns model registry, provider calls, normalization and metering. GigaAgent calls LLM Engine but **never** Chat Runtime or GigaChat private memories implicitly. Nothing in this design implies running terminal commands on the Hono host.
 

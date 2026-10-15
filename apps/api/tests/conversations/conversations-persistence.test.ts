@@ -239,6 +239,25 @@ describe('Conversations & Messages PostgreSQL Persistence', () => {
     }
   });
 
+  it('Real PostgreSQL opaque pagination cursors retain sub-millisecond timestamp precision', async (t) => {
+    if (db.isMemory) return t.skip('PostgreSQL microsecond timestamp precision');
+    const expected: string[] = [];
+    for (let i = 1; i <= 5; i++) {
+      const conv = await convRepo.create({ userId: userAId, title: `Precision ${i}` });
+      await db.pool.query('UPDATE conversations SET updated_at = $1 WHERE id = $2', [`2026-10-15T00:00:00.00000${i}Z`, conv.id]);
+      expected.unshift(conv.id);
+    }
+    const found: string[] = [];
+    let cursor: ReturnType<typeof decodeCursor> | undefined;
+    for (let page = 0; page < 5; page++) {
+      const result = await convRepo.listByUser({ userId: userAId, limit: 2, ...(cursor ? { cursor } : {}) });
+      found.push(...result.items.map((item) => item.id));
+      if (!result.nextCursor) break;
+      cursor = decodeCursor(result.nextCursor);
+    }
+    assert.deepEqual(found, expected);
+  });
+
   it('Keyset pagination: tie-breaks deterministically when multiple items have identical updated_at', async () => {
     const fixedDate = new Date('2026-10-14T10:00:00.000Z');
     // Insert 3 conversations with identical updated_at

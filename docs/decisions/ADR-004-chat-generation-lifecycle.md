@@ -19,6 +19,14 @@ Conversation + Message rows alone do not express a generated answer that was par
 
 ## Proposed implementation choices
 
+17T-35 narrows the Retry/Regenerate candidate to a dedicated fetch SSE POST, a latest-turn
+variant list and migration-007 selection table. The existing streaming coordinator and
+durable cancellation fences are reused. Selection moves only in the successful completion
+transaction; composite foreign keys prove completed status and owner/conversation/user
+identity. Earlier-turn branching and manual selection are deferred. See the
+[DRAFT transport/DTO candidate](../contracts/GIGACHAT_RUNTIME_API_V0.2.md#streamed-retry--regenerate-candidate--17t-35).
+This records an implementation candidate, not Trà/Thư technical sign-off.
+
 - Database chat_generations with pending/streaming/completed/stopped/interrupted/failed and an owner-scoped idempotency key; migrate only after inspecting 17T-21 merged schema.
 - Transactionally record user input/generation at admission; keep network streaming outside DB transaction; commit assistant message + usage + eligible memory job before terminal success event.
 - Throttled partial checkpoints, cancellation signal, deadlines and sweeper for orphaned active generations.
