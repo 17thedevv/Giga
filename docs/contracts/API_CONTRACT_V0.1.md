@@ -52,6 +52,11 @@ The [17T-37 Chat BYOK candidate](CHAT_BYOK_API_V0.1.md) adds optional,
 owner-scoped encrypted Gemini credentials and a dedicated Chat preference.
 Platform mode stays the default; API v1 remains DRAFT.
 
+The [17T-41 Model Reasoning candidate](GIGACHAT_RUNTIME_API_V0.2.md#model-reasoning-capability-candidate--17t-41)
+and [ADR-007](../decisions/ADR-007-model-reasoning-capability.md) add provider-agnostic
+model reasoning controls (`reasoningEffort: 'low' | 'medium' | 'high'`) and trusted model capability
+discovery via `GET /api/v1/models`.
+
 The [17T-32 implementation candidate](GIGACHAT_RUNTIME_API_V0.2.md#implementation-candidate--17t-32)
 specifies the first persisted POST stream + GET generation slice, required Idempotency-Key,
 duplicate reconciliation and failed terminal events. The
@@ -66,11 +71,12 @@ API v1 remains DRAFT.
 
 | Method | Path | Input | Output |
 |---|---|---|---|
+| GET | `/api/v1/models` | session | `200 { models: ModelMetadata[] }` |
 | GET | `/api/v1/conversations?cursor=&limit=20` | query pagination | `200 { items: Conversation[], nextCursor }` |
 | POST | `/api/v1/conversations` | `{ title?: string }` | `201 { conversation }` |
 | GET | `/api/v1/conversations/:id` | conversation ID | `200 { conversation, messages: Message[] }` |
 | DELETE | `/api/v1/conversations/:id` | conversation ID | `204` |
-| POST | `/api/v1/conversations/:id/messages:stream` | `{ content: string, modelId?: string }` | `200 text/event-stream` |
+| POST | `/api/v1/conversations/:id/messages:stream` | `{ content: string, modelId?: string, reasoningEffort?: 'low' \| 'medium' \| 'high' }` | `200 text/event-stream` |
 
 **Streaming example** (each SSE `data:` is valid JSON):
 

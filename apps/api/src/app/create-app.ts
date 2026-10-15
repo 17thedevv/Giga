@@ -19,7 +19,7 @@ import { SkillError } from '../modules/skills/types.js';
 import type { LLMEngine } from '../modules/llm/engine.js';
 import { ChatRuntime } from '../modules/chat/chat-runtime.js';
 import { PostgresGenerationRepository } from '../modules/chat/generation-repository.js';
-import { createChatRoutes } from '../modules/chat/chat-routes.js';
+import { createChatRoutes, createModelRoutes } from '../modules/chat/chat-routes.js';
 import { DEFAULT_DEV_ORIGINS, type AppConfig } from './config.js';
 import { ChatCredentialsService } from '../modules/credentials/service.js';
 import { createCredentialRoutes } from '../modules/credentials/routes.js';
@@ -130,6 +130,7 @@ export function createApp(dependencies: AppDependencies = {}): Hono {
     : undefined);
   if (chatRuntime && authService) {
     app.route('/api/v1/conversations', createChatRoutes(chatRuntime, authService));
+    app.route('/api/v1/models', createModelRoutes(chatRuntime, authService));
   }
 
   // Mount Skills and Preferences modules if dependencies/pool are available

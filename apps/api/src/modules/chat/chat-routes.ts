@@ -55,3 +55,12 @@ export function createChatRoutes(runtime: ChatRuntime, auth: AuthService): Hono 
   });
   return router;
 }
+
+export function createModelRoutes(runtime: ChatRuntime, auth: AuthService): Hono {
+  const router = new Hono();
+  router.use('*', createAuthMiddleware(auth));
+  router.get('/', async (c) => {
+    return c.json({ models: runtime.listModels() });
+  });
+  return router;
+}

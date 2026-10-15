@@ -2,7 +2,7 @@ import type { ProviderAdapter } from '../../adapter.js';
 import type { ProviderCredential } from '../../provider-credential.js';
 import { BYOKCredentialInvalidError, BYOKProviderError } from '../../errors.js';
 import { LLMCancelledError, ProviderFailureError, ProviderRateLimitError, ProviderTimeoutError, ProviderUnavailableError } from '../../errors.js';
-import type { Capability, FinishReason, LLMStreamEvent, LLMUsage, ModelResult, ResolvedLLMRequest } from '../../types.js';
+import type { Capability, FinishReason, LLMStreamEvent, LLMUsage, ModelReasoningConfig, ModelResult, ReasoningEffort, ResolvedLLMRequest } from '../../types.js';
 
 export const CHAT_MODEL_ID = 'gemini-3.1-flash-lite';
 export const GEMINI_CHAT_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${CHAT_MODEL_ID}:streamGenerateContent?alt=sse`;
@@ -98,6 +98,43 @@ export class GeminiProvider implements ProviderAdapter {
     if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 85000) throw new Error('Invalid provider timeout configuration');
   }
 
+  getReasoningCapabilities(modelId: string): ModelReasoningConfig {
+    if (modelId === CHAT_MODEL_ID) {
+      return {
+        supported: true,
+        efforts: ['low', 'medium', 'high'] as const,
+      };
+    }
+    return { supported: false, efforts: [] };
+  }
+
+  /**
+   * Adapter-owned mapping policy:
+   * Translates normalized Giga reasoning effort to native Gemini thinkingConfig.
+   * When effort is absent (no explicit user reasoning override), the registered
+   * model/adapter default policy applies (MINIMAL thinkingLevel on Gemini to preserve legacy behavior).
+   * Never exposes raw internal thoughts (includeThoughts is always false).
+   */
+  mapReasoningEffort(effort?: ReasoningEffort, modelId = CHAT_MODEL_ID): { readonly thinkingLevel: string; readonly includeThoughts: boolean } {
+    if (effort === undefined) {
+      return { thinkingLevel: 'MINIMAL', includeThoughts: false };
+    }
+    const capabilities = this.getReasoningCapabilities(modelId);
+    if (!capabilities.supported || !capabilities.efforts.includes(effort)) {
+      throw failure();
+    }
+    switch (effort) {
+      case 'low':
+        return { thinkingLevel: 'LOW', includeThoughts: false };
+      case 'medium':
+        return { thinkingLevel: 'MEDIUM', includeThoughts: false };
+      case 'high':
+        return { thinkingLevel: 'HIGH', includeThoughts: false };
+      default:
+        throw failure();
+    }
+  }
+
   async *streamText(req: ResolvedLLMRequest, credential?: ProviderCredential): AsyncIterable<LLMStreamEvent> {
     const controller = new AbortController();
     const abort = (): void => controller.abort();
@@ -113,13 +150,14 @@ export class GeminiProvider implements ProviderAdapter {
       if (!credential || credential.providerId !== this.providerId || (credential.source === 'user' && req.caller !== 'chat')) throw failure();
       if (req.providerId !== this.providerId || req.modelId !== CHAT_MODEL_ID || !Number.isInteger(req.maxOutputTokens) || req.maxOutputTokens < 1 || req.maxOutputTokens > 2048) throw failure();
       const system = req.messages.filter((m) => m.role === 'system');
+      const thinkingConfig = this.mapReasoningEffort(req.reasoningEffort, req.modelId);
       const pending = this.transport(GEMINI_CHAT_ENDPOINT, {
         method: 'POST', redirect: 'error', signal: controller.signal,
         headers: { ...credential.transportHeaders(), 'Content-Type': 'application/json', Accept: 'text/event-stream' },
         body: JSON.stringify({
           contents: req.messages.filter((m) => m.role !== 'system').map((m) => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] })),
           ...(system.length ? { systemInstruction: { parts: system.map((m) => ({ text: m.content })) } } : {}),
-          generationConfig: { maxOutputTokens: req.maxOutputTokens, candidateCount: 1, responseModalities: ['TEXT'], thinkingConfig: { thinkingLevel: 'MINIMAL', includeThoughts: false } },
+          generationConfig: { maxOutputTokens: req.maxOutputTokens, candidateCount: 1, responseModalities: ['TEXT'], thinkingConfig },
         }),
       }).then((response) => {
         if (controller.signal.aborted) void response.body?.cancel().catch(() => {});

@@ -117,6 +117,17 @@ export class UnsupportedCapabilityError extends LLMError {
   }
 }
 
+export class UnsupportedReasoningEffortError extends LLMError {
+  public readonly code = 'UNSUPPORTED_REASONING_EFFORT';
+
+  constructor(effort: string, target: string) {
+    super(`Reasoning effort '${effort}' is not supported for '${target}'`, 400, {
+      effort: sanitizeErrorMessage(effort),
+      target: sanitizeErrorMessage(target),
+    });
+  }
+}
+
 export class LLMValidationError extends LLMError {
   public readonly code = 'LLM_VALIDATION_ERROR';
 

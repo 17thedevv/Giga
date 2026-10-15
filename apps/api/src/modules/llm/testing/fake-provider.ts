@@ -12,6 +12,7 @@ import type {
   FinishReason,
   LLMStreamEvent,
   LLMUsage,
+  ModelReasoningConfig,
   ModelResult,
   ResolvedLLMRequest,
 } from '../types.js';
@@ -19,6 +20,7 @@ import type {
 export interface FakeProviderOptions {
   readonly providerId?: string;
   readonly capabilities?: Iterable<Capability>;
+  readonly reasoning?: ModelReasoningConfig | ((modelId: string) => ModelReasoningConfig | undefined);
   readonly chunks?: readonly string[];
   readonly chunkDelayMs?: number;
   readonly delayBeforeFirstTokenMs?: number;
@@ -41,6 +43,14 @@ function delay(ms: number): Promise<void> {
 export class FakeProvider implements ProviderAdapter {
   public readonly providerId: string;
   public readonly capabilities: ReadonlySet<Capability>;
+  private readonly reasoningOption?: ModelReasoningConfig | ((modelId: string) => ModelReasoningConfig | undefined);
+
+  public getReasoningCapabilities(modelId: string): ModelReasoningConfig | undefined {
+    if (typeof this.reasoningOption === 'function') {
+      return this.reasoningOption(modelId);
+    }
+    return this.reasoningOption;
+  }
 
   public callCount = 0;
   public streamCallCount = 0;
@@ -67,6 +77,7 @@ export class FakeProvider implements ProviderAdapter {
     this.capabilities = new Set(
       options.capabilities ?? ['text', 'streaming', 'structured', 'tool_calling']
     );
+    this.reasoningOption = options.reasoning;
     this.chunks = options.chunks ?? ['Hello', ' world!'];
     this.chunkDelayMs = options.chunkDelayMs ?? 0;
     this.delayBeforeFirstTokenMs = options.delayBeforeFirstTokenMs ?? 0;

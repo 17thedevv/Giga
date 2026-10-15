@@ -11,6 +11,7 @@ import type {
   EmbeddingRequest,
   EmbeddingResult,
   LLMStreamEvent,
+  ModelReasoningConfig,
   ModelResult,
   ResolvedLLMRequest,
   ToolSchema,
@@ -20,6 +21,12 @@ import type { ProviderCredential } from './provider-credential.js';
 export interface ProviderAdapter {
   readonly providerId: string;
   readonly capabilities: ReadonlySet<Capability>;
+
+  /**
+   * Reports reasoning capabilities for a specific model ID under this provider.
+   * Models with no controllable reasoning advertise supported: false.
+   */
+  getReasoningCapabilities?(modelId: string): ModelReasoningConfig | undefined;
 
   /**
    * Streams text generation tokens and usage events.
