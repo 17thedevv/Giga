@@ -19,6 +19,7 @@ import type {
   ModelMessage,
   ModelResult,
   ResolvedLLMRequest,
+  ResolvedModelIdentity,
 } from './types.js';
 
 export const MAX_REQUEST_ID_LENGTH = 128;
@@ -129,6 +130,11 @@ export class LLMEngine {
    * - Never retries or falls back across providers once streaming has started.
    */
   public streamText(req: LLMRequest): AsyncIterable<LLMStreamEvent> {
+    return this.prepareStream(req).stream;
+  }
+
+  /** Resolve once without network I/O so callers can durably record trusted identity. */
+  public prepareStream(req: LLMRequest): { readonly identity: ResolvedModelIdentity; readonly stream: AsyncIterable<LLMStreamEvent> } {
     this.validateRequest(req);
 
     const { adapter, config } = this.registry.resolve(req.modelAlias, 'streaming');
@@ -145,7 +151,7 @@ export class LLMEngine {
       modelId: config.modelId,
     };
 
-    return this.createStream(adapter, resolvedReq, req.signal);
+    return { identity: { providerId: config.providerId, modelId: config.modelId }, stream: this.createStream(adapter, resolvedReq, req.signal) };
   }
 
   private async *createStream(

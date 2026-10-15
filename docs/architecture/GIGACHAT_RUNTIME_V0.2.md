@@ -8,7 +8,9 @@ Implementation candidate [17T-32](https://linear.app/17thedev/issue/17T-32) adds
 persisted new-prompt streaming slice under `apps/api/src/modules/chat/`, using migration
 005 and the injected Shared LLM Engine. [17T-34](https://linear.app/17thedev/issue/17T-34)
 adds a durable Stop candidate with migration 006. The 17T-35 candidate adds latest-turn
-Retry/Regenerate through the same coordinator and migration 007 selections. Memory, Skills, usage/quota accounting and real providers
+Retry/Regenerate through the same coordinator and migration 007 selections. The 17T-36
+candidate adds Gemini startup and migration 008 write-once resolved identity before
+provider I/O ([ADR-005](../decisions/ADR-005-first-chat-provider.md)). Memory, Skills and usage/quota accounting
 remain future work; the broader lifecycle below is still proposed. See the
 [API implementation candidate](../contracts/GIGACHAT_RUNTIME_API_V0.2.md#implementation-candidate--17t-32)
 for its limits and recovery behavior. The API remains DRAFT pending independent review.

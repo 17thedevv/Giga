@@ -84,6 +84,7 @@ describe('PORT configuration and fail-fast validation', () => {
       NODE_ENV: 'production',
       DATABASE_URL: 'postgres://user:pass@localhost:5432/db',
       ALLOWED_ORIGINS: 'https://giga.local',
+      CHAT_ENABLED: 'false',
     });
     assert.strictEqual(prodConfig.nodeEnv, 'production');
     assert.strictEqual(prodConfig.cookieSecure, true);

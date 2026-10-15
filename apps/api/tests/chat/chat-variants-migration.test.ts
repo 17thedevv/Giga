@@ -40,7 +40,8 @@ it('007 upgrades populated 006 without changing users, sessions, prompts, output
     const tables = ['users', 'sessions', 'conversations', 'messages', 'chat_operation_keys'];
     const snapshots = await Promise.all(tables.map((table) => pool.query(`SELECT * FROM ${table} ORDER BY 1,2`)));
     const before = await pool.query('SELECT id,status,partial_content,assistant_message_id,finished_at,cancel_requested_at FROM chat_generations ORDER BY id');
-    assert.deepEqual(await runMigrations(pool), ['007_chat_turn_variants']);
+    const through007 = MIGRATIONS.filter((m) => m.version <= 7);
+    assert.deepEqual(await runMigrations(pool, through007), ['007_chat_turn_variants']);
     assert.deepEqual((await pool.query('SELECT id,status,partial_content,assistant_message_id,finished_at,cancel_requested_at FROM chat_generations ORDER BY id')).rows, before.rows);
     for (let i = 0; i < tables.length; i++) assert.deepEqual((await pool.query(`SELECT * FROM ${tables[i]} ORDER BY 1,2`)).rows, snapshots[i]!.rows);
     assert.equal((await pool.query('SELECT * FROM chat_turn_selections')).rows.length, completed.length);
@@ -49,7 +50,7 @@ it('007 upgrades populated 006 without changing users, sessions, prompts, output
     }
     const sql = await readFile(new URL('../../src/db/migrations/007_chat_turn_variants.sql', import.meta.url), 'utf8');
     assert.equal(MIGRATIONS.find((m) => m.version === 7)!.sql.trim(), sql.replace(/\r\n/g, '\n').trim());
-    assert.deepEqual(await runMigrations(pool), []);
+    assert.deepEqual(await runMigrations(pool, through007), []);
   } finally {
     if (!initial.isMemory) {
       await pool.end();

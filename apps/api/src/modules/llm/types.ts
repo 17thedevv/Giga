@@ -63,6 +63,11 @@ export interface ResolvedLLMRequest extends LLMRequest {
   readonly modelId: string;
 }
 
+export interface ResolvedModelIdentity {
+  readonly providerId: string;
+  readonly modelId: string;
+}
+
 export interface ModelResult {
   readonly text: string;
   readonly finishReason: FinishReason;

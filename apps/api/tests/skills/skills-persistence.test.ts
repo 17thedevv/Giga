@@ -893,6 +893,7 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
     await testDb.pool.query('DELETE FROM schema_migrations WHERE version = 5;');
     await testDb.pool.query('DELETE FROM schema_migrations WHERE version = 6;');
     await testDb.pool.query('DELETE FROM schema_migrations WHERE version = 7;');
+    await testDb.pool.query('DELETE FROM schema_migrations WHERE version = 8;');
     await testDb.pool.query('DROP TABLE IF EXISTS messages CASCADE;');
     await testDb.pool.query('DROP TABLE IF EXISTS conversations CASCADE;');
     if (testDb.isMemory) {

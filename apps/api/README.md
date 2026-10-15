@@ -235,11 +235,12 @@ npm test
 With a database and authenticated session, POST
 `/api/v1/conversations/:id/messages:stream` accepts `{content,modelId?}` and a required
 `Idempotency-Key`. Inject `llmEngine` into `createApp` to enable generation with the
-server alias `giga-chat-default`. No provider is configured by default: unconfigured
-admission returns 503 and never falls back to a fake response. FakeProvider is test-only.
+server alias `giga-chat-default`. Normal startup now bootstraps the Gemini engine from
+server configuration; direct createApp engine injection remains available for tests.
+Disabled/unconfigured development returns 503. FakeProvider is test-only.
 
 GET `/api/v1/conversations/:id/generations/:generationId` reconciles durable state after
-refresh/disconnect without repeating the provider. Apply migrations through 007 with the existing
+refresh/disconnect without repeating the provider. Apply migrations through 008 with the existing
 migration runner before enabling these routes. See the [DRAFT contract](../../docs/contracts/GIGACHAT_RUNTIME_API_V0.2.md)
 and [verification/handoff](../../docs/evidence/17t-32-chat-runtime.md) for limits and review gates.
 
@@ -260,4 +261,32 @@ answer. Only durable completion changes the selected variant. GET
 `/api/v1/conversations/:id/messages/:userMessageId/generations` inspects latest-turn safe
 variant metadata and completed text. Ordinary history/context use one selected answer.
 See the [17T-35 DRAFT candidate](../../docs/contracts/GIGACHAT_RUNTIME_API_V0.2.md#streamed-retry--regenerate-candidate--17t-35).
+
+## 9. Gemini startup (17T-36 candidate)
+
+Set server environment variables through the shell or secret manager:
+
+| Variable | Behavior |
+|---|---|
+| `CHAT_ENABLED` | `true` / `false`; production defaults on, unconfigured development/test off |
+| `GEMINI_API_KEY` | Required when enabled; secret, never a VITE_ variable |
+| `CHAT_MODEL_ID` | Required `gemini-3.1-flash-lite`, the one reviewed model |
+| `CHAT_MAX_OUTPUT_TOKENS` | Default 1024; integer 1–2048 |
+
+Supplying key/model/output settings enables chat unless explicitly disabled. Partial or
+invalid enabled config fails startup before DB/socket work; startup does not contact Google
+to prove key validity. Production requires explicit `CHAT_ENABLED=false` to disable Chat.
+There is no provider/base-URL setting, automatic retry or fallback. API v1 remains DRAFT.
+The adapter uses a fixed HTTPS endpoint, x-goog-api-key header, AbortSignal, bounded SSE
+frames/output and an 85s deadline. GenerateText collects the same streaming path. Partial
+or failed streams do not invent final usage; successful usage is provider-reported only.
+Migration 008 leaves legacy identities null and makes new resolved identity write-once.
+
+The process reads `process.env`; `.env` is not loaded automatically. With a local ignored
+`.env` prepared by the operator, Node 22 can load it explicitly, for example
+`node --env-file=.env --import tsx scripts/chat-smoke.ts`. Or export env and run
+`npm run chat:smoke`. Smoke sends one tiny non-sensitive prompt, prints safe metadata only,
+and can incur a small provider charge. It is never run in CI. Ordinary tests require no
+key or external network. See [ADR-005](../../docs/decisions/ADR-005-first-chat-provider.md)
+and [17T-36 evidence](../../docs/evidence/17t-36-real-provider.md).
 

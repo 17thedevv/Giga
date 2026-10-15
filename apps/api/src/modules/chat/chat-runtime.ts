@@ -16,6 +16,7 @@ interface ActiveGeneration {
   readonly controller: AbortController;
 }
 export interface RuntimeOptions {
+  readonly maxOutputTokens?: number;
   readonly totalTimeoutMs?: number;
   readonly idleTimeoutMs?: number;
   readonly writeTimeoutMs?: number;
@@ -50,7 +51,7 @@ export class ChatRuntime {
   get activeGenerationCount(): number { return this.active.size; }
   constructor(
     private readonly repository: GenerationRepository,
-    private readonly engine: Pick<LLMEngine, 'streamText'> | undefined,
+    private readonly engine: (Pick<LLMEngine, 'streamText'> & Partial<Pick<LLMEngine, 'prepareStream'>>) | undefined,
     private readonly options: RuntimeOptions = {},
   ) {}
 
@@ -145,10 +146,16 @@ export class ChatRuntime {
       if (beforeProvider.cancelRequestedAt) throw new RuntimeFailure('STOPPED');
       controller.signal.throwIfAborted();
       if (!this.engine) throw new RuntimeFailure('SERVICE_UNAVAILABLE');
-      iterator = this.engine.streamText({
-        modelAlias: generation.modelId, messages, maxOutputTokens: 2048,
-        requestId: generation.id, caller: 'chat', signal: controller.signal,
-      })[Symbol.asyncIterator]();
+      const request = { modelAlias: generation.modelId, messages, maxOutputTokens: this.options.maxOutputTokens ?? 2048,
+        requestId: generation.id, caller: 'chat' as const, signal: controller.signal };
+      if (this.engine.prepareStream) {
+        const prepared = this.engine.prepareStream(request);
+        await this.repository.recordResolvedModel(ownerId, generation.id, prepared.identity);
+        controller.signal.throwIfAborted();
+        iterator = prepared.stream[Symbol.asyncIterator]();
+      } else {
+        iterator = this.engine.streamText(request)[Symbol.asyncIterator](); // Explicit stream-only test doubles.
+      }
       let lastCheckpointBytes = 0;
       let lastCheckpointAt = Date.now();
       while (true) {

@@ -1,4 +1,8 @@
+import { loadChatConfig, type ChatProviderConfig } from '../modules/llm/chat-bootstrap.js';
+
 export interface AppConfig {
+  readonly chatEnabled?: boolean;
+  readonly chat?: ChatProviderConfig;
   readonly port: number;
   readonly databaseUrl?: string;
   readonly nodeEnv: 'development' | 'production' | 'test';
@@ -126,6 +130,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const cookieSameSite = parseSameSite(env.COOKIE_SAME_SITE);
 
   const allowedOrigins = parseAllowedOrigins(env.ALLOWED_ORIGINS, nodeEnv === 'production');
+  const chat = loadChatConfig(env, nodeEnv === 'production');
 
   return {
     port,
@@ -134,5 +139,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     cookieSecure,
     cookieSameSite,
     allowedOrigins,
+    ...(chat ? { chat } : {}),
+    chatEnabled: Boolean(chat),
   };
 }
