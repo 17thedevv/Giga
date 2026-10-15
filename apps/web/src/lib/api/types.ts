@@ -37,7 +37,9 @@ export interface Message {
 
 export type GenerationStatus =
   | 'pending'
+  | 'queued'
   | 'streaming'
+  | 'running'
   | 'completed'
   | 'failed'
   | 'interrupted'

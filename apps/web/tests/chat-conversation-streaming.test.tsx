@@ -888,6 +888,340 @@ describe('17T-33 — GigaChat Conversation & Streaming UI Tests', () => {
       expect(screen.queryByText(/Response stopped by user/i)).toBeNull();
     });
 
+    it('bounded polling: first GET returns running, subsequent GET returns stopped', async () => {
+      const activeConv: Conversation = {
+        id: 'conv_poll_success',
+        title: 'Polling Success Test',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      vi.spyOn(realApiClient, 'listConversations').mockResolvedValue({
+        items: [activeConv],
+        nextCursor: null,
+      });
+      vi.spyOn(realApiClient, 'getConversation').mockResolvedValue({
+        conversation: activeConv,
+        messages: [],
+      });
+
+      // Cancel returns 202 with running generation
+      vi.spyOn(realApiClient, 'cancelGeneration').mockResolvedValue({
+        generation: {
+          id: 'gen_poll_success',
+          conversationId: 'conv_poll_success',
+          userMessageId: 'u1',
+          modelId: 'giga-chat-default',
+          status: 'running',
+          partialContent: 'Partial content while running...',
+          createdAt: new Date().toISOString(),
+        },
+      });
+
+      let getGenCallCount = 0;
+      const getGenSpy = vi.spyOn(realApiClient, 'getGeneration').mockImplementation(async () => {
+        getGenCallCount++;
+        if (getGenCallCount === 1) {
+          // First GET: still running
+          return {
+            generation: {
+              id: 'gen_poll_success',
+              conversationId: 'conv_poll_success',
+              userMessageId: 'u1',
+              modelId: 'giga-chat-default',
+              status: 'running',
+              partialContent: 'Partial content while running...',
+              createdAt: new Date().toISOString(),
+            },
+          };
+        }
+        // Subsequent GET: successfully transitioned to stopped
+        return {
+          generation: {
+            id: 'gen_poll_success',
+            conversationId: 'conv_poll_success',
+            userMessageId: 'u1',
+            modelId: 'giga-chat-default',
+            status: 'stopped',
+            partialContent: 'Final partial content stopped gracefully.',
+            finishReason: 'cancelled',
+            createdAt: new Date().toISOString(),
+          },
+        };
+      });
+
+      vi.spyOn(realApiClient, 'streamMessage').mockImplementation(
+        async (_convId, _content, onEvent, options) => {
+          onEvent({
+            event: 'message.started',
+            data: {
+              messageId: 'm1',
+              generationId: 'gen_poll_success',
+              conversationId: 'conv_poll_success',
+            },
+          });
+          onEvent({
+            event: 'message.delta',
+            data: {
+              messageId: 'm1',
+              generationId: 'gen_poll_success',
+              text: 'Streaming...',
+            },
+          });
+          await new Promise<void>((resolve) => {
+            options?.signal?.addEventListener('abort', () => resolve());
+          });
+        }
+      );
+
+      render(
+        <ApiModeProvider initialMode="real">
+          <AuthProvider>
+            <RouterProvider initialPath="/chat/conv_poll_success">
+              <ChatView />
+            </RouterProvider>
+          </AuthProvider>
+        </ApiModeProvider>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByPlaceholderText(/Ask Giga anything/i)).toBeDefined();
+      });
+
+      const input = screen.getByPlaceholderText(/Ask Giga anything/i) as HTMLTextAreaElement;
+      const form = input.closest('form')!;
+      fireEvent.change(input, { target: { value: 'Trigger poll stop' } });
+      fireEvent.submit(form);
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: 'Stop Generating' })).toBeDefined();
+      });
+
+      fireEvent.click(screen.getByRole('button', { name: 'Stop Generating' }));
+
+      // Fallback triggers: first GET returns running, then subsequent GET returns stopped
+      await waitFor(
+        () => {
+          expect(getGenSpy).toHaveBeenCalledTimes(2);
+          expect(
+            screen.getByText('Final partial content stopped gracefully.')
+          ).toBeDefined();
+        },
+        { timeout: 3000 }
+      );
+
+      // Reconciles to stopped cleanly
+      expect(screen.queryByRole('button', { name: 'Stop Generating' })).toBeNull();
+      expect(screen.queryByText(/AbortError/i)).toBeNull();
+    });
+
+    it('bounded polling: generation remains nonterminal beyond the first fallback', async () => {
+      const activeConv: Conversation = {
+        id: 'conv_stuck_test',
+        title: 'Stuck Nonterminal Test',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      vi.spyOn(realApiClient, 'listConversations').mockResolvedValue({
+        items: [activeConv],
+        nextCursor: null,
+      });
+      vi.spyOn(realApiClient, 'getConversation').mockResolvedValue({
+        conversation: activeConv,
+        messages: [],
+      });
+
+      vi.spyOn(realApiClient, 'cancelGeneration').mockResolvedValue({
+        generation: {
+          id: 'gen_stuck',
+          conversationId: 'conv_stuck_test',
+          userMessageId: 'u1',
+          modelId: 'giga-chat-default',
+          status: 'running',
+          partialContent: 'Server is stuck running...',
+          createdAt: new Date().toISOString(),
+        },
+      });
+
+      // getGeneration always returns running
+      const getGenSpy = vi.spyOn(realApiClient, 'getGeneration').mockResolvedValue({
+        generation: {
+          id: 'gen_stuck',
+          conversationId: 'conv_stuck_test',
+          userMessageId: 'u1',
+          modelId: 'giga-chat-default',
+          status: 'running',
+          partialContent: 'Server is stuck running...',
+          createdAt: new Date().toISOString(),
+        },
+      });
+
+      vi.spyOn(realApiClient, 'streamMessage').mockImplementation(
+        async (_convId, _content, onEvent, options) => {
+          onEvent({
+            event: 'message.started',
+            data: {
+              messageId: 'm1',
+              generationId: 'gen_stuck',
+              conversationId: 'conv_stuck_test',
+            },
+          });
+          await new Promise<void>((resolve) => {
+            options?.signal?.addEventListener('abort', () => resolve());
+          });
+        }
+      );
+
+      render(
+        <ApiModeProvider initialMode="real">
+          <AuthProvider>
+            <RouterProvider initialPath="/chat/conv_stuck_test">
+              <ChatView />
+            </RouterProvider>
+          </AuthProvider>
+        </ApiModeProvider>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByPlaceholderText(/Ask Giga anything/i)).toBeDefined();
+      });
+
+      const input = screen.getByPlaceholderText(/Ask Giga anything/i) as HTMLTextAreaElement;
+      const form = input.closest('form')!;
+      fireEvent.change(input, { target: { value: 'Trigger stuck generation' } });
+      fireEvent.submit(form);
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: 'Stop Generating' })).toBeDefined();
+      });
+
+      fireEvent.click(screen.getByRole('button', { name: 'Stop Generating' }));
+
+      // When retries are exhausted while still running:
+      // 1. Visible error banner surfaces with timeout explanation
+      await waitFor(
+        () => {
+          expect(
+            screen.getByText(/Generation cancellation is taking longer than expected/i)
+          ).toBeDefined();
+        },
+        { timeout: 3500 }
+      );
+
+      // 2. INVARIANT: Never fabricate a stopped state when generation remains nonterminal
+      expect(screen.queryByText(/Response stopped by user/i)).toBeNull();
+      expect(getGenSpy).toHaveBeenCalled();
+    });
+
+    it('cross-conversation fencing: async reconciliation for old conversation does not overwrite new conversation', async () => {
+      const conv1: Conversation = {
+        id: 'conv_1',
+        title: 'Conversation 1',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      const conv2: Conversation = {
+        id: 'conv_2',
+        title: 'Conversation 2',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      vi.spyOn(realApiClient, 'listConversations').mockResolvedValue({
+        items: [conv1, conv2],
+        nextCursor: null,
+      });
+
+      const conv2Msg: Message = {
+        id: 'msg_conv2',
+        conversationId: 'conv_2',
+        role: 'assistant',
+        content: 'Hello from Conversation 2',
+        createdAt: new Date().toISOString(),
+      };
+
+      vi.spyOn(realApiClient, 'getConversation').mockImplementation(async (id) => {
+        if (id === 'conv_1') {
+          return { conversation: conv1, messages: [] };
+        }
+        return { conversation: conv2, messages: [conv2Msg] };
+      });
+
+      const resolveRef = {
+        current: null as ((val: { generation: ChatGeneration }) => void) | null,
+      };
+      vi.spyOn(realApiClient, 'getGeneration').mockImplementation(
+        () =>
+          new Promise<{ generation: ChatGeneration }>((resolve) => {
+            resolveRef.current = resolve;
+          })
+      );
+
+      vi.spyOn(realApiClient, 'streamMessage').mockImplementation(
+        async (_convId, _content, onEvent) => {
+          onEvent({
+            event: 'message.started',
+            data: { messageId: 'm1', generationId: 'gen_old', conversationId: 'conv_1' },
+          });
+          // Abrupt disconnect triggers reconciliation
+          throw new TypeError('Network error');
+        }
+      );
+
+      render(
+        <ApiModeProvider initialMode="real">
+          <AuthProvider>
+            <RouterProvider initialPath="/chat/conv_1">
+              <ChatView />
+            </RouterProvider>
+          </AuthProvider>
+        </ApiModeProvider>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByPlaceholderText(/Ask Giga anything/i)).toBeDefined();
+      });
+
+      const input = screen.getByPlaceholderText(/Ask Giga anything/i) as HTMLTextAreaElement;
+      const form = input.closest('form')!;
+      fireEvent.change(input, { target: { value: 'Query on conv 1' } });
+      fireEvent.submit(form);
+
+      // Now user clicks on Conversation 2 in the sidebar
+      await waitFor(() => {
+        expect(screen.getByText('Conversation 2')).toBeDefined();
+      });
+      fireEvent.click(screen.getByText('Conversation 2'));
+
+      // In Conversation 2, message from conv 2 is displayed
+      await waitFor(() => {
+        expect(screen.getByText('Hello from Conversation 2')).toBeDefined();
+      });
+
+      // Now resolve the old getGeneration for conv 1 with completed status
+      resolveRef.current?.({
+        generation: {
+          id: 'gen_old',
+          conversationId: 'conv_1',
+          userMessageId: 'u1',
+          modelId: 'giga-chat-default',
+          status: 'completed',
+          partialContent: 'Stale conv 1 answer that should NOT appear in conv 2',
+          createdAt: new Date().toISOString(),
+        },
+      });
+
+      // Give event loop time to settle
+      await new Promise((r) => setTimeout(r, 100));
+
+      // Assert conv 2's message is preserved and stale conv 1 message never leaked into conv 2!
+      expect(screen.getByText('Hello from Conversation 2')).toBeDefined();
+      expect(
+        screen.queryByText('Stale conv 1 answer that should NOT appear in conv 2')
+      ).toBeNull();
+    });
+
     it('fencing conversation creation: starting from /chat creates conversation and preserves optimistic user turn', async () => {
       vi.spyOn(realApiClient, 'listConversations').mockResolvedValue({
         items: [],
