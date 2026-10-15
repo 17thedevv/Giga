@@ -29,13 +29,13 @@ it('008 upgrades populated 007 preserving output/selection/keys and leaves legac
     const tables = ['messages', 'chat_turn_selections', 'chat_operation_keys'];
     const snapshots = await Promise.all(tables.map((table) => pool.query(`SELECT * FROM ${table} ORDER BY 1,2`)));
     const before = await pool.query('SELECT id,status,partial_content,assistant_message_id,finished_at,action FROM chat_generations');
-    assert.deepEqual(await runMigrations(pool), ['008_chat_resolved_model']);
+    assert.deepEqual(await runMigrations(pool, MIGRATIONS.filter((m) => m.version <= 8)), ['008_chat_resolved_model']);
     assert.deepEqual((await pool.query('SELECT id,status,partial_content,assistant_message_id,finished_at,action FROM chat_generations')).rows, before.rows);
     for (let i = 0; i < tables.length; i++) assert.deepEqual((await pool.query(`SELECT * FROM ${tables[i]} ORDER BY 1,2`)).rows, snapshots[i]!.rows);
     assert.deepEqual((await pool.query('SELECT resolved_provider_id,resolved_model_id FROM chat_generations')).rows, [{ resolved_provider_id: null, resolved_model_id: null }]);
     const sql = await readFile(new URL('../../src/db/migrations/008_chat_resolved_model.sql', import.meta.url), 'utf8');
     assert.equal(MIGRATIONS.find((m) => m.version === 8)!.sql.trim(), sql.replace(/\r\n/g, '\n').trim());
-    assert.deepEqual(await runMigrations(pool), []);
+    assert.deepEqual(await runMigrations(pool, MIGRATIONS.filter((m) => m.version <= 8)), []);
     await assert.rejects(pool.query(`INSERT INTO chat_generations (owner_id,conversation_id,user_message_id,model_alias,status,idempotency_key,request_fingerprint,resolved_provider_id)
       VALUES ($1,$2,$3,'giga-chat-default','failed',$4,$5,'gemini')`, [owner, conv, user, randomUUID(), 'e'.repeat(64)]));
   } finally {

@@ -1,6 +1,8 @@
 import { loadChatConfig, type ChatProviderConfig } from '../modules/llm/chat-bootstrap.js';
+import { CredentialEncryption } from '../modules/credentials/encryption.js';
 
 export interface AppConfig {
+  readonly credentialEncryption?: CredentialEncryption;
   readonly chatEnabled?: boolean;
   readonly chat?: ChatProviderConfig;
   readonly port: number;
@@ -131,6 +133,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
 
   const allowedOrigins = parseAllowedOrigins(env.ALLOWED_ORIGINS, nodeEnv === 'production');
   const chat = loadChatConfig(env, nodeEnv === 'production');
+  // Missing key disables BYOK in every environment, including production. A
+  // supplied malformed key fails startup; platform Chat remains independently usable.
+  const credentialEncryption = env.CREDENTIAL_ENCRYPTION_KEY === undefined ? undefined
+    : new CredentialEncryption(env.CREDENTIAL_ENCRYPTION_KEY);
 
   return {
     port,
@@ -141,5 +147,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     allowedOrigins,
     ...(chat ? { chat } : {}),
     chatEnabled: Boolean(chat),
+    ...(credentialEncryption ? { credentialEncryption } : {}),
   };
 }

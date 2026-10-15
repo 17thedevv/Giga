@@ -159,6 +159,23 @@ export class ProviderFailureError extends LLMError {
   }
 }
 
+export class BYOKCredentialInvalidError extends LLMError {
+  public readonly code = 'BYOK_CREDENTIAL_INVALID';
+  constructor() { super('The selected Chat credential was rejected', 422); }
+}
+
+export class ChatCredentialUnavailableError extends LLMError {
+  public readonly code = 'CHAT_CREDENTIAL_UNAVAILABLE';
+  constructor() { super('Chat credential is unavailable; configure Chat credentials', 503); }
+}
+
+/** Safe classification for Chat BYOK; existing platform generation errors stay unchanged. */
+export class BYOKProviderError extends LLMError {
+  constructor(public readonly code: 'PROVIDER_RATE_LIMIT' | 'PROVIDER_UNAVAILABLE' | 'PROVIDER_TIMEOUT') {
+    super('The user provider account could not complete the request', code === 'PROVIDER_RATE_LIMIT' ? 429 : code === 'PROVIDER_TIMEOUT' ? 504 : 503);
+  }
+}
+
 export class LLMCancelledError extends LLMError {
   public readonly code = 'LLM_CANCELLED';
 
