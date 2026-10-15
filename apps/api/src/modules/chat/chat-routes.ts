@@ -39,5 +39,13 @@ export function createChatRoutes(runtime: ChatRuntime, auth: AuthService): Hono 
     const generation = await runtime.get(c.get('user').id, validateUuid(c.req.param('id')), validateUuid(c.req.param('generationId')));
     return c.json({ generation });
   });
+  router.post('/:id/generations/:generationId/cancel', bodyLimit({ maxSize: 1, onError: () => {
+    throw new ValidationError('Cancel requires an empty body');
+  } }), async (c) => {
+    if ((await c.req.text()) !== '') throw new ValidationError('Cancel requires an empty body');
+    const result = await runtime.cancel(c.get('user').id, validateUuid(c.req.param('id')),
+      validateUuid(c.req.param('generationId')), c.req.header('Idempotency-Key'));
+    return c.json({ generation: result.generation }, result.accepted ? 202 : 200);
+  });
   return router;
 }

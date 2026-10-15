@@ -4,10 +4,16 @@ import type { LLMEngine } from '../llm/engine.js';
 import type { LLMStreamEvent } from '../llm/types.js';
 import {
   MAX_OUTPUT_BYTES, MAX_PROMPT_BYTES, SAFE_GENERATION_ERROR,
-  type Admission, type ChatGeneration, type EventSink, type GenerationRepository,
+  type Admission, type Cancellation, type ChatGeneration, type EventSink, type GenerationRepository,
 } from './types.js';
+import { validateIdempotencyKey } from './chat-validation.js';
 
 export const CHAT_MODEL_ALIAS = 'giga-chat-default';
+export const MAX_ACTIVE_GENERATIONS = 256;
+interface ActiveGeneration {
+  readonly ownerId: string;
+  readonly controller: AbortController;
+}
 export interface RuntimeOptions {
   readonly totalTimeoutMs?: number;
   readonly idleTimeoutMs?: number;
@@ -39,6 +45,8 @@ async function bounded<T>(promise: Promise<T>, signal: AbortSignal, timeoutMs: n
 }
 
 export class ChatRuntime {
+  private readonly active = new Map<string, ActiveGeneration>();
+  get activeGenerationCount(): number { return this.active.size; }
   constructor(
     private readonly repository: GenerationRepository,
     private readonly engine: Pick<LLMEngine, 'streamText'> | undefined,
@@ -47,9 +55,7 @@ export class ChatRuntime {
 
   async admit(ownerId: string, conversationId: string, body: unknown, key: string | undefined): Promise<Admission> {
     await this.repository.authorize(ownerId, conversationId);
-    if (!key || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(key)) {
-      throw new ValidationError('Idempotency-Key must be 1-128 ASCII letters, digits, dots, underscores, colons or hyphens');
-    }
+    const validatedKey = validateIdempotencyKey(key);
     if (!body || typeof body !== 'object' || Array.isArray(body)) throw new ValidationError('Expected a JSON object');
     const input = body as Record<string, unknown>;
     if (Object.keys(input).some((name) => name !== 'content' && name !== 'modelId')) throw new ValidationError('Unknown request field');
@@ -60,15 +66,34 @@ export class ChatRuntime {
     if (modelId !== CHAT_MODEL_ALIAS) throw new ValidationError('Unsupported model alias');
     if (!this.engine) throw new AppError('SERVICE_UNAVAILABLE', 'Chat model is not configured', 503);
     const fingerprint = createHash('sha256').update(JSON.stringify([conversationId, input.content, modelId])).digest('hex');
-    return this.repository.admit({ ownerId, conversationId, content: input.content, modelId, key, fingerprint });
+    return this.repository.admit({ ownerId, conversationId, content: input.content, modelId, key: validatedKey, fingerprint });
   }
 
   get(ownerId: string, conversationId: string, generationId: string): Promise<ChatGeneration> {
     return this.repository.get(ownerId, conversationId, generationId);
   }
 
+  async cancel(ownerId: string, conversationId: string, generationId: string, key: string | undefined): Promise<Cancellation> {
+    // Ownership is checked before key binding or any process-local signal.
+    await this.repository.get(ownerId, conversationId, generationId);
+    const result = await this.repository.requestCancel(ownerId, conversationId, generationId, validateIdempotencyKey(key));
+    if (!result.accepted) return result;
+    const entry = this.active.get(generationId);
+    if (entry?.ownerId === ownerId) {
+      // requestCancel has committed. Abort is an optimization; DB intent fences completion.
+      entry.controller.abort(new RuntimeFailure('STOPPED'));
+      return result; // 202 reports durable intent; the owning run finalizes its full buffer.
+    }
+    // Pending or another worker: finalize checkpointed text. Remote provider abort is not instant.
+    const generation = await this.repository.finalize(ownerId, result.generation, result.generation.partialContent, 'interrupted', 'INTERRUPTED');
+    return { ...result, generation };
+  }
+
   async run(ownerId: string, generation: ChatGeneration, sink: EventSink, signal: AbortSignal): Promise<void> {
     const controller = new AbortController();
+    const entry: ActiveGeneration = { ownerId, controller };
+    const registered = this.active.size < MAX_ACTIVE_GENERATIONS && !this.active.has(generation.id);
+    if (registered) this.active.set(generation.id, entry);
     const onAbort = (): void => controller.abort(new RuntimeFailure('INTERRUPTED'));
     signal.addEventListener('abort', onAbort, { once: true });
     if (signal.aborted) onAbort();
@@ -91,8 +116,11 @@ export class ChatRuntime {
     try {
       controller.signal.throwIfAborted();
       await send({ event: 'message.started', data: { ...identity, conversationId: generation.conversationId } });
+      if (!registered) throw new RuntimeFailure('RUNTIME_CAPACITY');
       await this.repository.start(ownerId, generation.id);
       const messages = await this.repository.context(ownerId, generation);
+      const beforeProvider = await this.repository.get(ownerId, generation.conversationId, generation.id);
+      if (beforeProvider.cancelRequestedAt) throw new RuntimeFailure('STOPPED');
       controller.signal.throwIfAborted();
       if (!this.engine) throw new RuntimeFailure('SERVICE_UNAVAILABLE');
       iterator = this.engine.streamText({
@@ -105,6 +133,11 @@ export class ChatRuntime {
         const next = await bounded(iterator.next(), controller.signal, this.options.idleTimeoutMs ?? 15000);
         controller.signal.throwIfAborted();
         if (next.done) throw new RuntimeFailure('UPSTREAM_ERROR');
+        // Observe another worker's durable Stop before accepting further provider output.
+        const current = await this.repository.get(ownerId, generation.conversationId, generation.id);
+        if (current.cancelRequestedAt) throw new RuntimeFailure('STOPPED');
+        if (current.status !== 'streaming') throw new RuntimeFailure('INTERRUPTED');
+        controller.signal.throwIfAborted();
         const event = next.value;
         if (event.type === 'text.delta') {
           if (typeof event.text !== 'string') throw new RuntimeFailure('UPSTREAM_ERROR');
@@ -135,7 +168,18 @@ export class ChatRuntime {
       const code = interrupted ? 'INTERRUPTED' : error instanceof RuntimeFailure ? error.code : 'GENERATION_FAILED';
       // A persistent DB outage can prevent failure persistence; GET remains authoritative.
       // Never replace a committed terminal state, including an ambiguous COMMIT response.
-      try { await this.repository.fail(ownerId, generation.id, text, interrupted ? 'interrupted' : 'failed', code); } catch { /* no fabricated success */ }
+      let persisted: ChatGeneration | undefined;
+      try { persisted = await this.repository.finalize(ownerId, generation, text, interrupted ? 'interrupted' : 'failed', code); } catch { /* no fabricated success */ }
+      if (persisted?.status === 'stopped') {
+        if (!interrupted) {
+          try { await send({ event: 'message.stopped', data: { ...identity, finishReason: 'cancelled' } }); } catch { /* reconcile through GET */ }
+        }
+        return;
+      }
+      if (persisted?.status === 'completed') return;
+      const stopRequested = (error instanceof RuntimeFailure && error.code === 'STOPPED') ||
+        (controller.signal.reason instanceof RuntimeFailure && controller.signal.reason.code === 'STOPPED');
+      if (!persisted && stopRequested) return;
       if (!interrupted) {
         const safeError = { code, message: SAFE_GENERATION_ERROR };
         try {
@@ -146,6 +190,7 @@ export class ChatRuntime {
     } finally {
       clearTimeout(totalTimer);
       signal.removeEventListener('abort', onAbort);
+      if (this.active.get(generation.id) === entry) this.active.delete(generation.id);
       controller.abort();
       // Do not await teardown of an uncooperative provider. Late iterator results have no writer.
       try { void iterator?.return?.().catch(() => {}); } catch { /* adapter teardown */ }

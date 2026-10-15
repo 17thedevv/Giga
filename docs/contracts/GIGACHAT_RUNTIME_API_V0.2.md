@@ -2,10 +2,80 @@
 
 > **DRAFT, NOT FROZEN.** Product design accepted on 2026-10-13; exact endpoints, DTOs, new SSE event types and browser compatibility still require Trà/Thư review. Tracking [17T-25](https://linear.app/17thedev/issue/17T-25/specify-gigachat-runtime-and-shared-llm-engine-v02). Read [Runtime](../architecture/GIGACHAT_RUNTIME_V0.2.md), [LLM Engine](../architecture/LLM_ENGINE_V0.1.md), [API v0.1](API_CONTRACT_V0.1.md) and ADR-001.
 
+## Durable Stop implementation candidate — 17T-34
+
+This DRAFT addition follows [17T-32](https://linear.app/17thedev/issue/17T-32) and is the
+backend candidate for [17T-33](https://linear.app/17thedev/issue/17T-33) consumers.
+Thư review is pending. No frontend control or Retry/Regenerate transport is added.
+
+| Existing behavior | Addition | Compatibility / review |
+|---|---|---|
+| POST stream and GET generation | POST `/api/v1/conversations/:id/generations/:generationId/cancel` | Additive; same session/strict Origin/CSRF middleware |
+| Five generation statuses | Terminal `stopped`, finish reason `cancelled`, optional `cancelRequestedAt` | DTO enum extension requires consumer review |
+| completed / failed SSE terminal | `message.stopped` | Parser must recognize exactly one terminal |
+| Prompt keys | Shared owner-scoped prompt/cancel key namespace | Keys cannot switch operation or generation, including after deletion |
+
+Cancel accepts **zero body bytes**; `{}`, null, whitespace and provider/model fields yield
+400 `VALIDATION_ERROR`. Required Idempotency-Key uses the same 1–128 ASCII character
+policy as prompt admission. Missing/invalid session yields 401, invalid Origin yields 403,
+and cross-owner or mismatched conversation/generation IDs yield non-disclosing 404 before
+any abort or key binding. No provider/model information is accepted.
+
+| Cancel outcome | HTTP / envelope |
+|---|---|
+| Valid key on pending/streaming generation | 202 `{generation}`; intent has committed |
+| Same key while still active with intent | 202 `{generation}`; original intent timestamp preserved |
+| Same key after finalization | 200 `{generation}`; authoritative terminal DTO unchanged |
+| Fresh key on an already completed/failed/interrupted/stopped row | 200 `{generation}`; generation unchanged; operation key bound |
+| This owner's key already belongs to another generation or prompt operation | 409 `{error:{code:'CONFLICT',message}}`, even for terminal targets |
+
+202 means durable intent, not guaranteed provider shutdown. It may return pending/streaming
+with `cancelRequestedAt`; GET or the original SSE reconciles finalization. Without a local
+run, cancel finalizes stopped from persisted partial text before responding. With a local
+run, provider abort occurs only after intent commits; the runner finalizes its full bounded
+buffer. A stopped generation has no assistant message or error. Provider finish `stop`
+still means normal completion; user Stop means `cancelled`.
+
+Connected SSE after Stop wins is one `message.started`, zero or more `message.delta`,
+then exactly one terminal:
+
+```text
+event: message.stopped
+data: {"messageId":"assistant-id","generationId":"generation-id","finishReason":"cancelled"}
+```
+
+Ordinary Stop emits no `stream.error`, `message.failed` or `message.completed`. A disconnected
+stream may receive no terminal; GET remains authoritative. Browser abort without durable
+cancel remains interrupted. If completion commits first, cancel returns unchanged completed
+state. If intent commits first, completion cannot insert an assistant message. All
+finalizers lock conversation then generation and preserve the terminal winner.
+
+Migration 006 replaces 005's generated status/finish CHECKs by explicit names, preserves the
+completed check and active index, and guards terminal status changes. `chat_operation_keys`
+is the equivalent durable cancel identity: `(owner_id,idempotency_key)` binds operation +
+generation and backfills existing prompt keys. Identity tombstones store no prompt/output
+and survive conversation deletion until owner deletion, preventing reuse for another
+operation. Another owner's independent key namespace grants no access to this owner.
+
+The local registry is capped at 256 controllers per coordinator, owner-checked, registered
+only during `run()` and removed in `finally`. Overflow uses the failed-stream path with
+safe code `RUNTIME_CAPACITY`. Immediate abort works only for the **same coordinator instance**.
+No cross-worker signal, LISTEN/NOTIFY or background polling is implemented. A different
+coordinator finalizes stopped from the last persisted checkpoint. The owning runner reads
+DB state before accepting each normalized event and fences completion transactionally;
+it observes remote Stop at the next event or existing deadline. Remote Stop can preserve
+only checkpointed partial text; uncheckpointed memory is not shared. These are DB reads,
+not a per-token durable write log.
+
+If DB access fails after intent commits, stopped finalization may be delayed. A known
+ordinary Stop fabricates no failed/success terminal. GET, repeated cancel or stale-admission
+recovery reconciles state. Review questions: 202/200 semantics, enum/event extension, key
+retention, remote checkpoint behavior and deployed-browser compatibility. API v1 is DRAFT.
+
 ## Implementation candidate — 17T-32
 
 This first backend slice implements only POST `messages:stream` and GET generation reconciliation.
-The sections below continue to describe future design candidates. Cancel, Retry/Regenerate,
+The original slice deferred Cancel (now specified above). Retry/Regenerate,
 model discovery, assistant variants, Memory, Skills composition, usage and quotas are deferred.
 
 | Previous draft/mock behavior | This implementation candidate | Consumers / compatibility |
@@ -107,6 +177,7 @@ interface ChatGeneration {
   createdAt: string;
   startedAt?: string;
   finishedAt?: string;
+  cancelRequestedAt?: string;
 }
 ~~~
 

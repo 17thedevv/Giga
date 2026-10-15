@@ -1,7 +1,7 @@
 import type { ModelMessage } from '../llm/types.js';
 
-export type GenerationStatus = 'pending' | 'streaming' | 'completed' | 'failed' | 'interrupted';
-export type ChatFinishReason = 'stop' | 'length' | 'other';
+export type GenerationStatus = 'pending' | 'streaming' | 'completed' | 'failed' | 'interrupted' | 'stopped';
+export type ChatFinishReason = 'stop' | 'length' | 'other' | 'cancelled';
 export interface ChatGeneration {
   readonly id: string;
   readonly conversationId: string;
@@ -15,6 +15,7 @@ export interface ChatGeneration {
   readonly createdAt: string;
   readonly startedAt?: string;
   readonly finishedAt?: string;
+  readonly cancelRequestedAt?: string;
 }
 
 export const SAFE_GENERATION_ERROR = 'Generation could not be completed';
@@ -33,6 +34,7 @@ export interface AdmissionInput {
   readonly fingerprint: string;
 }
 export type Admission = { readonly generation: ChatGeneration; readonly duplicate: boolean };
+export type Cancellation = { readonly generation: ChatGeneration; readonly accepted: boolean };
 export interface GenerationRepository {
   authorize(ownerId: string, conversationId: string): Promise<void>;
   admit(input: AdmissionInput): Promise<Admission>;
@@ -40,12 +42,13 @@ export interface GenerationRepository {
   context(ownerId: string, generation: ChatGeneration): Promise<readonly ModelMessage[]>;
   start(ownerId: string, id: string): Promise<void>;
   checkpoint(ownerId: string, id: string, text: string): Promise<void>;
+  requestCancel(ownerId: string, conversationId: string, id: string, key: string): Promise<Cancellation>;
   complete(ownerId: string, generation: ChatGeneration, text: string, reason: ChatFinishReason): Promise<ChatGeneration>;
-  fail(ownerId: string, id: string, text: string, status: 'failed' | 'interrupted', code: string): Promise<void>;
+  finalize(ownerId: string, generation: ChatGeneration, text: string, status: 'failed' | 'interrupted', code: string): Promise<ChatGeneration>;
 }
 
 export interface ChatEvent {
-  readonly event: 'message.started' | 'message.delta' | 'message.completed' | 'stream.error' | 'message.failed';
+  readonly event: 'message.started' | 'message.delta' | 'message.completed' | 'stream.error' | 'message.failed' | 'message.stopped';
   readonly data: Readonly<Record<string, unknown>>;
 }
 export type EventSink = (event: ChatEvent) => Promise<void>;
