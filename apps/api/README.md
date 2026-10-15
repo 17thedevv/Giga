@@ -239,7 +239,7 @@ server alias `giga-chat-default`. No provider is configured by default: unconfig
 admission returns 503 and never falls back to a fake response. FakeProvider is test-only.
 
 GET `/api/v1/conversations/:id/generations/:generationId` reconciles durable state after
-refresh/disconnect without repeating the provider. Apply migrations through 006 with the existing
+refresh/disconnect without repeating the provider. Apply migrations through 007 with the existing
 migration runner before enabling these routes. See the [DRAFT contract](../../docs/contracts/GIGACHAT_RUNTIME_API_V0.2.md)
 and [verification/handoff](../../docs/evidence/17t-32-chat-runtime.md) for limits and review gates.
 
@@ -251,4 +251,13 @@ abort alone remains `interrupted`. Keys cannot switch prompt/cancel operation or
 Immediate provider abort is local to the owning coordinator; remote cancellation uses DB
 fencing and checkpointed partial text. See the [Stop candidate](../../docs/contracts/GIGACHAT_RUNTIME_API_V0.2.md#durable-stop-implementation-candidate--17t-34)
 and [cancel handoff](../../docs/evidence/17t-34-chat-cancel.md). API v1 remains DRAFT.
+
+POST `/api/v1/conversations/:id/generations:stream` accepts
+`{userMessageId,action:'retry'|'regenerate',modelId?}` and a fresh `Idempotency-Key`.
+It reuses the latest user message and streams through the same runtime/Stop lifecycle.
+Retry requires a failed/stopped/interrupted latest attempt; regenerate requires a completed
+answer. Only durable completion changes the selected variant. GET
+`/api/v1/conversations/:id/messages/:userMessageId/generations` inspects latest-turn safe
+variant metadata and completed text. Ordinary history/context use one selected answer.
+See the [17T-35 DRAFT candidate](../../docs/contracts/GIGACHAT_RUNTIME_API_V0.2.md#streamed-retry--regenerate-candidate--17t-35).
 

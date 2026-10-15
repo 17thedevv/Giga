@@ -4,9 +4,10 @@ import type { LLMEngine } from '../llm/engine.js';
 import type { LLMStreamEvent } from '../llm/types.js';
 import {
   MAX_OUTPUT_BYTES, MAX_PROMPT_BYTES, SAFE_GENERATION_ERROR,
-  type Admission, type Cancellation, type ChatGeneration, type EventSink, type GenerationRepository,
+  type Admission, type Cancellation, type ChatGeneration, type ChatTurnVariants, type EventSink, type GenerationRepository,
 } from './types.js';
 import { validateIdempotencyKey } from './chat-validation.js';
+import { validateUuid } from '../conversations/conversations-validation.js';
 
 export const CHAT_MODEL_ALIAS = 'giga-chat-default';
 export const MAX_ACTIVE_GENERATIONS = 256;
@@ -71,6 +72,27 @@ export class ChatRuntime {
 
   get(ownerId: string, conversationId: string, generationId: string): Promise<ChatGeneration> {
     return this.repository.get(ownerId, conversationId, generationId);
+  }
+
+  async admitVariant(ownerId: string, conversationId: string, body: unknown, key: string | undefined): Promise<Admission> {
+    await this.repository.authorize(ownerId, conversationId);
+    const validatedKey = validateIdempotencyKey(key);
+    if (!body || typeof body !== 'object' || Array.isArray(body)) throw new ValidationError('Expected a JSON object');
+    const input = body as Record<string, unknown>;
+    if (Object.keys(input).some((name) => !['userMessageId', 'action', 'modelId'].includes(name))) throw new ValidationError('Unknown request field');
+    if (typeof input.userMessageId !== 'string') throw new ValidationError('Expected userMessageId');
+    const userMessageId = validateUuid(input.userMessageId).toLowerCase();
+    conversationId = conversationId.toLowerCase();
+    if (input.action !== 'retry' && input.action !== 'regenerate') throw new ValidationError('Unsupported generation action');
+    const modelId = input.modelId === undefined ? CHAT_MODEL_ALIAS : input.modelId;
+    if (modelId !== CHAT_MODEL_ALIAS) throw new ValidationError('Unsupported model alias');
+    if (!this.engine) throw new AppError('SERVICE_UNAVAILABLE', 'Chat model is not configured', 503);
+    const fingerprint = createHash('sha256').update(JSON.stringify([conversationId, input.action, userMessageId, modelId])).digest('hex');
+    return this.repository.admit({ ownerId, conversationId, userMessageId, action: input.action, modelId, key: validatedKey, fingerprint });
+  }
+
+  variants(ownerId: string, conversationId: string, userMessageId: string): Promise<ChatTurnVariants> {
+    return this.repository.variants(ownerId, conversationId.toLowerCase(), userMessageId.toLowerCase());
   }
 
   async cancel(ownerId: string, conversationId: string, generationId: string, key: string | undefined): Promise<Cancellation> {

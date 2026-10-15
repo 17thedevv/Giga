@@ -883,6 +883,7 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
     });
 
     // 0. Ensure version 2 is unapplied initially to simulate late arrival after 1 and 3
+    await testDb.pool.query('DROP TABLE IF EXISTS chat_turn_selections;');
     await testDb.pool.query('DROP TABLE IF EXISTS chat_generations;');
     if (testDb.isMemory) {
       // pg-mem leaves index names behind after DROP TABLE.
@@ -891,8 +892,15 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
     }
     await testDb.pool.query('DELETE FROM schema_migrations WHERE version = 5;');
     await testDb.pool.query('DELETE FROM schema_migrations WHERE version = 6;');
+    await testDb.pool.query('DELETE FROM schema_migrations WHERE version = 7;');
     await testDb.pool.query('DROP TABLE IF EXISTS messages CASCADE;');
     await testDb.pool.query('DROP TABLE IF EXISTS conversations CASCADE;');
+    if (testDb.isMemory) {
+      // pg-mem retains indexes introduced by 007 after their tables are dropped.
+      for (const index of ['chat_turn_selections_pkey', 'uq_generation_selection_scope', 'idx_chat_turn_attempts', 'uq_conversation_owner', 'uq_message_turn_scope']) {
+        await testDb.pool.query(`DROP INDEX IF EXISTS ${index}`);
+      }
+    }
     try {
       await testDb.pool.query('DROP INDEX IF EXISTS messages_pkey;');
       await testDb.pool.query('DROP INDEX IF EXISTS conversations_pkey;');

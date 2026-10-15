@@ -36,13 +36,14 @@ it('006 upgrades an existing populated 005 schema, preserves all rows and is ide
       assert.ok(names.rows.some((r) => r.conname === 'chat_generations_status_check'));
       assert.ok(names.rows.some((r) => r.conname === 'chat_generations_finish_reason_check'));
     }
-    assert.deepEqual(await runMigrations(pool), ['006_chat_generation_cancel']);
+    const through006 = MIGRATIONS.filter((m) => m.version <= 6);
+    assert.deepEqual(await runMigrations(pool, through006), ['006_chat_generation_cancel']);
     assert.deepEqual((await pool.query('SELECT id,status,partial_content,assistant_message_id,finished_at FROM chat_generations ORDER BY id')).rows, before.rows);
     assert.equal((await pool.query('SELECT * FROM chat_operation_keys')).rows.length, 4);
     const sql = await readFile(new URL('../../src/db/migrations/006_chat_generation_cancel.sql', import.meta.url), 'utf8');
     assert.equal(MIGRATIONS.find((m) => m.version === 6)!.sql.trim(), sql.replace(/\r\n/g, '\n').trim());
     await pool.query(sql);
-    assert.deepEqual(await runMigrations(pool), []);
+    assert.deepEqual(await runMigrations(pool, through006), []);
     const pending = (await pool.query("SELECT id FROM chat_generations WHERE status = 'pending'")).rows[0]!.id;
     await pool.query("UPDATE chat_generations SET status = 'stopped', cancel_requested_at = NOW(), finished_at = NOW(), finish_reason = 'cancelled' WHERE id = $1", [pending]);
     assert.equal((await pool.query('SELECT status FROM chat_generations WHERE id = $1', [pending])).rows[0].status, 'stopped');

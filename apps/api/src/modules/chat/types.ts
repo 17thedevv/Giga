@@ -2,6 +2,21 @@ import type { ModelMessage } from '../llm/types.js';
 
 export type GenerationStatus = 'pending' | 'streaming' | 'completed' | 'failed' | 'interrupted' | 'stopped';
 export type ChatFinishReason = 'stop' | 'length' | 'other' | 'cancelled';
+export type GenerationAction = 'new_prompt' | 'retry' | 'regenerate';
+export interface ChatTurnVariants {
+  readonly userMessageId: string;
+  readonly selectedGenerationId: string | null;
+  readonly items: readonly {
+    readonly id: string;
+    readonly action: GenerationAction;
+    readonly modelId: string;
+    readonly status: GenerationStatus;
+    readonly assistantMessageId?: string;
+    readonly content?: string;
+    readonly createdAt: string;
+    readonly finishedAt?: string;
+  }[];
+}
 export interface ChatGeneration {
   readonly id: string;
   readonly conversationId: string;
@@ -25,20 +40,21 @@ export const MAX_CONTEXT_BYTES = 65536;
 // Admission also reclaims crashed workers after this bound. All mutations are fenced by status.
 export const GENERATION_LIFETIME_MS = 120000;
 
-export interface AdmissionInput {
+export type AdmissionInput = {
   readonly ownerId: string;
   readonly conversationId: string;
-  readonly content: string;
   readonly modelId: string;
   readonly key: string;
   readonly fingerprint: string;
-}
+} & ({ readonly content: string; readonly action?: never; readonly userMessageId?: never }
+  | { readonly userMessageId: string; readonly action: 'retry' | 'regenerate'; readonly content?: never });
 export type Admission = { readonly generation: ChatGeneration; readonly duplicate: boolean };
 export type Cancellation = { readonly generation: ChatGeneration; readonly accepted: boolean };
 export interface GenerationRepository {
   authorize(ownerId: string, conversationId: string): Promise<void>;
   admit(input: AdmissionInput): Promise<Admission>;
   get(ownerId: string, conversationId: string, id: string): Promise<ChatGeneration>;
+  variants(ownerId: string, conversationId: string, userMessageId: string): Promise<ChatTurnVariants>;
   context(ownerId: string, generation: ChatGeneration): Promise<readonly ModelMessage[]>;
   start(ownerId: string, id: string): Promise<void>;
   checkpoint(ownerId: string, id: string, text: string): Promise<void>;

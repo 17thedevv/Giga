@@ -52,7 +52,9 @@ The [17T-32 implementation candidate](GIGACHAT_RUNTIME_API_V0.2.md#implementatio
 specifies the first persisted POST stream + GET generation slice, required Idempotency-Key,
 duplicate reconciliation and failed terminal events. The
 [17T-34 durable Stop candidate](GIGACHAT_RUNTIME_API_V0.2.md#durable-stop-implementation-candidate--17t-34)
-adds cancel, stopped state and a stopped SSE terminal. Retry/Regenerate remains unresolved.
+adds cancel, stopped state and a stopped SSE terminal. The
+[17T-35 streamed variant candidate](GIGACHAT_RUNTIME_API_V0.2.md#streamed-retry--regenerate-candidate--17t-35)
+adds latest-turn Retry/Regenerate SSE, variant inspection and completed-only selection.
 API v1 remains DRAFT.
 
 > **2026-10-13 approved product direction, proposed technical detail:** See [GigaChat Runtime v0.2](../architecture/GIGACHAT_RUNTIME_V0.2.md), [Shared LLM Engine v0.1](../architecture/LLM_ENGINE_V0.1.md) and [Runtime API/SSE addendum](GIGACHAT_RUNTIME_API_V0.2.md). The existing POST stream route and message.started/delta/completed core remain a DRAFT starting point. Generation status + Stop + streamed retry/regenerate transport, additive terminal events and idempotency header still require Trà/Thư compatibility review; they are **not implemented or frozen**.

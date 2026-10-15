@@ -8,6 +8,7 @@ export interface ConversationDbRow {
   title: string;
   created_at: Date;
   updated_at: Date;
+  cursor_updated_at?: string;
 }
 
 export function mapRowToConversation(row: ConversationDbRow): Conversation {
@@ -75,7 +76,8 @@ export class ConversationRepository {
 
     if (params.cursor) {
       query = `
-        SELECT id, user_id, title, created_at, updated_at
+        SELECT id, user_id, title, created_at, updated_at,
+          to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_updated_at
         FROM conversations
         WHERE user_id = $1
           AND (
@@ -88,7 +90,8 @@ export class ConversationRepository {
       values = [params.userId, params.cursor.updatedAt, params.cursor.id, params.limit + 1];
     } else {
       query = `
-        SELECT id, user_id, title, created_at, updated_at
+        SELECT id, user_id, title, created_at, updated_at,
+          to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_updated_at
         FROM conversations
         WHERE user_id = $1
         ORDER BY updated_at DESC, id DESC
@@ -107,7 +110,8 @@ export class ConversationRepository {
       const lastItem = items[items.length - 1];
       if (lastItem) {
         nextCursor = encodeCursor({
-          updatedAt: lastItem.updatedAt,
+          // pg Date parsing truncates microseconds. Keep DB precision in opaque cursors.
+          updatedAt: rows[rows.length - 1]!.cursor_updated_at ?? lastItem.updatedAt,
           id: lastItem.id,
         });
       }

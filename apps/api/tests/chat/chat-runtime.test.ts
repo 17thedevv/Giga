@@ -11,7 +11,7 @@ import { UserRepository } from '../../src/db/repositories/user-repository.js';
 import { generateSessionToken, hashSessionToken, SESSION_COOKIE_NAME } from '../../src/modules/auth/session.js';
 import { ChatRuntime, CHAT_MODEL_ALIAS, type RuntimeOptions } from '../../src/modules/chat/chat-runtime.js';
 import { PostgresGenerationRepository } from '../../src/modules/chat/generation-repository.js';
-import type { ChatEvent, ChatGeneration } from '../../src/modules/chat/types.js';
+import type { ChatEvent, ChatGeneration, ChatTurnVariants } from '../../src/modules/chat/types.js';
 import { LLMEngine, ModelRegistry, type LLMRequest, type LLMStreamEvent } from '../../src/modules/llm/index.js';
 import { FakeProvider, type FakeProviderOptions } from '../../src/modules/llm/testing/fake-provider.js';
 
@@ -70,6 +70,382 @@ describe('Persisted Chat Runtime', { timeout: 30000 }, () => {
     const result = await db.pool.query('SELECT id FROM messages WHERE conversation_id = $1 AND role = $2', [conversationId, role]);
     return result.rows.length;
   }
+
+  async function variant(userMessageId: string, action = 'regenerate', key: string = randomUUID(), extra: Record<string, unknown> = {}, headers: Record<string, string> = {}): Promise<Response> {
+    return app.request(`/api/v1/conversations/${conversationId}/generations:stream`, { method: 'POST', headers: {
+      Origin: origin, Cookie: cookie, 'Content-Type': 'application/json', 'Idempotency-Key': key, ...headers,
+    }, body: JSON.stringify({ userMessageId, action, ...extra }) });
+  }
+  async function variants(userMessageId: string): Promise<ChatTurnVariants> {
+    const response = await app.request(`/api/v1/conversations/${conversationId}/messages/${userMessageId}/generations`, { headers: { Cookie: cookie } });
+    assert.equal(response.status, 200, response.status !== 200 ? await response.text() : '');
+    return await response.json() as ChatTurnVariants;
+  }
+  async function seedCompleted(): Promise<ChatGeneration> {
+    setup({ chunks: ['Original answer'] });
+    await collect(await post(randomUUID(), { content: 'Original prompt' }));
+    return generation();
+  }
+
+  it('CHAT-10 streams regenerate, retains old output and selects only after durable completion', async () => {
+    const old = await seedCompleted();
+    setup({ chunks: ['New', ' answer'] });
+    const response = await variant(old.userMessageId);
+    assert.equal(response.status, 200);
+    const reader = response.body!.getReader();
+    const first = await reader.read();
+    assert.match(new TextDecoder().decode(first.value), /message.started/);
+    const before = await variants(old.userMessageId);
+    assert.equal(before.selectedGenerationId, old.id);
+    assert.equal(before.items.length, 2);
+    const candidate = before.items.find((i) => i.id !== old.id)!;
+    assert.equal(candidate.action, 'regenerate');
+    assert.equal(candidate.content, undefined);
+    let remaining = '';
+    while (true) { const next = await reader.read(); if (next.done) break; remaining += new TextDecoder().decode(next.value); }
+    const events = eventsFrom(remaining);
+    assert.deepEqual(events.map((e) => e.event), ['message.delta', 'message.delta', 'message.completed']);
+    const after = await variants(old.userMessageId);
+    assert.equal(after.selectedGenerationId, candidate.id);
+    assert.deepEqual(after.items.map((i) => i.content), ['Original answer', 'New answer']);
+    assert.deepEqual(await repository.get(owner, conversationId, old.id), old);
+    assert.equal(await messageCount('user'), 1);
+    assert.equal(await messageCount('assistant'), 2);
+    assert.deepEqual(provider.lastRequest!.messages, [{ role: 'user', content: 'Original prompt' }]);
+    const history = await app.request(`/api/v1/conversations/${conversationId}`, { headers: { Cookie: cookie } });
+    const body = await history.json() as { messages: { role: string; content: string }[] };
+    assert.deepEqual(body.messages.map(({ role, content }) => ({ role, content })), [
+      { role: 'user', content: 'Original prompt' }, { role: 'assistant', content: 'New answer' },
+    ]);
+    assert.equal(provider.callCount, 1);
+  });
+
+  for (const status of ['failed', 'stopped', 'interrupted'] as const) {
+    it(`CHAT-11 retries latest ${status} attempt with one user and a newly selected generation`, async () => {
+      const original = await runtime.admit(owner, conversationId, { content: 'Retry prompt' }, randomUUID());
+      if (status === 'stopped') await runtime.cancel(owner, conversationId, original.generation.id, randomUUID());
+      else await repository.finalize(owner, original.generation, 'partial', status, 'TEST_FAILURE');
+      setup({ chunks: ['Recovered'] });
+      const events = await collect(await variant(original.generation.userMessageId, 'retry'));
+      assert.equal(events.at(-1)!.event, 'message.completed');
+      const current = await variants(original.generation.userMessageId);
+      assert.notEqual(current.selectedGenerationId, original.generation.id);
+      assert.equal(current.items.length, 2);
+      assert.equal(current.items[0]!.status, status);
+      assert.equal(current.items[0]!.content, undefined);
+      assert.equal(current.items[1]!.action, 'retry');
+      assert.equal(current.items[1]!.content, 'Recovered');
+      assert.equal(await messageCount('user'), 1);
+      assert.deepEqual(provider.lastRequest!.messages, [{ role: 'user', content: 'Retry prompt' }]);
+    });
+  }
+
+  for (const outcome of ['failed', 'stopped', 'interrupted'] as const) {
+    it(`${outcome} regenerate preserves the selected completed variant`, async () => {
+      const old = await seedCompleted();
+      setup(outcome === 'failed' ? { chunks: ['partial'], errorAfterTokens: { count: 1, error: new Error('private upstream') } } : { chunks: ['partial', 'late'] });
+      const admitted = await runtime.admitVariant(owner, conversationId, { userMessageId: old.userMessageId, action: 'regenerate' }, randomUUID());
+      const abort = new AbortController();
+      const events: ChatEvent[] = [];
+      await runtime.run(owner, admitted.generation, async (e) => {
+        events.push(e);
+        if (e.event === 'message.delta' && outcome === 'stopped') await runtime.cancel(owner, conversationId, admitted.generation.id, randomUUID());
+        if (e.event === 'message.delta' && outcome === 'interrupted') abort.abort();
+      }, abort.signal);
+      const current = await variants(old.userMessageId);
+      assert.equal(current.selectedGenerationId, old.id);
+      assert.equal(current.items.find((i) => i.id === admitted.generation.id)!.status, outcome);
+      assert.equal((await repository.get(owner, conversationId, admitted.generation.id)).partialContent, 'partial');
+      assert.equal(await messageCount('user'), 1);
+      assert.equal(await messageCount('assistant'), 1);
+      assert.ok(!events.some((e) => e.event === 'message.completed'));
+      if (outcome === 'stopped') assert.equal(events.at(-1)!.event, 'message.stopped');
+    });
+  }
+
+  it('context contains each prior user and its selected answer once across multiple variant-bearing turns', async () => {
+    const old = await seedCompleted();
+    for (const answer of ['Alternative A', 'Selected A']) {
+      setup({ chunks: [answer] });
+      await collect(await variant(old.userMessageId));
+      assert.deepEqual(provider.lastRequest!.messages, [{ role: 'user', content: 'Original prompt' }]);
+    }
+    setup({ chunks: ['Original B'] });
+    const next = await collect(await post(randomUUID(), { content: 'Second prompt' }));
+    const nextId = next[0]!.data.generationId as string;
+    const second = await repository.get(owner, conversationId, nextId);
+    setup({ chunks: ['Selected B'] });
+    await collect(await variant(second.userMessageId));
+    assert.deepEqual(provider.lastRequest!.messages, [
+      { role: 'user', content: 'Original prompt' }, { role: 'assistant', content: 'Selected A' }, { role: 'user', content: 'Second prompt' },
+    ]);
+    await collect(await post(randomUUID(), { content: 'Third prompt' }));
+    assert.deepEqual(provider.lastRequest!.messages, [
+      { role: 'user', content: 'Original prompt' }, { role: 'assistant', content: 'Selected A' },
+      { role: 'user', content: 'Second prompt' }, { role: 'assistant', content: 'Selected B' }, { role: 'user', content: 'Third prompt' },
+    ]);
+  });
+
+  it('fails closed for earlier turns and ineligible latest retry/regenerate states', async () => {
+    const old = await seedCompleted();
+    assert.equal((await variant(old.userMessageId, 'retry')).status, 409);
+    setup({ errorBeforeFirstToken: new Error('failed') });
+    const events = await collect(await post(randomUUID(), { content: 'Latest failed prompt' }));
+    const latest = await repository.get(owner, conversationId, events[0]!.data.generationId as string);
+    assert.equal((await variant(latest.userMessageId, 'regenerate')).status, 409);
+    for (const action of ['retry', 'regenerate']) assert.equal((await variant(old.userMessageId, action)).status, 409);
+    const response = await app.request(`/api/v1/conversations/${conversationId}/messages/${old.userMessageId}/generations`, { headers: { Cookie: cookie } });
+    assert.equal(response.status, 409);
+    assert.equal(provider.callCount, 1);
+  });
+
+  it('reconciles identical variant keys and rejects changed operations, source or payload', async () => {
+    const old = await seedCompleted();
+    const key = randomUUID();
+    await collect(await variant(old.userMessageId, 'regenerate', key));
+    const duplicate = await variant(old.userMessageId.toUpperCase(), 'regenerate', key, { modelId: CHAT_MODEL_ALIAS });
+    assert.equal(duplicate.status, 409);
+    const existing = (await duplicate.json() as { generation: ChatGeneration }).generation;
+    assert.equal(existing.id, (await variants(old.userMessageId)).selectedGenerationId);
+    const changed = await variant(old.userMessageId, 'retry', key);
+    assert.equal(changed.status, 409);
+    assert.equal((await changed.json() as { generation?: unknown }).generation, undefined);
+    assert.equal((await post(key, { content: 'New prompt' })).status, 409);
+    await assert.rejects(runtime.cancel(owner, conversationId, existing.id, key), { statusCode: 409 });
+    const cancelKey = randomUUID();
+    await runtime.cancel(owner, conversationId, existing.id, cancelKey);
+    assert.equal((await variant(old.userMessageId, 'regenerate', cancelKey)).status, 409);
+    const promptKey = (await db.pool.query('SELECT idempotency_key FROM chat_generations WHERE id = $1', [old.id])).rows[0].idempotency_key as string;
+    assert.equal((await variant(old.userMessageId, 'regenerate', promptKey)).status, 409);
+    const next = await collect(await post(randomUUID(), { content: 'Next turn' }));
+    const target = await repository.get(owner, conversationId, next[0]!.data.generationId as string);
+    assert.equal((await variant(target.userMessageId, 'regenerate', key)).status, 409);
+    // Duplicate original operation reconciles even though its turn is no longer latest.
+    assert.equal((await (await variant(old.userMessageId, 'regenerate', key)).json() as { generation: ChatGeneration }).generation.id, existing.id);
+    assert.equal(provider.callCount, 3);
+    assert.equal(await messageCount('user'), 2);
+  });
+
+  it('variant routes enforce session, CSRF, source ownership and strict validation before provider', async () => {
+    const old = await seedCompleted();
+    setup();
+    assert.equal((await variant(old.userMessageId, 'regenerate', randomUUID(), {}, { Cookie: '' })).status, 401);
+    assert.equal((await variant(old.userMessageId, 'regenerate', randomUUID(), {}, { Origin: 'https://invalid.example' })).status, 403);
+    assert.equal((await variant(old.userMessageId, 'regenerate', randomUUID(), {}, { Cookie: otherCookie })).status, 404);
+    const foreignConversation = randomUUID(); const foreignMessage = randomUUID();
+    await db.pool.query("INSERT INTO conversations (id,user_id,title) VALUES ($1,$2,'Foreign')", [foreignConversation, other]);
+    await db.pool.query("INSERT INTO messages (id,conversation_id,role,content) VALUES ($1,$2,'user','Foreign')", [foreignMessage, foreignConversation]);
+    assert.equal((await variant(foreignMessage)).status, 404);
+    assert.equal((await variant(randomUUID())).status, 404);
+    assert.equal((await variant(old.id)).status, 404); // assistant IDs are not source users
+    const listPath = `/api/v1/conversations/${conversationId}/messages/${old.userMessageId}/generations`;
+    assert.equal((await app.request(listPath)).status, 401);
+    assert.equal((await app.request(listPath, { headers: { Cookie: otherCookie } })).status, 404);
+    for (const [action, extra] of [['other', {}], ['retry', { modelId: null }], ['regenerate', { modelId: 'private/provider' }], ['regenerate', { sourceGenerationId: old.id }]] as const) {
+      assert.equal((await variant(old.userMessageId, action, randomUUID(), extra)).status, 400);
+    }
+    for (const key of ['', 'bad key', 'k'.repeat(129)]) assert.equal((await variant(old.userMessageId, 'regenerate', key)).status, 400);
+    assert.equal((await variant('invalid-uuid')).status, 400);
+    assert.equal(provider.callCount, 0);
+    const safe = JSON.stringify(await variants(old.userMessageId));
+    for (const secret of ['owner', 'fingerprint', 'idempotency', 'provider', 'password']) assert.ok(!safe.includes(secret));
+    const offline = new ChatRuntime(repository, undefined);
+    assert.equal((await offline.variants(owner, conversationId, old.userMessageId)).items.length, 1);
+    await assert.rejects(offline.admitVariant(owner, conversationId, { userMessageId: old.userMessageId, action: 'regenerate' }, randomUUID()), { statusCode: 503 });
+  });
+
+  for (const action of ['retry', 'regenerate'] as const) {
+    it(`${action} cannot overlap another active generation and can be cancelled through the existing endpoint`, async () => {
+      let old: ChatGeneration;
+      if (action === 'regenerate') old = await seedCompleted();
+      else {
+        const admitted = await runtime.admit(owner, conversationId, { content: 'Retry me' }, randomUUID());
+        old = await repository.finalize(owner, admitted.generation, '', 'failed', 'TEST');
+      }
+      setup({ chunks: ['partial', 'late'] });
+      const response = await variant(old.userMessageId, action);
+      const reader = response.body!.getReader();
+      const started = eventsFrom(new TextDecoder().decode((await reader.read()).value))[0]!;
+      const id = started.data.generationId as string;
+      assert.equal((await variant(old.userMessageId, action)).status, 409);
+      const cancel = await app.request(`/api/v1/conversations/${conversationId}/generations/${id}/cancel`, { method: 'POST', headers: { Cookie: cookie, Origin: origin, 'Idempotency-Key': randomUUID() } });
+      assert.equal(cancel.status, 202);
+      let rest = '';
+      while (true) { const next = await reader.read(); if (next.done) break; rest += new TextDecoder().decode(next.value); }
+      assert.equal(eventsFrom(rest).at(-1)!.event, 'message.stopped');
+      assert.equal((await repository.get(owner, conversationId, id)).status, 'stopped');
+      assert.equal((await variants(old.userMessageId)).selectedGenerationId, action === 'regenerate' ? old.id : null);
+      assert.equal(await messageCount('user'), 1);
+    });
+  }
+
+  it('deletion fences variant completion, cascades selection and retains operation tombstones', async () => {
+    const old = await seedCompleted(); const key = randomUUID();
+    const candidate = await runtime.admitVariant(owner, conversationId, { userMessageId: old.userMessageId, action: 'regenerate' }, key);
+    const events: ChatEvent[] = [];
+    await runtime.run(owner, candidate.generation, async (event) => {
+      events.push(event);
+      if (event.event === 'message.delta') await db.pool.query('DELETE FROM conversations WHERE id = $1', [conversationId]);
+    }, new AbortController().signal);
+    assert.ok(!events.some((e) => e.event === 'message.completed'));
+    assert.equal((await db.pool.query('SELECT * FROM chat_turn_selections')).rows.length, 0);
+    assert.equal((await db.pool.query('SELECT * FROM chat_generations')).rows.length, 0);
+    assert.equal((await variant(old.userMessageId, 'regenerate', key)).status, 404);
+    conversationId = randomUUID();
+    await db.pool.query("INSERT INTO conversations (id,user_id,title) VALUES ($1,$2,'New')", [conversationId, owner]);
+    await collect(await post());
+    const fresh = await generation();
+    assert.equal((await variant(fresh.userMessageId, 'regenerate', key)).status, 409);
+    assert.equal((await db.pool.query('SELECT * FROM chat_generations')).rows.length, 1);
+  });
+
+  for (const action of ['retry', 'regenerate'] as const) {
+    it(`Real PostgreSQL concurrent identical ${action} POSTs create one generation and provider call`, { timeout: 6000 }, async (t) => {
+      if (db.isMemory) return t.skip('Real PostgreSQL locks/unique arbitration');
+      let old: ChatGeneration;
+      if (action === 'regenerate') old = await seedCompleted();
+      else {
+        const admitted = await runtime.admit(owner, conversationId, { content: 'Retry me' }, randomUUID());
+        old = await repository.finalize(owner, admitted.generation, '', 'failed', 'TEST');
+      }
+      setup({ chunks: ['New answer'] });
+      const key = randomUUID();
+      const responses = await Promise.all([variant(old.userMessageId, action, key), variant(old.userMessageId, action, key)]);
+      assert.deepEqual(responses.map((r) => r.status).sort(), [200, 409]);
+      const duplicate = await responses.find((r) => r.status === 409)!.json() as { generation: ChatGeneration };
+      const stream = await collect(responses.find((r) => r.status === 200)!);
+      assert.equal(duplicate.generation.id, stream[0]!.data.generationId);
+      assert.equal(provider.callCount, 1);
+      assert.equal(await messageCount('user'), 1);
+      assert.equal((await variants(old.userMessageId)).items.length, 2);
+    });
+  }
+
+  it('Real PostgreSQL rejects invalid selection scope/status independently of service code', async (t) => {
+    if (db.isMemory) return t.skip('Real PostgreSQL composite foreign keys/checks');
+    const old = await seedCompleted();
+    const admitted = await runtime.admitVariant(owner, conversationId, { userMessageId: old.userMessageId, action: 'regenerate' }, randomUUID());
+    await assert.rejects(db.pool.query('UPDATE chat_turn_selections SET selected_generation_id = $1 WHERE user_message_id = $2', [admitted.generation.id, old.userMessageId]), { code: '23503' });
+    await repository.start(owner, admitted.generation.id);
+    await assert.rejects(db.pool.query('UPDATE chat_turn_selections SET selected_generation_id = $1 WHERE user_message_id = $2', [admitted.generation.id, old.userMessageId]), { code: '23503' });
+    await repository.finalize(owner, admitted.generation, '', 'failed', 'TEST');
+    for (const status of ['failed', 'interrupted', 'stopped'] as const) {
+      const invalid = randomUUID();
+      await db.pool.query(`INSERT INTO chat_generations (id, owner_id, conversation_id, user_message_id, model_alias, status, idempotency_key, request_fingerprint, finished_at, cancel_requested_at, finish_reason)
+          VALUES ($1,$2,$3,$4,'giga-chat-default',$5,$6,$7,NOW(),$8,$9)`,
+        [invalid, owner, conversationId, old.userMessageId, status, randomUUID(), 'f'.repeat(64), status === 'stopped' ? new Date() : null, status === 'stopped' ? 'cancelled' : null]);
+      await assert.rejects(db.pool.query('UPDATE chat_turn_selections SET selected_generation_id = $1 WHERE user_message_id = $2', [invalid, old.userMessageId]), { code: '23503' });
+    }
+    await assert.rejects(db.pool.query('UPDATE chat_turn_selections SET owner_id = $1 WHERE user_message_id = $2', [other, old.userMessageId]), { code: '23503' });
+    await assert.rejects(db.pool.query("UPDATE chat_turn_selections SET selected_status = 'pending' WHERE user_message_id = $1", [old.userMessageId]), { code: '23514' });
+    await assert.rejects(db.pool.query("UPDATE chat_turn_selections SET user_role = 'assistant' WHERE user_message_id = $1", [old.userMessageId]), { code: '23514' });
+    assert.equal((await variants(old.userMessageId)).selectedGenerationId, old.id);
+    const sibling = randomUUID();
+    await db.pool.query("INSERT INTO conversations (id,user_id,title) VALUES ($1,$2,'Sibling')", [sibling, owner]);
+    const siblingAttempt = await runtime.admit(owner, sibling, { content: 'Sibling prompt' }, randomUUID());
+    await runtime.run(owner, siblingAttempt.generation, async () => {}, new AbortController().signal);
+    await assert.rejects(db.pool.query('UPDATE chat_turn_selections SET selected_generation_id = $1 WHERE user_message_id = $2', [siblingAttempt.generation.id, old.userMessageId]), { code: '23503' });
+    const anotherTurn = await runtime.admit(owner, conversationId, { content: 'Another turn' }, randomUUID());
+    await runtime.run(owner, anotherTurn.generation, async () => {}, new AbortController().signal);
+    await assert.rejects(db.pool.query('UPDATE chat_turn_selections SET selected_generation_id = $1 WHERE user_message_id = $2', [anotherTurn.generation.id, old.userMessageId]), { code: '23503' });
+  });
+
+  it('retry after a failed regenerate selects the successful retry and excludes failed candidate context', async () => {
+    const old = await seedCompleted();
+    setup({ errorBeforeFirstToken: new Error('failure') });
+    await collect(await variant(old.userMessageId));
+    setup({ chunks: ['Retry winner'] });
+    await collect(await variant(old.userMessageId, 'retry'));
+    const current = await variants(old.userMessageId);
+    assert.equal(current.items.length, 3);
+    assert.equal(current.selectedGenerationId, current.items[2]!.id);
+    await collect(await post(randomUUID(), { content: 'Followup' }));
+    assert.deepEqual(provider.lastRequest!.messages, [
+      { role: 'user', content: 'Original prompt' }, { role: 'assistant', content: 'Retry winner' }, { role: 'user', content: 'Followup' },
+    ]);
+  });
+
+  it('failed completion transaction during regenerate retains previous output and selection', async () => {
+    const old = await seedCompleted();
+    class FailingVariantCompletion extends PostgresGenerationRepository {
+      protected override async insertAssistant(client: pg.PoolClient, item: ChatGeneration, text: string): Promise<void> {
+        await super.insertAssistant(client, item, text);
+        throw new Error('injected variant commit failure');
+      }
+    }
+    setup({}, new FailingVariantCompletion(db.pool));
+    const events = await collect(await variant(old.userMessageId));
+    assert.equal(events.at(-1)!.event, 'message.failed');
+    assert.equal((await variants(old.userMessageId)).selectedGenerationId, old.id);
+    assert.equal(await messageCount('assistant'), 1);
+    assert.deepEqual(await repository.get(owner, conversationId, old.id), old);
+  });
+
+  it('Real PostgreSQL completion exposes output and new selection atomically while cancel waits', { timeout: 6000 }, async (t) => {
+    if (db.isMemory) return t.skip('Real PostgreSQL MVCC and row locks');
+    const old = await seedCompleted();
+    const inserted = gate(); const release = gate(); const cancelEntered = gate();
+    class PausedVariantCommit extends PostgresGenerationRepository {
+      protected override async insertAssistant(client: pg.PoolClient, item: ChatGeneration, text: string): Promise<void> {
+        await super.insertAssistant(client, item, text);
+        inserted.release();
+        await release.promise;
+      }
+      override async requestCancel(userId: string, conv: string, id: string, key: string) {
+        cancelEntered.release();
+        return super.requestCancel(userId, conv, id, key);
+      }
+    }
+    setup({ chunks: ['New winner'] }, new PausedVariantCommit(db.pool));
+    const candidate = await runtime.admitVariant(owner, conversationId, { userMessageId: old.userMessageId, action: 'regenerate' }, randomUUID());
+    const events: ChatEvent[] = [];
+    const running = runtime.run(owner, candidate.generation, async (e) => { events.push(e); }, new AbortController().signal);
+    let cancelling: ReturnType<ChatRuntime['cancel']> | undefined;
+    try {
+      await inserted.promise;
+      assert.equal((await db.pool.query('SELECT selected_generation_id FROM chat_turn_selections WHERE user_message_id = $1', [old.userMessageId])).rows[0].selected_generation_id, old.id);
+      assert.equal(await messageCount('assistant'), 1, 'uncommitted candidate assistant must be invisible');
+      assert.equal((await repository.get(owner, conversationId, candidate.generation.id)).status, 'streaming');
+      cancelling = runtime.cancel(owner, conversationId, candidate.generation.id, randomUUID());
+      await cancelEntered.promise;
+      const deadline = Date.now() + 1000;
+      let blocked = false;
+      while (Date.now() < deadline) {
+        const locks = await db.pool.query("SELECT pid FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%FROM conversations%FOR UPDATE%'");
+        if (locks.rows.length) { blocked = true; break; }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      assert.equal(blocked, true);
+    } finally { release.release(); await running; }
+    assert.equal((await cancelling!).accepted, false);
+    assert.equal((await variants(old.userMessageId)).selectedGenerationId, candidate.generation.id);
+    assert.equal(events.at(-1)!.event, 'message.completed');
+    assert.equal(await messageCount('assistant'), 2);
+  });
+
+  it('Real PostgreSQL Stop wins a regenerate completion race without replacing selection', { timeout: 6000 }, async (t) => {
+    if (db.isMemory) return t.skip('Real PostgreSQL variant completion race');
+    const old = await seedCompleted();
+    const ready = gate(); const release = gate();
+    class PausedVariantCompletion extends PostgresGenerationRepository {
+      override async complete(userId: string, item: ChatGeneration, text: string, reason: 'stop' | 'length' | 'other' | 'cancelled'): Promise<ChatGeneration> {
+        ready.release(); await release.promise;
+        return super.complete(userId, item, text, reason);
+      }
+    }
+    setup({ chunks: ['Candidate'] }, new PausedVariantCompletion(db.pool));
+    const candidate = await runtime.admitVariant(owner, conversationId, { userMessageId: old.userMessageId, action: 'regenerate' }, randomUUID());
+    const events: ChatEvent[] = [];
+    const running = runtime.run(owner, candidate.generation, async (e) => { events.push(e); }, new AbortController().signal);
+    try {
+      await ready.promise;
+      await runtime.cancel(owner, conversationId, candidate.generation.id, randomUUID());
+    } finally { release.release(); await running; }
+    assert.equal((await variants(old.userMessageId)).selectedGenerationId, old.id);
+    assert.equal((await repository.get(owner, conversationId, candidate.generation.id)).status, 'stopped');
+    assert.equal(events.at(-1)!.event, 'message.stopped');
+    assert.equal(await messageCount('assistant'), 1);
+  });
 
   before(async () => { db = await createTestDatabase(); });
   afterEach(() => { assert.equal(runtime.activeGenerationCount, 0, 'controller registry must be empty after every terminal path'); });

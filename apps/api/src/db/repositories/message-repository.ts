@@ -1,5 +1,6 @@
 import type pg from 'pg';
 import type { Message, MessageRole } from '../../modules/conversations/types.js';
+import { CHAT_HISTORY_FROM, CHAT_HISTORY_ORDER, CHAT_HISTORY_VISIBLE } from '../../modules/chat/chat-history.js';
 
 export interface MessageDbRow {
   id: string;
@@ -52,10 +53,10 @@ export class MessageRepository {
    */
   async listByConversation(conversationId: string): Promise<Message[]> {
     const query = `
-      SELECT id, conversation_id, role, content, created_at
-      FROM messages
-      WHERE conversation_id = $1
-      ORDER BY created_at ASC, id ASC;
+      SELECT m.id, m.conversation_id, m.role, m.content, m.created_at
+      ${CHAT_HISTORY_FROM}
+      WHERE m.conversation_id = $1 AND ${CHAT_HISTORY_VISIBLE}
+      ORDER BY ${CHAT_HISTORY_ORDER};
     `;
     const result = await this.pool.query<MessageDbRow>(query, [conversationId]);
     return result.rows.map(mapRowToMessage);

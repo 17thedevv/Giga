@@ -14,9 +14,9 @@ describe('Database Migrations and Utilities', () => {
     db.public.interceptQueries((sql) => {
       const original = sql;
       sql = sql.replace("status VARCHAR(20) NOT NULL CHECK", "status VARCHAR(20) NOT NULL CONSTRAINT chat_generations_status_check CHECK")
-        .replace("finish_reason VARCHAR(20) CHECK", "finish_reason VARCHAR(20) CONSTRAINT chat_generations_finish_reason_check CHECK");
+        .replace("finish_reason VARCHAR(20) CHECK", "finish_reason VARCHAR(20) CONSTRAINT chat_generations_finish_reason_check CHECK")
+        .replace("operation VARCHAR(10) NOT NULL CHECK", "operation VARCHAR(10) NOT NULL CONSTRAINT chat_operation_keys_operation_check CHECK");
       // Return rewritten 005 so 006 can replace the actual PostgreSQL constraint names.
-      if (sql !== original) return db.public.many(sql);
       if (sql.includes('prevent_skill_versions_update') || sql.includes('CREATE TRIGGER')) {
         const stripped = sql
           .replace(/CREATE OR REPLACE FUNCTION[\s\S]*?LANGUAGE plpgsql;/gi, '')
@@ -24,6 +24,7 @@ describe('Database Migrations and Utilities', () => {
           .replace(/CREATE TRIGGER[\s\S]*?;/gi, '');
         return db.public.many(stripped);
       }
+      if (sql !== original) return db.public.many(sql);
       return null;
     });
     db.public.registerFunction({
@@ -36,13 +37,14 @@ describe('Database Migrations and Utilities', () => {
     try {
       // First run: applies all pending migrations
       const firstRun = await runMigrations(pool);
-      assert.strictEqual(firstRun.length, 6);
+      assert.strictEqual(firstRun.length, 7);
       assert.strictEqual(firstRun[0], '001_initial_users_and_sessions');
       assert.strictEqual(firstRun[1], '002_conversations_and_messages');
       assert.strictEqual(firstRun[2], '003_skills_and_preferences');
       assert.strictEqual(firstRun[3], '004_skill_definitions_revision');
       assert.strictEqual(firstRun[4], '005_chat_generations');
       assert.strictEqual(firstRun[5], '006_chat_generation_cancel');
+      assert.strictEqual(firstRun[6], '007_chat_turn_variants');
 
       const versions = await getAppliedMigrationVersions(pool);
       assert.ok(versions.has(1));
@@ -51,6 +53,7 @@ describe('Database Migrations and Utilities', () => {
       assert.ok(versions.has(4));
       assert.ok(versions.has(5));
       assert.ok(versions.has(6));
+      assert.ok(versions.has(7));
 
       // Second run: idempotent, applies 0 migrations
       const secondRun = await runMigrations(pool);
