@@ -11,7 +11,7 @@ import {
   validateChatStreamEvent,
   SseValidationError,
 } from '../src/lib/api/sse-parser.js';
-import type { Conversation, Message } from '../src/lib/api/types.js';
+import type { Conversation, Message, ChatGeneration } from '../src/lib/api/types.js';
 
 describe('17T-33 — GigaChat Conversation & Streaming UI Tests', () => {
   beforeEach(() => {
@@ -526,10 +526,10 @@ describe('17T-33 — GigaChat Conversation & Streaming UI Tests', () => {
       });
     });
 
-    it('durable stop: invokes cancelGeneration and stops streaming cleanly in Real mode', async () => {
+    it('durable stop: cancel POST is unresolved -> SSE connection MUST NOT be aborted yet', async () => {
       const activeConv: Conversation = {
-        id: 'conv_stop_test',
-        title: 'Stop Test',
+        id: 'conv_durable_test',
+        title: 'Durable Stop Test',
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
@@ -543,30 +543,32 @@ describe('17T-33 — GigaChat Conversation & Streaming UI Tests', () => {
         messages: [],
       });
 
-      const cancelSpy = vi.spyOn(realApiClient, 'cancelGeneration').mockResolvedValue({
-        generation: {
-          id: 'gen_to_cancel',
-          conversationId: 'conv_stop_test',
-          userMessageId: 'msg_u_1',
-          modelId: 'giga-chat-default',
-          status: 'stopped',
-          partialContent: 'Started...',
-          finishReason: 'cancelled',
-          createdAt: new Date().toISOString(),
-        },
-      });
+      const cancelResolveRef = {
+        current: null as ((val: { generation: ChatGeneration }) => void) | null,
+      };
+      const cancelSpy = vi.spyOn(realApiClient, 'cancelGeneration').mockImplementation(
+        () =>
+          new Promise<{ generation: ChatGeneration }>((resolve) => {
+            cancelResolveRef.current = resolve;
+          })
+      );
 
+      let capturedSignal: AbortSignal | undefined;
       vi.spyOn(realApiClient, 'streamMessage').mockImplementation(
         async (_convId, _content, onEvent, options) => {
+          capturedSignal = options?.signal;
           onEvent({
             event: 'message.started',
-            data: { messageId: 'msg_s', generationId: 'gen_to_cancel', conversationId: 'conv_stop_test' },
+            data: {
+              messageId: 'msg_s',
+              generationId: 'gen_durable',
+              conversationId: 'conv_durable_test',
+            },
           });
           onEvent({
             event: 'message.delta',
-            data: { messageId: 'msg_s', generationId: 'gen_to_cancel', text: 'Started...' },
+            data: { messageId: 'msg_s', generationId: 'gen_durable', text: 'Streaming content...' },
           });
-          // Wait until aborted
           await new Promise<void>((resolve) => {
             options?.signal?.addEventListener('abort', () => resolve());
           });
@@ -576,7 +578,7 @@ describe('17T-33 — GigaChat Conversation & Streaming UI Tests', () => {
       render(
         <ApiModeProvider initialMode="real">
           <AuthProvider>
-            <RouterProvider initialPath="/chat/conv_stop_test">
+            <RouterProvider initialPath="/chat/conv_durable_test">
               <ChatView />
             </RouterProvider>
           </AuthProvider>
@@ -590,18 +592,372 @@ describe('17T-33 — GigaChat Conversation & Streaming UI Tests', () => {
       const input = screen.getByPlaceholderText(/Ask Giga anything/i) as HTMLTextAreaElement;
       const form = input.closest('form')!;
 
-      fireEvent.change(input, { target: { value: 'Prompt to cancel' } });
+      fireEvent.change(input, { target: { value: 'Test durable cancel' } });
       fireEvent.submit(form);
 
-      // Stop button appears
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: 'Stop Generating' })).toBeDefined();
+      });
+
+      // User clicks Stop
+      fireEvent.click(screen.getByRole('button', { name: 'Stop Generating' }));
+
+      // cancelGeneration was invoked
+      await waitFor(() => {
+        expect(cancelSpy).toHaveBeenCalledWith('conv_durable_test', 'gen_durable');
+      });
+
+      // INVARIANT P0: While cancel POST is pending/unresolved, SSE MUST NOT be aborted!
+      expect(capturedSignal?.aborted).toBe(false);
+
+      // Now resolve cancel with stopped state
+      cancelResolveRef.current?.({
+        generation: {
+          id: 'gen_durable',
+          conversationId: 'conv_durable_test',
+          userMessageId: 'u1',
+          modelId: 'giga-chat-default',
+          status: 'stopped',
+          partialContent: 'Streaming content...',
+          finishReason: 'cancelled',
+          createdAt: new Date().toISOString(),
+        },
+      });
+
+      // After resolution, stop completes cleanly without error banner
+      await waitFor(() => {
+        expect(screen.queryByRole('button', { name: 'Stop Generating' })).toBeNull();
+      });
+      expect(screen.queryByText(/AbortError/i)).toBeNull();
+    });
+
+    it('authoritative reconciliation: disconnect after message.started calls getGeneration as source of truth', async () => {
+      const activeConv: Conversation = {
+        id: 'conv_reconcile_test',
+        title: 'Reconciliation Test',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      vi.spyOn(realApiClient, 'listConversations').mockResolvedValue({
+        items: [activeConv],
+        nextCursor: null,
+      });
+      vi.spyOn(realApiClient, 'getConversation').mockResolvedValue({
+        conversation: activeConv,
+        messages: [],
+      });
+
+      const getGenSpy = vi.spyOn(realApiClient, 'getGeneration').mockResolvedValue({
+        generation: {
+          id: 'gen_reconcile',
+          conversationId: 'conv_reconcile_test',
+          userMessageId: 'u1',
+          modelId: 'giga-chat-default',
+          status: 'interrupted',
+          partialContent: 'Saved partial text from DB checkpoint',
+          finishReason: 'cancelled',
+          createdAt: new Date().toISOString(),
+        },
+      });
+
+      vi.spyOn(realApiClient, 'streamMessage').mockImplementation(
+        async (_convId, _content, onEvent) => {
+          onEvent({
+            event: 'message.started',
+            data: {
+              messageId: 'm1',
+              generationId: 'gen_reconcile',
+              conversationId: 'conv_reconcile_test',
+            },
+          });
+          // Abrupt network error/disconnect
+          throw new TypeError('Failed to fetch: network dropped');
+        }
+      );
+
+      render(
+        <ApiModeProvider initialMode="real">
+          <AuthProvider>
+            <RouterProvider initialPath="/chat/conv_reconcile_test">
+              <ChatView />
+            </RouterProvider>
+          </AuthProvider>
+        </ApiModeProvider>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByPlaceholderText(/Ask Giga anything/i)).toBeDefined();
+      });
+
+      const input = screen.getByPlaceholderText(/Ask Giga anything/i) as HTMLTextAreaElement;
+      const form = input.closest('form')!;
+      fireEvent.change(input, { target: { value: 'Trigger disconnect' } });
+      fireEvent.submit(form);
+
+      // INVARIANT P1: Disconnect after message.started MUST call getGeneration for authoritative reconciliation
+      await waitFor(() => {
+        expect(getGenSpy).toHaveBeenCalledWith('conv_reconcile_test', 'gen_reconcile');
+      });
+
+      // Partial content from authoritative generation is displayed in UI
+      await waitFor(() => {
+        expect(screen.getByText('Saved partial text from DB checkpoint')).toBeDefined();
+      });
+    });
+
+    it('race condition: generation completed during Stop race -> UI accepts completed winner without error', async () => {
+      const activeConv: Conversation = {
+        id: 'conv_race_test',
+        title: 'Race Condition Test',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      vi.spyOn(realApiClient, 'listConversations').mockResolvedValue({
+        items: [activeConv],
+        nextCursor: null,
+      });
+
+      const completedAssistantMsg: Message = {
+        id: 'msg_a_winner',
+        conversationId: 'conv_race_test',
+        role: 'assistant',
+        content: 'Authoritative completed response from backend',
+        createdAt: new Date().toISOString(),
+      };
+
+      vi.spyOn(realApiClient, 'getConversation').mockResolvedValue({
+        conversation: activeConv,
+        messages: [completedAssistantMsg],
+      });
+
+      // Cancel returns completed generation (provider completed before cancel intent was evaluated)
+      vi.spyOn(realApiClient, 'cancelGeneration').mockResolvedValue({
+        generation: {
+          id: 'gen_race',
+          conversationId: 'conv_race_test',
+          userMessageId: 'u1',
+          assistantMessageId: 'msg_a_winner',
+          modelId: 'giga-chat-default',
+          status: 'completed',
+          partialContent: 'Authoritative completed response from backend',
+          finishReason: 'stop',
+          createdAt: new Date().toISOString(),
+        },
+      });
+
+      vi.spyOn(realApiClient, 'getGeneration').mockResolvedValue({
+        generation: {
+          id: 'gen_race',
+          conversationId: 'conv_race_test',
+          userMessageId: 'u1',
+          assistantMessageId: 'msg_a_winner',
+          modelId: 'giga-chat-default',
+          status: 'completed',
+          partialContent: 'Authoritative completed response from backend',
+          finishReason: 'stop',
+          createdAt: new Date().toISOString(),
+        },
+      });
+
+      vi.spyOn(realApiClient, 'streamMessage').mockImplementation(
+        async (_convId, _content, onEvent, options) => {
+          onEvent({
+            event: 'message.started',
+            data: { messageId: 'm1', generationId: 'gen_race', conversationId: 'conv_race_test' },
+          });
+          onEvent({
+            event: 'message.delta',
+            data: { messageId: 'm1', generationId: 'gen_race', text: 'Authoritative ' },
+          });
+          await new Promise<void>((resolve) => {
+            options?.signal?.addEventListener('abort', () => resolve());
+          });
+        }
+      );
+
+      render(
+        <ApiModeProvider initialMode="real">
+          <AuthProvider>
+            <RouterProvider initialPath="/chat/conv_race_test">
+              <ChatView />
+            </RouterProvider>
+          </AuthProvider>
+        </ApiModeProvider>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByPlaceholderText(/Ask Giga anything/i)).toBeDefined();
+      });
+
+      const input = screen.getByPlaceholderText(/Ask Giga anything/i) as HTMLTextAreaElement;
+      const form = input.closest('form')!;
+      fireEvent.change(input, { target: { value: 'Prompt race' } });
+      fireEvent.submit(form);
+
       await waitFor(() => {
         expect(screen.getByRole('button', { name: 'Stop Generating' })).toBeDefined();
       });
 
       fireEvent.click(screen.getByRole('button', { name: 'Stop Generating' }));
 
+      // Verify UI accepts completed winner
       await waitFor(() => {
-        expect(cancelSpy).toHaveBeenCalledWith('conv_stop_test', 'gen_to_cancel');
+        expect(
+          screen.getByText('Authoritative completed response from backend')
+        ).toBeDefined();
+      });
+      expect(screen.queryByText(/AbortError/i)).toBeNull();
+    });
+
+    it('cancel failure: handles cancel failure visibly and does not fake stopped state', async () => {
+      const activeConv: Conversation = {
+        id: 'conv_fail_cancel',
+        title: 'Cancel Fail Test',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      vi.spyOn(realApiClient, 'listConversations').mockResolvedValue({
+        items: [activeConv],
+        nextCursor: null,
+      });
+      vi.spyOn(realApiClient, 'getConversation').mockResolvedValue({
+        conversation: activeConv,
+        messages: [],
+      });
+
+      vi.spyOn(realApiClient, 'cancelGeneration').mockRejectedValue(
+        new ApiException(
+          503,
+          'SERVICE_UNAVAILABLE',
+          'Backend cancel service is temporarily unavailable'
+        )
+      );
+
+      vi.spyOn(realApiClient, 'streamMessage').mockImplementation(
+        async (_convId, _content, onEvent, options) => {
+          onEvent({
+            event: 'message.started',
+            data: {
+              messageId: 'm1',
+              generationId: 'gen_fail',
+              conversationId: 'conv_fail_cancel',
+            },
+          });
+          await new Promise<void>((resolve) => {
+            options?.signal?.addEventListener('abort', () => resolve());
+          });
+        }
+      );
+
+      render(
+        <ApiModeProvider initialMode="real">
+          <AuthProvider>
+            <RouterProvider initialPath="/chat/conv_fail_cancel">
+              <ChatView />
+            </RouterProvider>
+          </AuthProvider>
+        </ApiModeProvider>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByPlaceholderText(/Ask Giga anything/i)).toBeDefined();
+      });
+
+      const input = screen.getByPlaceholderText(/Ask Giga anything/i) as HTMLTextAreaElement;
+      const form = input.closest('form')!;
+      fireEvent.change(input, { target: { value: 'Try cancel fail' } });
+      fireEvent.submit(form);
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: 'Stop Generating' })).toBeDefined();
+      });
+
+      fireEvent.click(screen.getByRole('button', { name: 'Stop Generating' }));
+
+      // Cancel error must be visibly displayed in error banner
+      await waitFor(() => {
+        expect(
+          screen.getByText(/Backend cancel service is temporarily unavailable/i)
+        ).toBeDefined();
+      });
+
+      // No fake stopped assistant message
+      expect(screen.queryByText(/Response stopped by user/i)).toBeNull();
+    });
+
+    it('fencing conversation creation: starting from /chat creates conversation and preserves optimistic user turn', async () => {
+      vi.spyOn(realApiClient, 'listConversations').mockResolvedValue({
+        items: [],
+        nextCursor: null,
+      });
+
+      const newConv: Conversation = {
+        id: 'conv_from_scratch',
+        title: 'First Question on Giga',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      vi.spyOn(realApiClient, 'createConversation').mockResolvedValue({
+        conversation: newConv,
+      });
+
+      // Initial getConversation before message is persisted returns []
+      vi.spyOn(realApiClient, 'getConversation').mockResolvedValue({
+        conversation: newConv,
+        messages: [],
+      });
+
+      vi.spyOn(realApiClient, 'streamMessage').mockImplementation(
+        async (_convId, _content, onEvent) => {
+          onEvent({
+            event: 'message.started',
+            data: {
+              messageId: 'm_ans',
+              generationId: 'gen_first',
+              conversationId: 'conv_from_scratch',
+            },
+          });
+          onEvent({
+            event: 'message.delta',
+            data: { messageId: 'm_ans', generationId: 'gen_first', text: 'Answer streaming...' },
+          });
+          onEvent({
+            event: 'message.completed',
+            data: { messageId: 'm_ans', generationId: 'gen_first' },
+          });
+        }
+      );
+
+      render(
+        <ApiModeProvider initialMode="real">
+          <AuthProvider>
+            <RouterProvider initialPath="/chat">
+              <ChatView />
+            </RouterProvider>
+          </AuthProvider>
+        </ApiModeProvider>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByPlaceholderText(/Ask Giga anything/i)).toBeDefined();
+      });
+
+      const input = screen.getByPlaceholderText(/Ask Giga anything/i) as HTMLTextAreaElement;
+      const form = input.closest('form')!;
+      fireEvent.change(input, { target: { value: 'First Question on Giga' } });
+      fireEvent.submit(form);
+
+      // Optimistic user turn MUST be visible and NOT wiped out by route change to /chat/conv_from_scratch
+      await waitFor(() => {
+        expect(screen.getByText('First Question on Giga')).toBeDefined();
+      });
+
+      await waitFor(() => {
+        expect(screen.getByText('Answer streaming...')).toBeDefined();
       });
     });
 

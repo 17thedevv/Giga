@@ -27,6 +27,9 @@ export const ChatView: React.FC = () => {
   const abortControllerRef = useRef<AbortController | null>(null);
   const accumulatedTextRef = useRef('');
   const activeGenerationIdRef = useRef<string | null>(null);
+  const isStoppingRef = useRef(false);
+  const createdConversationIdRef = useRef<string | null>(null);
+  const stopTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Auto-scroll helper
@@ -38,9 +41,12 @@ export const ChatView: React.FC = () => {
     scrollToBottom();
   }, [messages, streamingText]);
 
-  // Cleanup abort controller on component unmount or mode switch
+  // Cleanup abort controller on component unmount
   useEffect(() => {
     return () => {
+      if (stopTimeoutRef.current) {
+        clearTimeout(stopTimeoutRef.current);
+      }
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
       }
@@ -49,6 +55,9 @@ export const ChatView: React.FC = () => {
 
   // When API mode switches, abort ongoing stream and reset state
   useEffect(() => {
+    if (stopTimeoutRef.current) {
+      clearTimeout(stopTimeoutRef.current);
+    }
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
     }
@@ -56,6 +65,7 @@ export const ChatView: React.FC = () => {
     setStreamingText('');
     accumulatedTextRef.current = '';
     activeGenerationIdRef.current = null;
+    isStoppingRef.current = false;
     setErrorBanner(null);
   }, [mode]);
 
@@ -78,7 +88,6 @@ export const ChatView: React.FC = () => {
         }
       }
     } catch (err: unknown) {
-      // Never fallback to mock mode silently; surface error clearly
       const message =
         err instanceof ApiException
           ? err.message
@@ -96,9 +105,116 @@ export const ChatView: React.FC = () => {
     loadConversations();
   }, [loadConversations]);
 
+  // Authoritative reconciliation via GET generation
+  const reconcileAuthoritativeGeneration = useCallback(
+    async (
+      targetConvId: string,
+      generationId: string,
+      fallbackErrorMsg?: string,
+      localPartial?: string
+    ) => {
+      try {
+        const { generation } = await realApiClient.getGeneration(targetConvId, generationId);
+
+        // Fetch authoritative conversation messages from backend
+        const convRes = await realApiClient.getConversation(targetConvId).catch(() => null);
+
+        if (generation.status === 'completed') {
+          // Completed won the race! Accept completed as winner
+          if (convRes && convRes.messages.some((m) => m.role === 'assistant')) {
+            setMessages(convRes.messages);
+          } else {
+            setMessages((prev) => {
+              const withoutOpt = prev.filter((m) => !m.isOptimistic);
+              return [
+                ...withoutOpt,
+                {
+                  id: generation.assistantMessageId || `msg_${generation.id}`,
+                  conversationId: targetConvId,
+                  role: 'assistant',
+                  content: generation.partialContent || localPartial || '',
+                  createdAt: generation.finishedAt || new Date().toISOString(),
+                  status: 'completed',
+                },
+              ];
+            });
+          }
+          setErrorBanner(null);
+        } else if (generation.status === 'stopped') {
+          // Intentional durable stop confirmed
+          if (convRes && convRes.messages.some((m) => m.role === 'assistant')) {
+            setMessages(convRes.messages);
+          } else if (generation.partialContent || localPartial) {
+            setMessages((prev) => [
+              ...prev.filter((m) => !m.isOptimistic),
+              {
+                id: generation.assistantMessageId || `stop_${generation.id}`,
+                conversationId: targetConvId,
+                role: 'assistant',
+                content: generation.partialContent || localPartial || '',
+                createdAt: generation.finishedAt || new Date().toISOString(),
+                status: 'stopped',
+              },
+            ]);
+          }
+          setErrorBanner(null);
+        } else if (generation.status === 'failed' || generation.status === 'interrupted') {
+          if (convRes && convRes.messages.some((m) => m.role === 'assistant')) {
+            setMessages(convRes.messages);
+          } else if (generation.partialContent || localPartial) {
+            setMessages((prev) => [
+              ...prev.filter((m) => !m.isOptimistic),
+              {
+                id: `fail_${generation.id}`,
+                conversationId: targetConvId,
+                role: 'assistant',
+                content: generation.partialContent || localPartial || '',
+                createdAt: generation.finishedAt || new Date().toISOString(),
+                status: 'failed',
+              },
+            ]);
+          }
+          // Only show error if user didn't intentionally stop
+          if (!isStoppingRef.current) {
+            const serverError =
+              generation.error?.message || fallbackErrorMsg || 'Generation failed';
+            setErrorBanner(serverError);
+          }
+        }
+      } catch {
+        if (localPartial) {
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `fail_${generationId}`,
+              conversationId: targetConvId,
+              role: 'assistant',
+              content: localPartial,
+              createdAt: new Date().toISOString(),
+              status: 'failed',
+            },
+          ]);
+        }
+        if (fallbackErrorMsg && !isStoppingRef.current) {
+          setErrorBanner(fallbackErrorMsg);
+        }
+      } finally {
+        isStoppingRef.current = false;
+        activeGenerationIdRef.current = null;
+      }
+    },
+    []
+  );
+
   // Load specific conversation messages
   const loadMessages = useCallback(
     async (id: string) => {
+      // If this conversation was just created in this view with active/pending optimistic message,
+      // skip resetting messages so we don't wipe out the optimistic user turn
+      if (createdConversationIdRef.current === id) {
+        return;
+      }
+
       setIsMessagesLoading(true);
       try {
         if (mode === 'real') {
@@ -126,8 +242,11 @@ export const ChatView: React.FC = () => {
 
   useEffect(() => {
     if (conversationId) {
-      loadMessages(conversationId);
+      if (createdConversationIdRef.current !== conversationId) {
+        loadMessages(conversationId);
+      }
     } else {
+      createdConversationIdRef.current = null;
       setMessages([]);
     }
   }, [conversationId, loadMessages]);
@@ -186,11 +305,13 @@ export const ChatView: React.FC = () => {
         const titleSnippet = content.trim().slice(0, 32);
         if (mode === 'real') {
           const newConv = await realApiClient.createConversation(titleSnippet);
+          createdConversationIdRef.current = newConv.conversation.id;
           setConversations((prev) => [newConv.conversation, ...prev]);
           targetConvId = newConv.conversation.id;
           navigate(`/chat/${targetConvId}`);
         } else {
           const newConv = await mockDataAdapter.createConversation(titleSnippet);
+          createdConversationIdRef.current = newConv.conversation.id;
           setConversations((prev) => [newConv.conversation, ...prev]);
           targetConvId = newConv.conversation.id;
           navigate(`/chat/${targetConvId}`);
@@ -223,6 +344,7 @@ export const ChatView: React.FC = () => {
     setStreamingText('');
     accumulatedTextRef.current = '';
     activeGenerationIdRef.current = null;
+    isStoppingRef.current = false;
     abortControllerRef.current = new AbortController();
 
     if (mode === 'real') {
@@ -230,13 +352,17 @@ export const ChatView: React.FC = () => {
         await realApiClient.streamMessage(
           targetConvId,
           content,
-          (event) => {
+          async (event) => {
             if (event.event === 'message.started') {
               activeGenerationIdRef.current = event.data.generationId;
             } else if (event.event === 'message.delta') {
               accumulatedTextRef.current += event.data.text;
               setStreamingText(accumulatedTextRef.current);
             } else if (event.event === 'message.completed') {
+              if (stopTimeoutRef.current) {
+                clearTimeout(stopTimeoutRef.current);
+                stopTimeoutRef.current = null;
+              }
               const fullText = accumulatedTextRef.current;
               setIsStreaming(false);
               setStreamingText('');
@@ -246,7 +372,28 @@ export const ChatView: React.FC = () => {
               realApiClient
                 .getConversation(targetConvId!)
                 .then((convRes) => {
-                  setMessages(convRes.messages);
+                  if (
+                    convRes.messages.length > 0 &&
+                    convRes.messages.some((m) => m.role === 'assistant')
+                  ) {
+                    setMessages(convRes.messages);
+                  } else {
+                    setMessages((prev) => {
+                      const withoutOpt = prev.filter((m) => m.id !== tempUserMsgId);
+                      return [
+                        ...withoutOpt,
+                        { ...optimisticMsg, isOptimistic: false },
+                        {
+                          id: event.data.messageId,
+                          conversationId: targetConvId!,
+                          role: 'assistant',
+                          content: fullText,
+                          createdAt: event.data.createdAt || new Date().toISOString(),
+                          status: 'completed',
+                        },
+                      ];
+                    });
+                  }
                 })
                 .catch(() => {
                   setMessages((prev) => {
@@ -264,45 +411,100 @@ export const ChatView: React.FC = () => {
                       },
                     ];
                   });
+                })
+                .finally(() => {
+                  activeGenerationIdRef.current = null;
+                  isStoppingRef.current = false;
                 });
             } else if (event.event === 'stream.error' || event.event === 'message.failed') {
+              if (stopTimeoutRef.current) {
+                clearTimeout(stopTimeoutRef.current);
+                stopTimeoutRef.current = null;
+              }
               setIsStreaming(false);
               const partial = accumulatedTextRef.current;
               setStreamingText('');
               accumulatedTextRef.current = '';
-              setErrorBanner(event.data.error?.message || 'Chat generation failed');
-              if (partial) {
-                setMessages((prev) => [
-                  ...prev,
-                  {
-                    id: event.data.messageId || `fail_${Date.now()}`,
-                    conversationId: targetConvId!,
-                    role: 'assistant',
-                    content: partial,
-                    createdAt: new Date().toISOString(),
-                    status: 'failed',
-                  },
-                ]);
+              const genId = activeGenerationIdRef.current;
+              const errMsg = event.data?.error?.message || 'Chat generation failed';
+
+              if (genId && targetConvId) {
+                await reconcileAuthoritativeGeneration(
+                  targetConvId,
+                  genId,
+                  errMsg,
+                  partial
+                );
+              } else {
+                setErrorBanner(errMsg);
+                if (partial) {
+                  setMessages((prev) => [
+                    ...prev,
+                    {
+                      id: event.data?.messageId || `fail_${Date.now()}`,
+                      conversationId: targetConvId!,
+                      role: 'assistant',
+                      content: partial,
+                      createdAt: new Date().toISOString(),
+                      status: 'failed',
+                    },
+                  ]);
+                }
               }
             } else if (event.event === 'message.stopped') {
+              if (stopTimeoutRef.current) {
+                clearTimeout(stopTimeoutRef.current);
+                stopTimeoutRef.current = null;
+              }
+              const partial = accumulatedTextRef.current;
               setIsStreaming(false);
               setStreamingText('');
               accumulatedTextRef.current = '';
+              const genId = activeGenerationIdRef.current;
+              if (genId && targetConvId) {
+                await reconcileAuthoritativeGeneration(targetConvId, genId, undefined, partial);
+              }
             }
           },
           { signal: abortControllerRef.current.signal }
         );
       } catch (err: unknown) {
+        if (stopTimeoutRef.current) {
+          clearTimeout(stopTimeoutRef.current);
+          stopTimeoutRef.current = null;
+        }
+        const partial = accumulatedTextRef.current;
         setIsStreaming(false);
         setStreamingText('');
         accumulatedTextRef.current = '';
+
+        const isAbort =
+          (err instanceof Error &&
+            (err.name === 'AbortError' || err.message.toLowerCase().includes('abort'))) ||
+          abortControllerRef.current?.signal.aborted;
+
+        const genId = activeGenerationIdRef.current;
         const errMsg =
           err instanceof ApiException
             ? err.message
             : err instanceof Error
               ? err.message
               : 'Stream error';
-        setErrorBanner(errMsg);
+
+        if (genId && targetConvId) {
+          // Reconcile authoritative generation state from backend
+          await reconcileAuthoritativeGeneration(
+            targetConvId,
+            genId,
+            isAbort ? undefined : errMsg,
+            partial
+          );
+        } else {
+          // Do not display generic AbortError as chat failure if user intentionally stopped
+          if (!isAbort && !isStoppingRef.current) {
+            setErrorBanner(errMsg);
+          }
+        }
       }
     } else {
       // Mock mode: maintain backward-compatible simulation for existing regression tests
@@ -343,20 +545,66 @@ export const ChatView: React.FC = () => {
     }
   };
 
-  const handleStopStreaming = () => {
+  const handleStopStreaming = async () => {
     if (mode === 'real') {
-      if (activeGenerationIdRef.current && conversationId) {
-        realApiClient
-          .cancelGeneration(conversationId, activeGenerationIdRef.current)
-          .catch(() => {});
+      const targetId = conversationId;
+      const genId = activeGenerationIdRef.current;
+
+      if (!genId || !targetId) {
+        if (abortControllerRef.current) {
+          abortControllerRef.current.abort();
+        }
+        setIsStreaming(false);
+        setStreamingText('');
+        accumulatedTextRef.current = '';
+        return;
       }
-      if (abortControllerRef.current) {
-        abortControllerRef.current.abort();
+
+      isStoppingRef.current = true;
+
+      try {
+        // 1. Await durable cancel acceptance BEFORE aborting SSE connection!
+        const cancelRes = await realApiClient.cancelGeneration(targetId, genId);
+
+        // 2. If already terminal (completed or stopped), reconcile immediately and abort local reader
+        if (
+          cancelRes.generation.status === 'stopped' ||
+          cancelRes.generation.status === 'completed'
+        ) {
+          if (abortControllerRef.current) {
+            abortControllerRef.current.abort();
+          }
+          await reconcileAuthoritativeGeneration(targetId, genId);
+          setIsStreaming(false);
+          setStreamingText('');
+          accumulatedTextRef.current = '';
+        } else {
+          // 202 Accepted: durable intent committed on backend.
+          // Keep SSE open to receive message.stopped, with a fallback timer
+          if (stopTimeoutRef.current) {
+            clearTimeout(stopTimeoutRef.current);
+          }
+          stopTimeoutRef.current = setTimeout(async () => {
+            if (abortControllerRef.current) {
+              abortControllerRef.current.abort();
+            }
+            await reconcileAuthoritativeGeneration(targetId, genId);
+            setIsStreaming(false);
+            setStreamingText('');
+            accumulatedTextRef.current = '';
+          }, 1200);
+        }
+      } catch (cancelErr: unknown) {
+        // Handle cancel failure VISIBLY! Do NOT swallow it or fabricate stopped state!
+        isStoppingRef.current = false;
+        const msg =
+          cancelErr instanceof ApiException
+            ? cancelErr.message
+            : cancelErr instanceof Error
+              ? cancelErr.message
+              : 'Failed to cancel generation';
+        setErrorBanner(msg);
       }
-      setIsStreaming(false);
-      setStreamingText('');
-      accumulatedTextRef.current = '';
-      activeGenerationIdRef.current = null;
     } else {
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
