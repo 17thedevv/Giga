@@ -37,12 +37,33 @@ Independent ChatGPT review requested by the user remains pending. No approval is
 - `apps/api/src/modules/agent/orchestrator.ts`: Implemented provider-agnostic `AgentOrchestrator` execution loop
   ensuring lease fencing, pre-dispatch validation, execution runtime invocation, verification check completion gate,
   and lease release on every exit path.
+- `apps/api/src/modules/agent/types.ts`: Separated public `AgentRun` DTO from internal `ClaimedRun` and
+  `WorkerLease`. Sensitive lease tokens, worker IDs, lease expiration timestamps, and internal attempt counts
+  are strictly omitted from `AgentRun`. Browser and public consumers never receive internal fencing credentials.
+- `apps/api/src/modules/agent/repository.ts`:
+  - `run()` mapper strictly projects public fields only.
+  - `assertActiveLease(row, leaseToken)` enforces `row.status === 'running'`, `row.lease_token === leaseToken`,
+    and `new Date(row.lease_expires_at).getTime() > Date.now()` on every state mutation.
+  - Wired active lease validation into `appendPlanUpdatedEvent`, `recordStepStarted`, `recordStepCompleted`,
+    `recordStepFailed`, and `finalizeRun`.
+  - `renewLease` enforces `lease_expires_at > NOW()`.
+- `apps/api/src/modules/agent/orchestrator.ts`:
+  - Implemented `validateDecision` to validate and bound decision provider outputs before persistence
+    (plan step length <= 256 chars, 1..20 steps, `toolCallId` <= 64 chars matching alphanumeric/dash/underscore,
+    summary <= 2048 chars, failure code <= 40 chars, message <= 1024 chars).
+  - Proactive lease renewal before decision provider call and before execution runtime invocation.
+  - Added background heartbeat timer running at `Math.floor(leaseDurationMs / 3)` that renews the lease
+    and aborts the local execution runtime signal if renewal fails.
+  - Ask and Plan mode completion: `ask` and `plan` modes complete cleanly with summary and `verifiedChecks: []`,
+    while `execute` mode retains strict positive verification evidence gate from sandbox build/tests.
 - Test suites:
-  - `apps/api/tests/agent/agent-orchestrator.test.ts`: 13 comprehensive orchestrator tests (queued → running → completed,
+  - `apps/api/tests/agent/agent-orchestrator.test.ts`: 16 comprehensive orchestrator tests (queued → running → completed,
     multi-step execution, mode permissions, unknown tools, malformed arguments, tool repair, permanent failure, step limits,
-    unverified completion denial, abort signal cancellation, owner isolation, SSE replay).
-  - `apps/api/tests/agent/agent-concurrency.test.ts`: 4 concurrency/fencing tests (two workers racing to claim run, stale worker
-    lease fencing, crash/retry step continuity, background execution surviving browser/SSE disconnect).
+    unverified completion denial, abort signal cancellation, owner isolation, SSE replay, Ask/Plan clean completion,
+    decision provider output bounding, public `AgentRun` DTO privacy).
+  - `apps/api/tests/agent/agent-concurrency.test.ts`: 6 concurrency/fencing tests (two workers racing to claim run, stale worker
+    lease fencing, crash/retry step continuity, background execution surviving browser/SSE disconnect, worker with expired lease
+    fenced before takeover, long invoke + takeover race preventing duplicate effects).
   - `apps/api/tests/agent/agent-boundaries.test.ts`: AST boundary checks proving zero forbidden imports (`child_process`, host shell,
     `node:fs`), plus real PostgreSQL step trigger tests (monotonic numbering, step immutability, step delete rejection).
   - `apps/api/tests/agent/agent-migration.test.ts`: Populated migration upgrade tests (010 → 011 and 011 → 012) with snapshot preservation.
@@ -52,20 +73,25 @@ Independent ChatGPT review requested by the user remains pending. No approval is
 1. **Claiming**: An eligible queued run (or run with expired lease) is claimed atomically via `claimRun` using
    `SELECT ... FOR UPDATE`. The run transitions to `running`, increments `attempt_count`, generates a cryptographically
    secure `lease_token`, and sets `lease_expires_at`.
-2. **Fencing**: Every subsequent mutation (`recordStepStarted`, `recordStepCompleted`, `recordStepFailed`, `appendPlanUpdatedEvent`,
-   `finalizeRun`) verifies `lease_token = $leaseToken AND status = 'running'`. If the lease expired or another worker claimed
-   the run, the stale worker is immediately fenced and rejected.
-3. **Pre-dispatch Tool Validation**: Requested tool names, argument schemas, path traversal boundaries, and execution mode
-   risk policies (Ask = read only, Plan = read only, Execute = sandbox writes/execution) are strictly validated before
-   any execution runtime dispatch. Unknown tools or invalid arguments fail before runtime invocation.
-4. **Verified Completion Gate**: An Agent cannot mark itself `completed` simply by asserting "done". The orchestrator checks
-   verification evidence from the execution runtime. If no verified checks passed, or if any check failed, completion is denied
-   and the run fails with `VERIFICATION_FAILED`.
-5. **Crash / Retry Continuity**: When a worker crashes, the committed steps remain durably persisted in `agent_run_steps`.
+2. **Active Lease Expiration & Fencing**: Every subsequent mutation (`recordStepStarted`, `recordStepCompleted`, `recordStepFailed`,
+   `appendPlanUpdatedEvent`, `finalizeRun`) row-locks the run and strictly validates both `lease_token = $leaseToken` AND
+   `lease_expires_at > NOW()`. If a worker's lease expires—even if no successor has claimed the run yet—any further mutation
+   attempt is immediately fenced and rejected.
+3. **Heartbeat & In-Flight Abort**: The orchestrator maintains an active lease renewal heartbeat. If a renewal fails
+   or an abort signal fires, the local `AbortController` triggers, signaling the execution runtime to stop immediately
+   and preventing stale side-effects.
+4. **Pre-dispatch Tool Validation & Output Bounding**: Requested tool names, argument schemas, path traversal boundaries,
+   and execution mode policies (Ask = read only, Plan = read only, Execute = sandbox writes/execution) are validated before
+   runtime dispatch. Decision provider outputs are checked for bounded sizes before hitting the database.
+5. **Verified Completion Gate**:
+   - `execute` mode requires positive verification evidence from the runtime (e.g. `run_tests` passed). Unverified completion
+     is rejected with `VERIFICATION_FAILED`.
+   - `ask` and `plan` modes complete cleanly with the decision summary and `verifiedChecks: []`.
+6. **Crash / Retry Continuity**: When a worker crashes, committed steps remain durably persisted in `agent_run_steps`.
    When a successor worker claims the run, it inspects existing committed steps and continues from the next monotonic step number,
    preventing duplicate side-effects.
-6. **Worker Cleanup**: On every exit path (success, failure, cancellation, exception), the orchestrator releases the lease
-   in a `finally` block via `releaseLease`.
+7. **Worker Cleanup**: On every exit path (success, failure, cancellation, exception), the orchestrator stops its heartbeat
+   and releases the lease in a `finally` block via `releaseLease`.
 
 ## Security and execution boundary
 
@@ -75,6 +101,8 @@ Independent ChatGPT review requested by the user remains pending. No approval is
   files are created or modified.
 - **Production Default Safe**: Default runtime remains `UnavailableExecutionRuntime` which rejects execution truthfully with
   `RUNTIME_UNAVAILABLE`. Real cloud sandbox execution is deferred until ADR-003 and security reviews are approved.
+- **DTO Credential Privacy**: Internal fencing tokens (`leaseToken`), `workerId`, `leaseExpiresAt`, and `attemptCount` are
+  isolated to internal runtime types and never returned to browser clients or public HTTP endpoints.
 - **Tenant Isolation**: Every database operation is scoped by `owner_id`. Cross-tenant step/event access returns identical 404s.
 
 ## Checks executed
@@ -86,10 +114,11 @@ Ordinary application `DATABASE_URL` was not used.
 | Command / action | Result |
 |---|---|
 | `npm run typecheck` in `apps/api` | PASS: 0 errors |
+| `npm run typecheck` in `apps/web` | PASS: 0 errors |
 | `npm run build` in `apps/api` | PASS: 0 errors |
-| `npx tsx --test tests/agent/*.test.ts tests/db-migrations.test.ts` with real PostgreSQL | PASS: 40 tests, 0 skipped, 0 failed |
-| Full `npm test` with dedicated `TEST_DATABASE_URL` | PASS: 69 tests in root suite, all agent tests pass |
-| Full `npm test` with `TEST_DATABASE_URL` unset (pg-mem) | PASS: 370 tests, 0 failed, 24 PostgreSQL-only skips |
+| `npx tsx --test tests/agent/*.test.ts tests/db-migrations.test.ts` with real PostgreSQL | PASS: 45 tests, 0 skipped, 0 failed |
+| Full `npm test` with dedicated `TEST_DATABASE_URL` (real PostgreSQL 18) | PASS: 399 tests, 54 suites, 0 failed, 0 skipped |
+| Full `npm test` with `TEST_DATABASE_URL` unset (pg-mem) | PASS: 375 tests, 54 suites, 0 failed, 24 PostgreSQL-only skips |
 | `node --test .agents/scripts/validate-git-workflow.test.mjs` | PASS: 6 tests |
 | `git diff --check` | PASS: 0 whitespace errors |
 

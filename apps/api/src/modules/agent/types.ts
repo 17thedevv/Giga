@@ -58,10 +58,21 @@ export interface AgentRun {
   readonly finishedAt?: string;
   readonly error?: { readonly code: string; readonly message: string };
   readonly result?: AgentRunResult;
-  readonly workerId?: string;
-  readonly leaseToken?: string;
-  readonly leaseExpiresAt?: string;
-  readonly attemptCount?: number;
+}
+
+export interface WorkerLease {
+  readonly workerId: string;
+  readonly leaseToken: string;
+  readonly leaseExpiresAt: string;
+  readonly attemptCount: number;
+}
+
+export interface ClaimedRun {
+  readonly run: AgentRun;
+  readonly leaseToken: string;
+  readonly leaseExpiresAt: string;
+  readonly workerId: string;
+  readonly attemptCount: number;
 }
 
 export interface RunInput {

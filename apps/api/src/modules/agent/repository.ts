@@ -9,12 +9,14 @@ import {
   type AgentStep,
   type AgentStatus,
   type AgentWorkspace,
+  type ClaimedRun,
   type ListOptions,
   type Page,
   type RunInput,
   type StepStatus,
   type ToolRisk,
   type VerifiedCheck,
+  type WorkerLease,
 } from './types.js';
 import type { AgentPlan } from './decision-provider.js';
 
@@ -119,10 +121,6 @@ const run = (row: RunRow): AgentRun => {
           },
         }
       : {}),
-    ...(row.worker_id ? { workerId: row.worker_id } : {}),
-    ...(row.lease_token ? { leaseToken: row.lease_token } : {}),
-    ...(row.lease_expires_at ? { leaseExpiresAt: iso(row.lease_expires_at) } : {}),
-    ...(row.attempt_count > 0 ? { attemptCount: row.attempt_count } : {}),
   };
   return result;
 };
@@ -144,10 +142,7 @@ const step = (row: StepRow): AgentStep => ({
   ...(row.completed_at ? { completedAt: iso(row.completed_at) } : {}),
 });
 
-export interface ClaimedRun {
-  readonly run: AgentRun;
-  readonly leaseToken: string;
-}
+export type { ClaimedRun, WorkerLease };
 
 export interface StepStartInput {
   readonly toolName: string;
@@ -445,7 +440,13 @@ export class AgentRepository {
           [ownerId, runId, updated.rows[0].last_event_id, JSON.stringify({ runId, status: 'running' })]
         );
 
-        return { run: run(updated.rows[0]), leaseToken };
+        return {
+          run: run(updated.rows[0]),
+          leaseToken,
+          leaseExpiresAt: iso(expiresAt),
+          workerId,
+          attemptCount: updated.rows[0].attempt_count,
+        };
       }
 
       if (row.status === 'running') {
@@ -465,11 +466,29 @@ export class AgentRepository {
         );
         if (!updated.rows[0]) return null;
 
-        return { run: run(updated.rows[0]), leaseToken };
+        return {
+          run: run(updated.rows[0]),
+          leaseToken,
+          leaseExpiresAt: iso(expiresAt),
+          workerId,
+          attemptCount: updated.rows[0].attempt_count,
+        };
       }
 
       return null;
     });
+  }
+
+  private assertActiveLease(row: RunRow | undefined, leaseToken: string): void {
+    if (
+      !row ||
+      row.status !== 'running' ||
+      row.lease_token !== leaseToken ||
+      !row.lease_expires_at ||
+      new Date(row.lease_expires_at).getTime() <= Date.now()
+    ) {
+      throw new ConflictError('Worker fenced: lease expired or run status changed');
+    }
   }
 
   /**
@@ -483,13 +502,11 @@ export class AgentRepository {
   ): Promise<AgentEvent> {
     return this.transaction(async (client) => {
       const lock = await client.query<RunRow>(
-        'SELECT lease_token, status, last_event_id FROM agent_runs WHERE owner_id = $1 AND id = $2 FOR UPDATE',
+        'SELECT lease_token, status, last_event_id, lease_expires_at FROM agent_runs WHERE owner_id = $1 AND id = $2 FOR UPDATE',
         [ownerId, runId]
       );
-      const row = lock.rows[0];
-      if (!row || row.status !== 'running' || row.lease_token !== leaseToken) {
-        throw new ConflictError('Worker fenced: lease expired or run status changed');
-      }
+      this.assertActiveLease(lock.rows[0], leaseToken);
+      const row = lock.rows[0]!;
 
       const nextSequence = row.last_event_id + 1;
       await client.query(
@@ -519,13 +536,11 @@ export class AgentRepository {
   ): Promise<{ step: AgentStep; event: AgentEvent }> {
     return this.transaction(async (client) => {
       const lock = await client.query<RunRow>(
-        'SELECT lease_token, status, last_event_id FROM agent_runs WHERE owner_id = $1 AND id = $2 FOR UPDATE',
+        'SELECT lease_token, status, last_event_id, lease_expires_at FROM agent_runs WHERE owner_id = $1 AND id = $2 FOR UPDATE',
         [ownerId, runId]
       );
-      const runCurrent = lock.rows[0];
-      if (!runCurrent || runCurrent.status !== 'running' || runCurrent.lease_token !== leaseToken) {
-        throw new ConflictError('Worker fenced: lease expired or run status changed');
-      }
+      this.assertActiveLease(lock.rows[0], leaseToken);
+      const runCurrent = lock.rows[0]!;
 
       const seqRes = await client.query<{ next_step: number }>(
         'SELECT COALESCE(MAX(step_number), 0) + 1 AS next_step FROM agent_run_steps WHERE run_id = $1',
@@ -573,13 +588,11 @@ export class AgentRepository {
   ): Promise<{ step: AgentStep; event: AgentEvent }> {
     return this.transaction(async (client) => {
       const lock = await client.query<RunRow>(
-        'SELECT lease_token, status, last_event_id FROM agent_runs WHERE owner_id = $1 AND id = $2 FOR UPDATE',
+        'SELECT lease_token, status, last_event_id, lease_expires_at FROM agent_runs WHERE owner_id = $1 AND id = $2 FOR UPDATE',
         [ownerId, runId]
       );
-      const runCurrent = lock.rows[0];
-      if (!runCurrent || runCurrent.status !== 'running' || runCurrent.lease_token !== leaseToken) {
-        throw new ConflictError('Worker fenced: lease expired or run status changed');
-      }
+      this.assertActiveLease(lock.rows[0], leaseToken);
+      const runCurrent = lock.rows[0]!;
 
       const stepUpdate = await client.query<StepRow>(
         `UPDATE agent_run_steps
@@ -628,13 +641,11 @@ export class AgentRepository {
   ): Promise<{ step: AgentStep; event: AgentEvent }> {
     return this.transaction(async (client) => {
       const lock = await client.query<RunRow>(
-        'SELECT lease_token, status, last_event_id FROM agent_runs WHERE owner_id = $1 AND id = $2 FOR UPDATE',
+        'SELECT lease_token, status, last_event_id, lease_expires_at FROM agent_runs WHERE owner_id = $1 AND id = $2 FOR UPDATE',
         [ownerId, runId]
       );
-      const runCurrent = lock.rows[0];
-      if (!runCurrent || runCurrent.status !== 'running' || runCurrent.lease_token !== leaseToken) {
-        throw new ConflictError('Worker fenced: lease expired or run status changed');
-      }
+      this.assertActiveLease(lock.rows[0], leaseToken);
+      const runCurrent = lock.rows[0]!;
 
       const stepUpdate = await client.query<StepRow>(
         `UPDATE agent_run_steps
@@ -681,13 +692,11 @@ export class AgentRepository {
   ): Promise<{ run: AgentRun; event: AgentEvent }> {
     return this.transaction(async (client) => {
       const lock = await client.query<RunRow>(
-        'SELECT lease_token, status, last_event_id FROM agent_runs WHERE owner_id = $1 AND id = $2 FOR UPDATE',
+        'SELECT lease_token, status, last_event_id, lease_expires_at FROM agent_runs WHERE owner_id = $1 AND id = $2 FOR UPDATE',
         [ownerId, runId]
       );
-      const runCurrent = lock.rows[0];
-      if (!runCurrent || runCurrent.status !== 'running' || runCurrent.lease_token !== leaseToken) {
-        throw new ConflictError('Worker fenced: lease expired or run status changed');
-      }
+      this.assertActiveLease(lock.rows[0], leaseToken);
+      const runCurrent = lock.rows[0]!;
 
       const nextEventSeq = runCurrent.last_event_id + 1;
 
@@ -777,11 +786,12 @@ export class AgentRepository {
   }
 
   async renewLease(ownerId: string, runId: string, leaseToken: string, extensionMs = 30000): Promise<boolean> {
+    const newExpiresAt = new Date(Date.now() + extensionMs);
     const res = await this.pool.query(
       `UPDATE agent_runs
-      SET lease_expires_at = NOW() + ($1 || ' milliseconds')::interval, updated_at = NOW()
-      WHERE owner_id = $2 AND id = $3 AND lease_token = $4 AND status = 'running'`,
-      [extensionMs, ownerId, runId, leaseToken]
+      SET lease_expires_at = $1, updated_at = NOW()
+      WHERE owner_id = $2 AND id = $3 AND lease_token = $4 AND status = 'running' AND lease_expires_at > NOW()`,
+      [newExpiresAt, ownerId, runId, leaseToken]
     );
     return (res.rowCount ?? 0) > 0;
   }

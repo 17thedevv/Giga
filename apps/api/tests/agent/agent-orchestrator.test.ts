@@ -395,4 +395,140 @@ describe('GigaAgent Durable Orchestrator & Deterministic Fake Runtime', () => {
     assert.equal(page3.items[1]!.sequence, 5);
     assert.equal(page3.items[1]!.type, 'run.completed');
   });
+
+  it('completes Ask and Plan modes cleanly without sandbox build/test verification', async () => {
+    // 1. Ask mode
+    const askRun = await enqueue('ask', 'How do I configure Vite?');
+    const runtime = new DeterministicFakeExecutionRuntime();
+    const askDecisionProvider = new DeterministicDecisionProvider({
+      custom: () => ({
+        kind: 'complete',
+        summary: 'To configure Vite, add vite.config.ts with plugins.',
+      }),
+    });
+    const registry = createDefaultToolRegistry();
+    const askOrchestrator = new AgentOrchestrator(repository, registry, askDecisionProvider, runtime);
+
+    const askOutcome = await askOrchestrator.executeRun(owner, askRun.id);
+    assert.equal(askOutcome.status, 'completed');
+    if (askOutcome.status === 'completed') {
+      assert.equal(askOutcome.run.status, 'completed');
+      assert.equal(askOutcome.run.result?.summary, 'To configure Vite, add vite.config.ts with plugins.');
+      assert.deepEqual(askOutcome.run.result?.verifiedChecks, []);
+    }
+
+    // 2. Plan mode
+    const planRun = await enqueue('plan', 'Design auth architecture');
+    const planDecisionProvider = new DeterministicDecisionProvider({
+      custom: (input) => {
+        if (!input.currentPlan) {
+          return {
+            kind: 'plan',
+            plan: { version: 1, steps: ['Step 1: Evaluate JWT', 'Step 2: Define sessions'] },
+          };
+        }
+        return {
+          kind: 'complete',
+          summary: 'Auth architecture plan designed successfully.',
+        };
+      },
+    });
+    const planOrchestrator = new AgentOrchestrator(repository, registry, planDecisionProvider, runtime);
+
+    const planOutcome = await planOrchestrator.executeRun(owner, planRun.id);
+    assert.equal(planOutcome.status, 'completed');
+    if (planOutcome.status === 'completed') {
+      assert.equal(planOutcome.run.status, 'completed');
+      assert.equal(planOutcome.run.result?.summary, 'Auth architecture plan designed successfully.');
+      assert.deepEqual(planOutcome.run.result?.verifiedChecks, []);
+    }
+  });
+
+  it('rejects malformed decision provider outputs before persistence and fails truthfully', async () => {
+    const registry = createDefaultToolRegistry();
+    const runtime = new DeterministicFakeExecutionRuntime();
+
+    // 1. Malformed toolCallId (contains spaces / special characters)
+    const run1 = await enqueue('execute', 'Invalid toolCallId task');
+    const invalidIdProvider = new DeterministicDecisionProvider({
+      custom: () => ({
+        kind: 'tool_call',
+        toolCall: {
+          toolCallId: 'invalid call id with spaces!',
+          toolName: 'list_files',
+          arguments: {},
+        },
+      }),
+    });
+    const orchestrator1 = new AgentOrchestrator(repository, registry, invalidIdProvider, runtime);
+    const outcome1 = await orchestrator1.executeRun(owner, run1.id);
+    assert.equal(outcome1.status, 'failed');
+    if (outcome1.status === 'failed') {
+      assert.equal(outcome1.run.error?.code, 'INVALID_ARGUMENTS');
+      assert.match(outcome1.run.error?.message ?? '', /toolCallId/i);
+    }
+
+    // 2. Oversized plan step (> 256 characters)
+    const run2 = await enqueue('plan', 'Oversized plan step task');
+    const invalidPlanProvider = new DeterministicDecisionProvider({
+      custom: () => ({
+        kind: 'plan',
+        plan: {
+          version: 1,
+          steps: ['x'.repeat(300)],
+        },
+      }),
+    });
+    const orchestrator2 = new AgentOrchestrator(repository, registry, invalidPlanProvider, runtime);
+    const outcome2 = await orchestrator2.executeRun(owner, run2.id);
+    assert.equal(outcome2.status, 'failed');
+    if (outcome2.status === 'failed') {
+      assert.equal(outcome2.run.error?.code, 'INVALID_ARGUMENTS');
+      assert.match(outcome2.run.error?.message ?? '', /plan step/i);
+    }
+
+    // 3. Oversized plan steps count (> 20 steps)
+    const run3 = await enqueue('plan', 'Too many plan steps task');
+    const tooManyStepsProvider = new DeterministicDecisionProvider({
+      custom: () => ({
+        kind: 'plan',
+        plan: {
+          version: 1,
+          steps: Array.from({ length: 25 }, (_, i) => `Step ${i + 1}`),
+        },
+      }),
+    });
+    const orchestrator3 = new AgentOrchestrator(repository, registry, tooManyStepsProvider, runtime);
+    const outcome3 = await orchestrator3.executeRun(owner, run3.id);
+    assert.equal(outcome3.status, 'failed');
+    if (outcome3.status === 'failed') {
+      assert.equal(outcome3.run.error?.code, 'INVALID_ARGUMENTS');
+      assert.match(outcome3.run.error?.message ?? '', /1\.\.20/i);
+    }
+  });
+
+  it('guarantees public AgentRun DTO does not leak leaseToken, workerId, or internal fencing credentials', async () => {
+    const run = await enqueue('execute', 'Privacy DTO test');
+    const runtime = new DeterministicFakeExecutionRuntime();
+    const decisionProvider = new DeterministicDecisionProvider({ scenario: 'one-step-success' });
+    const registry = createDefaultToolRegistry();
+    const orchestrator = new AgentOrchestrator(repository, registry, decisionProvider, runtime);
+
+    const outcome = await orchestrator.executeRun(owner, run.id);
+    assert.equal(outcome.status, 'completed');
+
+    // Check outcome.run
+    const runFromOutcome = outcome.run as unknown as Record<string, unknown>;
+    assert.equal(runFromOutcome.leaseToken, undefined);
+    assert.equal(runFromOutcome.workerId, undefined);
+    assert.equal(runFromOutcome.leaseExpiresAt, undefined);
+    assert.equal(runFromOutcome.attemptCount, undefined);
+
+    // Check getRun
+    const fetchedRun = (await repository.getRun(owner, run.id)) as unknown as Record<string, unknown>;
+    assert.equal(fetchedRun.leaseToken, undefined);
+    assert.equal(fetchedRun.workerId, undefined);
+    assert.equal(fetchedRun.leaseExpiresAt, undefined);
+    assert.equal(fetchedRun.attemptCount, undefined);
+  });
 });

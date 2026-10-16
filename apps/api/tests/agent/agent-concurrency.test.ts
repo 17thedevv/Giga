@@ -19,6 +19,7 @@ test.before(async () => {
 
 test.after(async () => {
   await testDb.cleanup();
+  await testDb.pool.end();
 });
 
 async function createOwnerAndWorkspace(suffix: string): Promise<{ ownerId: string; workspaceId: string }> {
@@ -72,7 +73,16 @@ test('two workers racing to claim same run: exactly one acquires lease', async (
   const activeRun = await repo.getRun(ownerId, run.id);
   assert.ok(activeRun);
   assert.equal(activeRun.status, 'running');
-  assert.equal(activeRun.workerId, winner.run.workerId);
+  // Sensitive lease/fencing state must NOT leak into public AgentRun DTO
+  assert.equal((activeRun as unknown as Record<string, unknown>).leaseToken, undefined);
+  assert.equal((activeRun as unknown as Record<string, unknown>).workerId, undefined);
+  assert.equal((activeRun as unknown as Record<string, unknown>).leaseExpiresAt, undefined);
+  assert.equal((activeRun as unknown as Record<string, unknown>).attemptCount, undefined);
+
+  // Direct DB check confirms worker_id was recorded internally
+  const dbRow = await testDb.pool.query('SELECT worker_id, lease_token FROM agent_runs WHERE id = $1', [run.id]);
+  assert.equal(dbRow.rows[0].worker_id, winner.workerId);
+  assert.equal(dbRow.rows[0].lease_token, winner.leaseToken);
 });
 
 test('stale worker is fenced when lease expires or is claimed by another worker', async () => {
@@ -255,4 +265,162 @@ test('browser / SSE disconnect does not terminate background Agent execution', a
   assert.ok(eventPage.items.length >= 3);
   assert.equal(eventPage.items[0]!.type, 'run.status');
   assert.equal(eventPage.items[eventPage.items.length - 1]!.type, 'run.completed');
+});
+
+test('worker with expired lease cannot mutate even before another worker takes over', async () => {
+  const { ownerId, workspaceId } = await createOwnerAndWorkspace('expired-before-takeover');
+  const run = await createQueuedRun(ownerId, workspaceId, 'Expired lease mutation test');
+
+  // Worker 1 claims run with 1-second lease
+  const claim1 = await repo.claimRun(ownerId, run.id, 'worker-1', 1000);
+  assert.ok(claim1);
+  const leaseToken1 = claim1.leaseToken;
+
+  // Manually expire the lease in the database BEFORE any other worker claims it
+  await testDb.pool.query(
+    `UPDATE agent_runs SET lease_expires_at = NOW() - INTERVAL '1 second' WHERE id = $1;`,
+    [run.id]
+  );
+
+  // Confirm no second worker has taken over yet
+  const dbCheck = await testDb.pool.query('SELECT lease_token, worker_id, status FROM agent_runs WHERE id = $1', [run.id]);
+  assert.equal(dbCheck.rows[0].lease_token, leaseToken1);
+  assert.equal(dbCheck.rows[0].worker_id, 'worker-1');
+  assert.equal(dbCheck.rows[0].status, 'running');
+
+  // Worker 1 attempts to record step started -> must be rejected
+  await assert.rejects(
+    async () => {
+      await repo.recordStepStarted(ownerId, run.id, leaseToken1, {
+        toolName: 'list_files',
+        toolCallId: 'call-expired-1',
+        risk: 'read',
+        arguments: {},
+      });
+    },
+    /fenced|expired/i,
+    'Worker with expired lease must be rejected on recordStepStarted'
+  );
+
+  // Worker 1 attempts to append plan -> must be rejected
+  await assert.rejects(
+    async () => {
+      await repo.appendPlanUpdatedEvent(ownerId, run.id, leaseToken1, {
+        version: 1,
+        steps: ['Plan step'],
+      });
+    },
+    /fenced|expired/i,
+    'Worker with expired lease must be rejected on appendPlanUpdatedEvent'
+  );
+
+  // Worker 1 attempts to record step completed -> must be rejected
+  await assert.rejects(
+    async () => {
+      await repo.recordStepCompleted(ownerId, run.id, leaseToken1, 1, {
+        output: { ok: true },
+        durationMs: 5,
+      });
+    },
+    /fenced|expired/i,
+    'Worker with expired lease must be rejected on recordStepCompleted'
+  );
+
+  // Worker 1 attempts to finalize run -> must be rejected
+  await assert.rejects(
+    async () => {
+      await repo.finalizeRun(ownerId, run.id, leaseToken1, {
+        status: 'completed',
+        summary: 'Falsely finalizing with expired lease',
+        verifiedChecks: [],
+      });
+    },
+    /fenced|expired/i,
+    'Worker with expired lease must be rejected on finalizeRun'
+  );
+
+  // Worker 1 attempts to renew lease -> must return false because lease is already expired
+  const renewed = await repo.renewLease(ownerId, run.id, leaseToken1, 30000);
+  assert.equal(renewed, false, 'Expired lease cannot be renewed');
+});
+
+test('long invoke + takeover does not create duplicate effects', async () => {
+  const { ownerId, workspaceId } = await createOwnerAndWorkspace('long-invoke-takeover');
+  const run = await createQueuedRun(ownerId, workspaceId, 'Long invoke race test');
+
+  // Worker 1 claims run with 1-second lease
+  const claim1 = await repo.claimRun(ownerId, run.id, 'worker-1', 1000);
+  assert.ok(claim1);
+
+  // Worker 1 starts step 1: write_file
+  const { step: step1 } = await repo.recordStepStarted(ownerId, run.id, claim1.leaseToken, {
+    toolName: 'write_file',
+    toolCallId: 'call-w1-write',
+    risk: 'sandbox_write',
+    arguments: { path: 'file.txt', content: 'w1' },
+  });
+  assert.equal(step1.stepNumber, 1);
+
+  // Simulate long execution: Worker 1 is in-flight while its lease expires
+  await testDb.pool.query(
+    `UPDATE agent_runs SET lease_expires_at = NOW() - INTERVAL '1 second' WHERE id = $1;`,
+    [run.id]
+  );
+
+  // Worker 2 takes over the expired run
+  const claim2 = await repo.claimRun(ownerId, run.id, 'worker-2', 30000);
+  assert.ok(claim2, 'Worker 2 must successfully take over');
+
+  // Worker 2 executes step 2 cleanly
+  await repo.recordStepStarted(ownerId, run.id, claim2.leaseToken, {
+    toolName: 'run_tests',
+    toolCallId: 'call-w2-tests',
+    risk: 'sandbox_execute',
+    arguments: {},
+  });
+  await repo.recordStepCompleted(ownerId, run.id, claim2.leaseToken, 2, {
+    output: { exitCode: 0, stdout: 'PASS' },
+    durationMs: 10,
+  });
+  await repo.finalizeRun(ownerId, run.id, claim2.leaseToken, {
+    status: 'completed',
+    summary: 'Completed by Worker 2 after Worker 1 timed out',
+    verifiedChecks: [{ name: 'run_tests', outcome: 'passed', summary: 'Pass' }],
+  });
+
+  // Now Worker 1's long invoke returns and Worker 1 tries to commit step 1 completion
+  await assert.rejects(
+    async () => {
+      await repo.recordStepCompleted(ownerId, run.id, claim1.leaseToken, 1, {
+        output: { path: 'file.txt', bytesWritten: 2 },
+        durationMs: 2500,
+      });
+    },
+    /fenced|expired/i,
+    'Stale Worker 1 completing long invoke must be fenced'
+  );
+
+  // And Worker 1 cannot finalize or do anything else
+  await assert.rejects(
+    async () => {
+      await repo.finalizeRun(ownerId, run.id, claim1.leaseToken, {
+        status: 'completed',
+        summary: 'Worker 1 duplicate completion',
+        verifiedChecks: [],
+      });
+    },
+    /fenced|expired/i
+  );
+
+  // Verify steps in database: step 1 was started (pending/aborted), step 2 was completed, exactly 2 step records total
+  const steps = await repo.listSteps(ownerId, run.id);
+  assert.equal(steps.length, 2);
+  assert.equal(steps[0]!.stepNumber, 1);
+  assert.equal(steps[0]!.status, 'running'); // Worker 1 never committed completion
+  assert.equal(steps[1]!.stepNumber, 2);
+  assert.equal(steps[1]!.status, 'completed'); // Worker 2 succeeded
+
+  const finalRun = await repo.getRun(ownerId, run.id);
+  assert.equal(finalRun.status, 'completed');
+  assert.equal(finalRun.result?.summary, 'Completed by Worker 2 after Worker 1 timed out');
 });

@@ -1,9 +1,10 @@
+import crypto from 'node:crypto';
 import { ConflictError } from '../auth/auth-validation.js';
 import type { AgentRepository } from './repository.js';
 import type { ToolRegistry } from './tool-registry.js';
-import type { AgentDecisionProvider, AgentPlan, StepObservation } from './decision-provider.js';
+import type { AgentDecision, AgentDecisionProvider, AgentPlan, StepObservation } from './decision-provider.js';
 import type { ExecutionRuntime } from './execution-runtime.js';
-import type { AgentRun } from './types.js';
+import { AGENT_ERROR_CODES, type AgentRun } from './types.js';
 
 export interface OrchestratorOptions {
   readonly workerId?: string;
@@ -18,6 +19,67 @@ export type OrchestrationOutcome =
   | { readonly status: 'cancelled'; readonly run: AgentRun }
   | { readonly status: 'skipped'; readonly reason: string }
   | { readonly status: 'fenced'; readonly reason: string };
+
+function validateDecision(decision: AgentDecision): { valid: true } | { valid: false; error: string } {
+  if (!decision || typeof decision !== 'object' || !('kind' in decision)) {
+    return { valid: false, error: 'Malformed decision: object with kind required' };
+  }
+  switch (decision.kind) {
+    case 'plan': {
+      if (!decision.plan || typeof decision.plan !== 'object') {
+        return { valid: false, error: 'Malformed plan: plan object required' };
+      }
+      if (typeof decision.plan.version !== 'number' || decision.plan.version < 1) {
+        return { valid: false, error: 'Malformed plan: version must be integer >= 1' };
+      }
+      if (!Array.isArray(decision.plan.steps) || decision.plan.steps.length === 0 || decision.plan.steps.length > 20) {
+        return { valid: false, error: 'Malformed plan: steps must be array of 1..20 items' };
+      }
+      for (const s of decision.plan.steps) {
+        if (typeof s !== 'string' || s.trim().length === 0 || s.length > 256) {
+          return { valid: false, error: 'Malformed plan step: each step must be string <= 256 chars' };
+        }
+      }
+      return { valid: true };
+    }
+    case 'tool_call': {
+      if (!decision.toolCall || typeof decision.toolCall !== 'object') {
+        return { valid: false, error: 'Malformed tool_call: toolCall object required' };
+      }
+      const { toolCallId, toolName, arguments: args } = decision.toolCall;
+      if (typeof toolCallId !== 'string' || toolCallId.trim().length === 0 || toolCallId.length > 64) {
+        return { valid: false, error: 'Malformed toolCallId: must be non-empty string <= 64 chars' };
+      }
+      if (!/^[a-zA-Z0-9_-]+$/.test(toolCallId)) {
+        return { valid: false, error: 'Malformed toolCallId: must contain only alphanumeric, _, -' };
+      }
+      if (typeof toolName !== 'string' || toolName.trim().length === 0 || toolName.length > 64) {
+        return { valid: false, error: 'Malformed toolName: must be non-empty string <= 64 chars' };
+      }
+      if (args === undefined || typeof args !== 'object' || Array.isArray(args)) {
+        return { valid: false, error: 'Malformed tool arguments: must be an object' };
+      }
+      return { valid: true };
+    }
+    case 'complete': {
+      if (typeof decision.summary !== 'string' || decision.summary.trim().length === 0 || decision.summary.length > 2048) {
+        return { valid: false, error: 'Malformed completion summary: must be non-empty string <= 2048 chars' };
+      }
+      return { valid: true };
+    }
+    case 'fail': {
+      if (typeof decision.code !== 'string' || decision.code.length === 0 || decision.code.length > 40) {
+        return { valid: false, error: 'Malformed failure code: must be non-empty string <= 40 chars' };
+      }
+      if (typeof decision.message !== 'string' || decision.message.length === 0 || decision.message.length > 1024) {
+        return { valid: false, error: 'Malformed failure message: must be non-empty string <= 1024 chars' };
+      }
+      return { valid: true };
+    }
+    default:
+      return { valid: false, error: `Unknown decision kind: ${(decision as { kind: string }).kind}` };
+  }
+}
 
 export class AgentOrchestrator {
   private readonly workerId: string;
@@ -43,15 +105,16 @@ export class AgentOrchestrator {
    * Guarantees:
    * 1. Claims an eligible queued or stale run
    * 2. Transitions it durably to running
-   * 3. Obtains plan/action from injected AgentDecisionProvider
-   * 4. Validates requested tool and arguments
-   * 5. Checks mode/permission policy
-   * 6. Invokes injected ExecutionRuntime
-   * 7. Persists tool/step/events atomically
-   * 8. Observes the result
-   * 9. Retries/repairs within explicit limits
-   * 10. Finalizes completed/failed truthfully
-   * 11. Releases/fences worker on every exit path
+   * 3. Proactively renews worker lease with periodic heartbeat
+   * 4. Obtains plan/action from injected AgentDecisionProvider
+   * 5. Validates decision fields and requested tool/arguments bounds
+   * 6. Checks mode/permission policy (Ask = read only, Plan = read only, Execute = writes/exec)
+   * 7. Invokes injected ExecutionRuntime
+   * 8. Persists tool/step/events atomically with strict lease fencing
+   * 9. Observes the result
+   * 10. Retries/repairs within explicit limits
+   * 11. Finalizes completed/failed truthfully with verified evidence gate for execute mode
+   * 12. Releases/fences worker on every exit path
    */
   async executeRun(ownerId: string, runId: string, signal?: AbortSignal): Promise<OrchestrationOutcome> {
     const claim = await this.repository.claimRun(ownerId, runId, this.workerId, this.leaseDurationMs);
@@ -59,11 +122,36 @@ export class AgentOrchestrator {
       return { status: 'skipped', reason: 'Run is not eligible or already claimed by another active worker' };
     }
 
-    const { leaseToken } = claim;
-    let currentRun = claim.run;
+    const { leaseToken, attemptCount } = claim;
+    const currentRun = claim.run;
+
+    const runAbortController = new AbortController();
+    if (signal) {
+      if (signal.aborted) {
+        runAbortController.abort();
+      } else {
+        signal.addEventListener('abort', () => runAbortController.abort(), { once: true });
+      }
+    }
+
+    let heartbeatActive = true;
+    const heartbeatIntervalMs = Math.max(100, Math.floor(this.leaseDurationMs / 3));
+    const heartbeatTimer = setInterval(async () => {
+      if (!heartbeatActive) return;
+      try {
+        const renewed = await this.repository.renewLease(ownerId, runId, leaseToken, this.leaseDurationMs);
+        if (!renewed) {
+          heartbeatActive = false;
+          runAbortController.abort();
+        }
+      } catch {
+        heartbeatActive = false;
+        runAbortController.abort();
+      }
+    }, heartbeatIntervalMs);
 
     try {
-      if (signal?.aborted) {
+      if (runAbortController.signal.aborted) {
         const finalized = await this.repository.finalizeRun(ownerId, runId, leaseToken, { status: 'cancelled' });
         return { status: 'cancelled', run: finalized.run };
       }
@@ -76,7 +164,7 @@ export class AgentOrchestrator {
         mode: currentRun.mode,
         task: currentRun.task,
         modelId: currentRun.modelId,
-        signal: signal ?? new AbortController().signal,
+        signal: runAbortController.signal,
       });
 
       if (!prep.available) {
@@ -97,7 +185,7 @@ export class AgentOrchestrator {
         let repairCount = 0;
 
         while (true) {
-          if (signal?.aborted) {
+          if (runAbortController.signal.aborted) {
             const finalized = await this.repository.finalizeRun(ownerId, runId, leaseToken, { status: 'cancelled' });
             return { status: 'cancelled', run: finalized.run };
           }
@@ -111,6 +199,13 @@ export class AgentOrchestrator {
             return { status: 'failed', run: finalized.run };
           }
 
+          // Proactively renew lease before decision provider invocation
+          const renewedBeforeDecision = await this.repository.renewLease(ownerId, runId, leaseToken, this.leaseDurationMs);
+          if (!renewedBeforeDecision) {
+            runAbortController.abort();
+            return { status: 'fenced', reason: 'Worker lease expired before decision' };
+          }
+
           const decision = await this.decisionProvider.decide({
             runId,
             workspaceId: currentRun.workspaceId,
@@ -121,9 +216,20 @@ export class AgentOrchestrator {
             currentPlan,
             completedSteps,
             lastStepResult,
-            attemptCount: currentRun.attemptCount ?? 1,
-            signal: signal ?? new AbortController().signal,
+            attemptCount,
+            signal: runAbortController.signal,
           });
+
+          // Validate decision structure and field bounds
+          const decisionValidation = validateDecision(decision);
+          if (!decisionValidation.valid) {
+            const finalized = await this.repository.finalizeRun(ownerId, runId, leaseToken, {
+              status: 'failed',
+              errorCode: 'INVALID_ARGUMENTS',
+              errorMessage: decisionValidation.error,
+            });
+            return { status: 'failed', run: finalized.run };
+          }
 
           if (decision.kind === 'plan') {
             await this.repository.appendPlanUpdatedEvent(ownerId, runId, leaseToken, decision.plan);
@@ -132,55 +238,67 @@ export class AgentOrchestrator {
           }
 
           if (decision.kind === 'fail') {
+            const safeErrorCode = (AGENT_ERROR_CODES as readonly string[]).includes(decision.code)
+              ? decision.code
+              : 'EXECUTION_FAILED';
             const finalized = await this.repository.finalizeRun(ownerId, runId, leaseToken, {
               status: 'failed',
-              errorCode: decision.code,
+              errorCode: safeErrorCode,
               errorMessage: decision.message,
             });
             return { status: 'failed', run: finalized.run };
           }
 
           if (decision.kind === 'complete') {
-            // VERIFIED COMPLETION GATE:
-            // "completed must require actual durable verification evidence from the fake runtime.
-            // Never do: model says done -> run.completed"
-            const evidence = await this.executionRuntime.getVerificationEvidence(sessionId);
-            const hasPassed = evidence.some((c) => c.outcome === 'passed');
-            const hasFailed = evidence.some((c) => c.outcome === 'failed');
+            if (currentRun.mode === 'execute') {
+              // VERIFIED COMPLETION GATE for execute mode:
+              const evidence = await this.executionRuntime.getVerificationEvidence(sessionId);
+              const hasPassed = evidence.some((c) => c.outcome === 'passed');
+              const hasFailed = evidence.some((c) => c.outcome === 'failed');
 
-            if (!hasPassed || hasFailed) {
+              if (!hasPassed || hasFailed) {
+                const finalized = await this.repository.finalizeRun(ownerId, runId, leaseToken, {
+                  status: 'failed',
+                  errorCode: 'VERIFICATION_FAILED',
+                  errorMessage: 'Run completion denied: required verification checks failed or were not run',
+                });
+                return { status: 'failed', run: finalized.run };
+              }
+
               const finalized = await this.repository.finalizeRun(ownerId, runId, leaseToken, {
-                status: 'failed',
-                errorCode: 'VERIFICATION_FAILED',
-                errorMessage: 'Run completion denied: required verification checks failed or were not run',
+                status: 'completed',
+                summary: decision.summary,
+                verifiedChecks: evidence,
               });
-              return { status: 'failed', run: finalized.run };
+              return { status: 'completed', run: finalized.run };
+            } else {
+              // Read-only Ask / Plan modes:
+              // They do not run sandbox build/tests, so they complete with decision summary and empty verified checks.
+              const finalized = await this.repository.finalizeRun(ownerId, runId, leaseToken, {
+                status: 'completed',
+                summary: decision.summary,
+                verifiedChecks: [],
+              });
+              return { status: 'completed', run: finalized.run };
             }
-
-            const finalized = await this.repository.finalizeRun(ownerId, runId, leaseToken, {
-              status: 'completed',
-              summary: decision.summary,
-              verifiedChecks: evidence,
-            });
-            return { status: 'completed', run: finalized.run };
           }
 
           if (decision.kind === 'tool_call') {
             const toolCall = decision.toolCall;
-            const validation = this.toolRegistry.validate(toolCall.toolName, toolCall.arguments, currentRun.mode);
+            const toolValidation = this.toolRegistry.validate(toolCall.toolName, toolCall.arguments, currentRun.mode);
 
-            if (!validation.valid) {
+            if (!toolValidation.valid) {
               // Fails before runtime dispatch!
               const { step } = await this.repository.recordStepStarted(ownerId, runId, leaseToken, {
                 toolName: toolCall.toolName,
                 toolCallId: toolCall.toolCallId,
-                risk: validation.tool?.risk ?? 'read',
+                risk: toolValidation.tool?.risk ?? 'read',
                 arguments: typeof toolCall.arguments === 'object' && toolCall.arguments !== null ? toolCall.arguments : {},
               });
 
               await this.repository.recordStepFailed(ownerId, runId, leaseToken, step.stepNumber, {
-                errorCode: validation.errorCode,
-                errorMessage: validation.error,
+                errorCode: toolValidation.errorCode,
+                errorMessage: toolValidation.error,
               });
 
               lastStepResult = {
@@ -188,8 +306,8 @@ export class AgentOrchestrator {
                 toolName: toolCall.toolName,
                 toolCallId: toolCall.toolCallId,
                 success: false,
-                errorCode: validation.errorCode,
-                errorMessage: validation.error,
+                errorCode: toolValidation.errorCode,
+                errorMessage: toolValidation.error,
               };
 
               completedSteps = await this.repository.listSteps(ownerId, runId);
@@ -198,43 +316,50 @@ export class AgentOrchestrator {
               if (repairCount > this.maxRepairs) {
                 const finalized = await this.repository.finalizeRun(ownerId, runId, leaseToken, {
                   status: 'failed',
-                  errorCode: validation.errorCode,
-                  errorMessage: `Exceeded repair limit of ${this.maxRepairs} after validation error: ${validation.error}`,
+                  errorCode: toolValidation.errorCode,
+                  errorMessage: `Exceeded repair limit of ${this.maxRepairs} after validation error: ${toolValidation.error}`,
                 });
                 return { status: 'failed', run: finalized.run };
               }
               continue;
             }
 
-            // Valid tool and arguments: record step started and dispatch to execution runtime
+            // Valid tool and arguments: record step started
             const { step } = await this.repository.recordStepStarted(ownerId, runId, leaseToken, {
-              toolName: validation.tool.name,
+              toolName: toolValidation.tool.name,
               toolCallId: toolCall.toolCallId,
-              risk: validation.tool.risk,
-              arguments: validation.args,
+              risk: toolValidation.tool.risk,
+              arguments: toolValidation.args,
             });
+
+            // Proactively renew lease before tool execution
+            const renewedBeforeInvoke = await this.repository.renewLease(ownerId, runId, leaseToken, this.leaseDurationMs);
+            if (!renewedBeforeInvoke) {
+              runAbortController.abort();
+              return { status: 'fenced', reason: 'Worker lease expired before tool execution' };
+            }
 
             const result = await this.executionRuntime.invoke(
               sessionId,
               {
                 toolCallId: toolCall.toolCallId,
-                toolName: validation.tool.name,
-                risk: validation.tool.risk,
-                args: validation.args,
+                toolName: toolValidation.tool.name,
+                risk: toolValidation.tool.risk,
+                args: toolValidation.args,
               },
-              signal ?? new AbortController().signal
+              runAbortController.signal
             );
 
             if (result.success) {
               await this.repository.recordStepCompleted(ownerId, runId, leaseToken, step.stepNumber, {
                 output: result.output,
                 durationMs: result.durationMs,
-                summary: `Tool '${validation.tool.name}' succeeded`,
+                summary: `Tool '${toolValidation.tool.name}' succeeded`,
               });
 
               lastStepResult = {
                 stepNumber: step.stepNumber,
-                toolName: validation.tool.name,
+                toolName: toolValidation.tool.name,
                 toolCallId: toolCall.toolCallId,
                 success: true,
                 output: result.output,
@@ -248,7 +373,7 @@ export class AgentOrchestrator {
 
               lastStepResult = {
                 stepNumber: step.stepNumber,
-                toolName: validation.tool.name,
+                toolName: toolValidation.tool.name,
                 toolCallId: toolCall.toolCallId,
                 success: false,
                 errorCode: result.errorCode ?? 'TOOL_ERROR',
@@ -279,6 +404,8 @@ export class AgentOrchestrator {
       }
       throw err;
     } finally {
+      heartbeatActive = false;
+      clearInterval(heartbeatTimer);
       await this.repository.releaseLease(ownerId, runId, leaseToken).catch(() => {});
     }
   }
