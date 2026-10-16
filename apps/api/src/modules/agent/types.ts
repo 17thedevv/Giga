@@ -133,5 +133,45 @@ export interface AgentCursor {
   readonly id: string;
 }
 
+export type AgentMessageRole = 'user' | 'assistant' | 'tool_summary';
+
+export interface AgentMessage {
+  readonly id: string;
+  readonly workspaceId: string;
+  readonly runId: string;
+  readonly sequence: number;
+  readonly role: AgentMessageRole;
+  readonly content: string;
+  readonly createdAt: string;
+}
+
+export interface AgentMessageCursor {
+  readonly kind: 'messages';
+  readonly runId: string;
+  readonly sequence: number;
+}
+
+export interface ListMessagesOptions {
+  readonly limit: number;
+  readonly cursor?: AgentMessageCursor;
+}
+
+export interface BoundedConversationMessage {
+  readonly runId?: string;
+  readonly sequence: number;
+  readonly role: AgentMessageRole;
+  readonly content: string;
+}
+
+export interface ConversationContextBoundary {
+  readonly messages: readonly BoundedConversationMessage[];
+  readonly totalBytes: number;
+  readonly isTruncated: boolean;
+}
+
+export interface MessageInput {
+  readonly content: string;
+}
+
 export interface Page<T> { readonly items: readonly T[]; readonly nextCursor: string | null }
 export interface ListOptions { readonly limit: number; readonly cursor?: AgentCursor; readonly workspaceId?: string }

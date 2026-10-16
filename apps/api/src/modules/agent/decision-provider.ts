@@ -1,4 +1,4 @@
-import type { AgentMode, AgentStep, VerifiedCheck } from './types.js';
+import type { AgentMode, AgentStep, ConversationContextBoundary, VerifiedCheck } from './types.js';
 
 export interface AgentPlan {
   readonly version: number;
@@ -39,6 +39,7 @@ export interface AgentDecisionContext {
   readonly lastStepResult?: StepObservation;
   readonly attemptCount: number;
   readonly signal: AbortSignal;
+  readonly conversationContext?: ConversationContextBoundary;
 }
 
 export interface AgentDecisionProvider {

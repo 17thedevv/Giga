@@ -62,3 +62,43 @@ export function listOptions(query: Record<string, string[]>, kind: AgentCursor['
   return { limit: rawLimit === undefined ? 20 : Number(rawLimit), cursor, workspaceId };
 }
 export const encodeAgentCursor = (value: AgentCursor): string => Buffer.from(JSON.stringify(value)).toString('base64url');
+export const encodeMessageCursor = (value: import('./types.js').AgentMessageCursor): string => Buffer.from(JSON.stringify(value)).toString('base64url');
+
+export function messageInput(value: unknown): import('./types.js').MessageInput {
+  const body = object(value, ['content']);
+  return { content: text(body.content, 16384, 'content') };
+}
+
+export function listMessagesOptions(query: Record<string, string[]>, runId: string): import('./types.js').ListMessagesOptions {
+  const allowed = ['limit', 'cursor'];
+  if (Object.entries(query).some(([key, values]) => !allowed.includes(key) || values.length !== 1)) {
+    throw new ValidationError('Invalid query parameters');
+  }
+  const rawLimit = query.limit?.[0];
+  if (rawLimit !== undefined && !/^(?:[1-9][0-9]?|100)$/.test(rawLimit)) {
+    throw new ValidationError('Limit must be between 1 and 100');
+  }
+  let cursor: import('./types.js').AgentMessageCursor | undefined;
+  const rawCursor = query.cursor?.[0];
+  if (rawCursor !== undefined) {
+    try {
+      if (!/^[A-Za-z0-9_-]{1,1024}$/.test(rawCursor)) throw new Error();
+      const decoded = Buffer.from(rawCursor, 'base64url');
+      if (decoded.toString('base64url') !== rawCursor) throw new Error();
+      const parsed = object(JSON.parse(decoded.toString('utf8')), ['kind', 'runId', 'sequence']);
+      if (
+        parsed.kind !== 'messages' ||
+        parsed.runId !== runId ||
+        typeof parsed.sequence !== 'number' ||
+        !Number.isInteger(parsed.sequence) ||
+        parsed.sequence < 1
+      ) {
+        throw new Error();
+      }
+      cursor = { kind: 'messages', runId, sequence: parsed.sequence };
+    } catch {
+      throw new ValidationError('Invalid pagination cursor');
+    }
+  }
+  return { limit: rawLimit === undefined ? 50 : Number(rawLimit), cursor };
+}

@@ -4,7 +4,7 @@ import type { AuthService } from '../auth/auth-service.js';
 import { createAuthMiddleware } from '../auth/auth-middleware.js';
 import { ValidationError } from '../auth/auth-validation.js';
 import type { AgentService } from './service.js';
-import { agentUuid, eventCursor, listOptions } from './validation.js';
+import { agentUuid, eventCursor, listMessagesOptions, listOptions } from './validation.js';
 import { observeEvents, type ObserverOptions } from './sse.js';
 
 export function createAgentRoutes(service: AgentService, auth: AuthService, observerOptions?: ObserverOptions): Hono {
@@ -23,6 +23,23 @@ export function createAgentRoutes(service: AgentService, auth: AuthService, obse
   });
   router.get('/runs', async (c) => c.json(await service.repository.listRuns(c.get('user').id, listOptions(c.req.queries(), 'runs'))));
   router.get('/runs/:id', async (c) => c.json({ run: await service.repository.getRun(c.get('user').id, agentUuid(c.req.param('id'))) }));
+  router.post('/runs/:id/messages', async (c) => {
+    const ownerId = c.get('user').id;
+    const runId = agentUuid(c.req.param('id'));
+    const result = await service.appendMessage(
+      ownerId,
+      runId,
+      await json(c.req),
+      c.req.header('Idempotency-Key')
+    );
+    return c.json({ message: result.message }, result.duplicate ? 200 : 201);
+  });
+  router.get('/runs/:id/messages', async (c) => {
+    const ownerId = c.get('user').id;
+    const runId = agentUuid(c.req.param('id'));
+    const options = listMessagesOptions(c.req.queries(), runId);
+    return c.json(await service.repository.listMessages(ownerId, runId, options));
+  });
   router.get('/runs/:id/events', async (c) => {
     const ownerId = c.get('user').id; const id = agentUuid(c.req.param('id'));
     const page = await service.repository.events(ownerId, id, 0); // Authorize before interpreting resource-specific cursor.

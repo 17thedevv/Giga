@@ -26,6 +26,8 @@ Implemented endpoints only:
 | GET | `/api/v1/agent/runs` | `workspaceId?`, `limit?`, `cursor?` → 200 `{ items, nextCursor }` |
 | GET | `/api/v1/agent/runs/:id` | 200 `{ run }` |
 | GET | `/api/v1/agent/runs/:id/events` | `Last-Event-ID?` → 200 `text/event-stream` |
+| POST | `/api/v1/agent/runs/:id/messages` | `{ content }`, required `Idempotency-Key` → 201 `{ message }`; replay → 200 `{ message }`; terminal run → 409 `CONFLICT` |
+| GET | `/api/v1/agent/runs/:id/messages` | `limit?`, `cursor?` → 200 `{ items, nextCursor }` (deterministic ascending sequence order) |
 
 - Workspace DTO is `{ id, name, sourceKind: 'blank', revision: 1, createdAt, updatedAt }`.
   Blank means durable metadata only; no directory, snapshot or files are created.
@@ -73,7 +75,18 @@ SSE candidate details:
    is no event retention/truncation in this slice; future retention needs a reviewed
    replay-expired contract. Clients must tolerate duplicate delivery and unknown events.
 
-All other endpoints in the proposal below (including cancel/messages/files/uploads,
+- Message DTO is `{ id, workspaceId, runId, sequence, role, content, createdAt }`.
+  Allowed roles are `user`, `assistant`, and `tool_summary`. Sequences start at 1 for the initial user task.
+- `POST /api/v1/agent/runs/:id/messages` accepts `{ content }` (1–16,384 bytes, strictly validated JSON, rejecting unknown fields).
+  Requires `Idempotency-Key`. Returns 201 `{ message }` on first admission, 200 `{ message }` on duplicate replay,
+  409 `CONFLICT` on key reuse with different content, and 409 `CONFLICT` on follow-up to terminal runs (`completed`, `failed`, `cancelled`).
+  Follow-up instructions cannot escalate permissions (`ask` -> `execute`), change tool policies, or alter lease/worker state.
+- `GET /api/v1/agent/runs/:id/messages` provides deterministic pagination (`sequence ASC`), with bounded limits (default 20, max 100)
+  and stable cursors. Reconstructing conversation from this endpoint is authoritative; the browser must never be the authoritative store.
+- Conversation context boundary (`getConversationContext`) provides bounded conversation context to `AgentDecisionProvider`
+  without raw chain-of-thought, without GigaChat/Memory cross-talk, and with tool results summarized/redacted.
+
+All other endpoints in the proposal below (including cancel/files/uploads,
 artifacts/approvals/imports/previews) remain unimplemented. Real runner selection,
 dispatch, leases/fencing, budgets, snapshot lifecycle and sandbox security are later work.
 

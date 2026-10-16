@@ -55,6 +55,7 @@ it('011 upgrades populated current 010 preserving all existing product tables an
 
 it('012 upgrades populated current 011 preserving all existing agent and product tables and reruns idempotently', async () => {
   const base11 = MIGRATIONS.filter((migration) => migration.version <= 11);
+  const v12Only = MIGRATIONS.filter((migration) => migration.version <= 12);
   const initial = await createTestDatabase(base11);
   let pool = initial.pool;
   const schema = `agent_upgrade_012_${randomUUID().replaceAll('-', '')}`;
@@ -81,7 +82,7 @@ it('012 upgrades populated current 011 preserving all existing agent and product
     const snapshots = await Promise.all(tables.map((table) => pool.query(`SELECT * FROM ${table} ORDER BY 1`)));
 
     // Apply forward-only migration 012
-    assert.deepEqual(await runMigrations(pool), ['012_agent_orchestrator']);
+    assert.deepEqual(await runMigrations(pool, v12Only), ['012_agent_orchestrator']);
 
     // Check all rows preserved
     for (let i = 0; i < tables.length; i++) {
@@ -90,7 +91,7 @@ it('012 upgrades populated current 011 preserving all existing agent and product
     }
 
     // Idempotent second run
-    assert.deepEqual(await runMigrations(pool), []);
+    assert.deepEqual(await runMigrations(pool, v12Only), []);
 
     // File content matches registry
     const sql = await readFile(new URL('../../src/db/migrations/012_agent_orchestrator.sql', import.meta.url), 'utf8');
@@ -124,6 +125,120 @@ it('012 upgrades populated current 011 preserving all existing agent and product
     const steps = await repository.listSteps(owner, queued.run.id);
     assert.equal(steps.length, 1);
     assert.equal(steps[0]!.toolName, 'list_files');
+  } finally {
+    if (!initial.isMemory) {
+      await pool.end();
+      await initial.pool.query(`DROP SCHEMA ${schema} CASCADE`);
+    }
+    await initial.pool.end();
+  }
+});
+
+it('013 upgrades populated current 012 preserving all existing agent and product tables and reruns idempotently', async () => {
+  const base12 = MIGRATIONS.filter((migration) => migration.version <= 12);
+  const initial = await createTestDatabase(base12);
+  let pool = initial.pool;
+  const schema = `agent_upgrade_013_${randomUUID().replaceAll('-', '')}`;
+  if (!initial.isMemory) {
+    await initial.pool.query(`CREATE SCHEMA ${schema}`);
+    pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, options: `-c search_path=${schema}`, max: 2, statement_timeout: 5000 });
+    await runMigrations(pool, base12);
+  }
+  try {
+    const owner = randomUUID();
+    await pool.query("INSERT INTO users (id,email,display_name,password_hash) VALUES ($1,'agent-upgrade-013@example.com','Upgrade13','unused')", [owner]);
+    const repository = new AgentRepository(pool);
+    const service = new AgentService(repository);
+    const workspace = await service.createWorkspace(owner, { source: { kind: 'blank' } });
+
+    // Pre-existing 011 run (admitted / failed)
+    const runAdmission = await service.createRun(owner, { workspaceId: workspace.id, task: 'Pre-existing 011/012 admitted task' }, randomUUID());
+    assert.equal(runAdmission.run.status, 'failed');
+
+    // Pre-existing 012 queued + claimed + completed run
+    const runCompletedKey = randomUUID();
+    const queued = await repository.enqueueRun(
+      owner,
+      { workspaceId: workspace.id, task: 'Pre-existing completed run task', mode: 'execute', runtime: 'cloud', modelId: 'giga-agent-default' },
+      runCompletedKey,
+      'c'.repeat(64)
+    );
+    const claimed = await repository.claimRun(owner, queued.run.id, 'worker-mig-013-test');
+    assert.ok(claimed);
+    await repository.finalizeRun(owner, queued.run.id, claimed.leaseToken, {
+      status: 'completed',
+      summary: 'Pre-existing run completed summary',
+      verifiedChecks: [{ name: 'npm test', outcome: 'passed' }],
+    });
+
+    const tables = [
+      'users', 'sessions', 'conversations', 'messages', 'chat_generations', 'chat_operation_keys',
+      'chat_turn_selections', 'user_preferences', 'skill_definitions', 'skill_versions', 'skill_installations',
+      'user_provider_credentials', 'chat_credential_preferences',
+      'agent_workspaces', 'agent_runs', 'agent_run_events', 'agent_run_steps',
+    ];
+    const snapshots = await Promise.all(tables.map((table) => pool.query(`SELECT * FROM ${table} ORDER BY 1`)));
+
+    // Apply forward-only migration 013
+    assert.deepEqual(await runMigrations(pool), ['013_agent_messages']);
+
+    // Check all 17 pre-existing tables preserved
+    for (let i = 0; i < tables.length; i++) {
+      const currentRows = (await pool.query(`SELECT * FROM ${tables[i]} ORDER BY 1`)).rows;
+      assert.equal(currentRows.length, snapshots[i]!.rows.length);
+    }
+
+    // Idempotent second run
+    assert.deepEqual(await runMigrations(pool), []);
+
+    // File content matches registry
+    const sql = await readFile(new URL('../../src/db/migrations/013_agent_messages.sql', import.meta.url), 'utf8');
+    assert.equal(
+      MIGRATIONS.find((migration) => migration.version === 13)!.sql.trim().replace(/\r\n/g, '\n'),
+      sql.trim().replace(/\r\n/g, '\n')
+    );
+
+    // Verify backfilled messages in agent_messages:
+    // 1. Initial instruction appears as sequence 1 for runAdmission
+    const admissionMessages = await repository.listMessages(owner, runAdmission.run.id, { limit: 10 });
+    assert.equal(admissionMessages.items.length, 1);
+    assert.equal(admissionMessages.items[0]!.sequence, 1);
+    assert.equal(admissionMessages.items[0]!.role, 'user');
+    assert.equal(admissionMessages.items[0]!.content, 'Pre-existing 011/012 admitted task');
+
+    // 2. Completed run has sequence 1 user message and sequence 2 assistant summary message
+    const completedMessages = await repository.listMessages(owner, queued.run.id, { limit: 10 });
+    assert.equal(completedMessages.items.length, 2);
+    assert.equal(completedMessages.items[0]!.sequence, 1);
+    assert.equal(completedMessages.items[0]!.role, 'user');
+    assert.equal(completedMessages.items[0]!.content, 'Pre-existing completed run task');
+    assert.equal(completedMessages.items[1]!.sequence, 2);
+    assert.equal(completedMessages.items[1]!.role, 'assistant');
+    assert.equal(completedMessages.items[1]!.content, 'Pre-existing run completed summary');
+
+    // 3. New active run allows follow-up message insertion
+    const activeKey = randomUUID();
+    const activeRun = await repository.enqueueRun(
+      owner,
+      { workspaceId: workspace.id, task: 'Active run for follow-up testing', mode: 'ask', runtime: 'cloud', modelId: 'giga-agent-default' },
+      activeKey,
+      'd'.repeat(64)
+    );
+    const followUp = await repository.appendUserMessage(
+      owner,
+      activeRun.run.id,
+      'This is a follow-up user instruction',
+      'followup-key-mig-1',
+      'e'.repeat(64)
+    );
+    assert.equal(followUp.message.sequence, 2);
+    assert.equal(followUp.message.role, 'user');
+    assert.equal(followUp.message.content, 'This is a follow-up user instruction');
+
+    const allActiveMessages = await repository.listMessages(owner, activeRun.run.id, { limit: 10 });
+    assert.equal(allActiveMessages.items.length, 2);
+    assert.equal(allActiveMessages.items[0]!.sequence, 1);
+    assert.equal(allActiveMessages.items[1]!.sequence, 2);
   } finally {
     if (!initial.isMemory) {
       await pool.end();
