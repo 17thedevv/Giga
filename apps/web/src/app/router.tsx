@@ -39,7 +39,12 @@ export const RouterProvider: React.FC<{ children: React.ReactNode; initialPath?:
   initialPath,
 }) => {
   const [path, setPath] = useState<string>(() => {
-    if (initialPath) return initialPath;
+    if (initialPath) {
+      if (typeof window !== 'undefined') {
+        window.history.replaceState({}, '', initialPath);
+      }
+      return initialPath;
+    }
     return typeof window !== 'undefined' ? (window.location.pathname || '/login') : '/login';
   });
 

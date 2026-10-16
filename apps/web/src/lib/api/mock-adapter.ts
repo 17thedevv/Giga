@@ -16,6 +16,8 @@ import type {
   UpdateInstallationDto,
   UserPreferences,
   UpdatePreferencesDto,
+  ChatStreamEvent,
+  ChatGeneration,
 } from './types.js';
 import { ApiException } from './client.js';
 
@@ -438,6 +440,123 @@ export class MockDataAdapter {
     }
 
     onComplete();
+  }
+
+  // Typed Stream Chat simulation for GigaChat Runtime
+  async streamMessage(
+    conversationId: string,
+    content: string,
+    onEvent: (event: ChatStreamEvent) => void,
+    options?: { signal?: AbortSignal; idempotencyKey?: string; modelId?: string }
+  ): Promise<void> {
+    const generationId = `gen_${Date.now()}`;
+    const assistantMsgId = `msg_a_${Date.now()}`;
+
+    // Add user message if not already recorded
+    const existingMessages = this.messages[conversationId] || [];
+    const lastMsg = existingMessages[existingMessages.length - 1];
+    if (!lastMsg || lastMsg.role !== 'user' || lastMsg.content !== content) {
+      await this.addMessage(conversationId, 'user', content);
+    }
+
+    // Event: message.started
+    onEvent({
+      event: 'message.started',
+      data: {
+        messageId: assistantMsgId,
+        generationId,
+        conversationId,
+      },
+    });
+
+    const fullAnswer =
+      "This is a **[DEMO / MOCK]** response.\n\n" +
+      "The Giga Coding Agent enforces a human-in-the-loop gate governed by Architecture Invariant `INV-07`.\n\n" +
+      "1. Read-only tools analyze the codebase.\n" +
+      "2. A stable unified diff proposal is synthesized.\n" +
+      "3. Remote writes are strictly executed only after authenticated owner confirmation.";
+
+    const chunks = fullAnswer.match(/.{1,12}/g) || [fullAnswer];
+    let accumulated = '';
+
+    for (const chunk of chunks) {
+      if (options?.signal?.aborted) {
+        onEvent({
+          event: 'message.stopped',
+          data: {
+            messageId: assistantMsgId,
+            generationId,
+            finishReason: 'cancelled',
+          },
+        });
+        return;
+      }
+      await this.delay(60);
+      accumulated += chunk;
+      onEvent({
+        event: 'message.delta',
+        data: {
+          messageId: assistantMsgId,
+          generationId,
+          text: chunk,
+        },
+      });
+    }
+
+    await this.addMessage(conversationId, 'assistant', accumulated);
+
+    onEvent({
+      event: 'message.completed',
+      data: {
+        messageId: assistantMsgId,
+        generationId,
+        createdAt: new Date().toISOString(),
+        finishReason: 'stop',
+      },
+    });
+  }
+
+  async getGeneration(
+    conversationId: string,
+    generationId: string
+  ): Promise<{ generation: ChatGeneration }> {
+    await this.delay(80);
+    const existingMessages = this.messages[conversationId] || [];
+    const lastAssistant = existingMessages.filter((m) => m.role === 'assistant').pop();
+    return {
+      generation: {
+        id: generationId,
+        conversationId,
+        userMessageId: 'usr_msg_mock',
+        assistantMessageId: lastAssistant?.id,
+        modelId: 'giga-chat-default',
+        status: 'completed',
+        partialContent: lastAssistant?.content || '',
+        finishReason: 'stop',
+        createdAt: new Date().toISOString(),
+      },
+    };
+  }
+
+  async cancelGeneration(
+    conversationId: string,
+    generationId: string,
+    _idempotencyKey?: string
+  ): Promise<{ generation: ChatGeneration }> {
+    await this.delay(80);
+    return {
+      generation: {
+        id: generationId,
+        conversationId,
+        userMessageId: 'usr_msg_mock',
+        modelId: 'giga-chat-default',
+        status: 'stopped',
+        partialContent: '',
+        finishReason: 'cancelled',
+        createdAt: new Date().toISOString(),
+        cancelRequestedAt: new Date().toISOString(),
+      },
+    };
   }
 
   // Agent Runs

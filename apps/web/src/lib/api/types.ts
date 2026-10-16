@@ -27,7 +27,91 @@ export interface Message {
   role: 'user' | 'assistant';
   content: string;
   createdAt: ISODateTime;
+  isOptimistic?: boolean;
+  status?: 'streaming' | 'completed' | 'failed' | 'stopped';
 }
+
+// ==========================================
+// GigaChat Runtime & Streaming Types (Task 17T-33 / GigaChat v0.2)
+// ==========================================
+
+export type GenerationStatus =
+  | 'pending'
+  | 'queued'
+  | 'streaming'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'interrupted'
+  | 'stopped';
+
+export type ChatFinishReason = 'stop' | 'length' | 'other' | 'cancelled';
+
+export interface ChatGeneration {
+  readonly id: string;
+  readonly conversationId: string;
+  readonly userMessageId: string;
+  readonly assistantMessageId?: string;
+  readonly modelId: string;
+  readonly status: GenerationStatus;
+  readonly partialContent: string;
+  readonly finishReason?: ChatFinishReason;
+  readonly error?: { readonly code: string; readonly message: string };
+  readonly createdAt: string;
+  readonly startedAt?: string;
+  readonly finishedAt?: string;
+  readonly cancelRequestedAt?: string;
+}
+
+export interface StreamChatRequest {
+  readonly content: string;
+  readonly modelId?: string;
+}
+
+export interface MessageStartedEventData {
+  readonly messageId: string;
+  readonly generationId: string;
+  readonly conversationId: string;
+}
+
+export interface MessageDeltaEventData {
+  readonly messageId: string;
+  readonly generationId: string;
+  readonly text: string;
+}
+
+export interface MessageCompletedEventData {
+  readonly messageId: string;
+  readonly generationId: string;
+  readonly createdAt?: string;
+  readonly finishReason?: string;
+}
+
+export interface StreamErrorEventData {
+  readonly messageId: string;
+  readonly generationId: string;
+  readonly error: { readonly code: string; readonly message: string };
+}
+
+export interface MessageFailedEventData {
+  readonly messageId: string;
+  readonly generationId: string;
+  readonly error: { readonly code: string; readonly message: string };
+}
+
+export interface MessageStoppedEventData {
+  readonly messageId: string;
+  readonly generationId: string;
+  readonly finishReason?: 'cancelled' | string;
+}
+
+export type ChatStreamEvent =
+  | { readonly event: 'message.started'; readonly data: MessageStartedEventData }
+  | { readonly event: 'message.delta'; readonly data: MessageDeltaEventData }
+  | { readonly event: 'message.completed'; readonly data: MessageCompletedEventData }
+  | { readonly event: 'stream.error'; readonly data: StreamErrorEventData }
+  | { readonly event: 'message.failed'; readonly data: MessageFailedEventData }
+  | { readonly event: 'message.stopped'; readonly data: MessageStoppedEventData };
 
 export type AgentRunStatus =
   | 'queued'

@@ -16,7 +16,10 @@ import type {
   UpdateInstallationDto,
   UserPreferences,
   UpdatePreferencesDto,
+  ChatGeneration,
+  ChatStreamEvent,
 } from './types.js';
+import { SseStreamParser, validateChatStreamEvent } from './sse-parser.js';
 
 export class ApiException extends Error {
   constructor(
@@ -130,6 +133,137 @@ export class RealApiClient {
     await this.request<void>(`/api/v1/conversations/${encodeURIComponent(id)}`, {
       method: 'DELETE',
     });
+  }
+
+  // Streaming Chat & Generation Operations
+  async streamMessage(
+    conversationId: string,
+    content: string,
+    onEvent: (event: ChatStreamEvent) => void,
+    options?: { signal?: AbortSignal; idempotencyKey?: string; modelId?: string }
+  ): Promise<void> {
+    const url = `${this.baseUrl}/api/v1/conversations/${encodeURIComponent(conversationId)}/messages:stream`;
+    const headers = new Headers();
+    headers.set('Content-Type', 'application/json');
+
+    const key =
+      options?.idempotencyKey ||
+      (typeof crypto !== 'undefined' && crypto.randomUUID
+        ? crypto.randomUUID()
+        : `chat_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`);
+    headers.set('Idempotency-Key', key);
+
+    const body: { content: string; modelId?: string } = { content };
+    if (options?.modelId) {
+      body.modelId = options.modelId;
+    }
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+      credentials: 'include',
+      signal: options?.signal,
+    });
+
+    if (!response.ok) {
+      let errPayload: { error?: ApiError; generation?: ChatGeneration } | undefined;
+      try {
+        errPayload = await response.json();
+      } catch {
+        // Fallback for non-JSON error
+      }
+      const code = errPayload?.error?.code ?? `HTTP_${response.status}`;
+      const message =
+        errPayload?.error?.message ?? response.statusText ?? 'Chat stream request failed';
+      throw new ApiException(
+        response.status,
+        code,
+        message,
+        errPayload?.error?.details ||
+          (errPayload?.generation ? { generation: errPayload.generation } : undefined)
+      );
+    }
+
+    const contentType = response.headers.get('content-type') ?? '';
+    if (!contentType.includes('text/event-stream')) {
+      throw new ApiException(
+        response.status,
+        'INVALID_CONTENT_TYPE',
+        `Expected 'text/event-stream' response but received '${contentType}'`
+      );
+    }
+
+    if (!response.body) {
+      throw new ApiException(500, 'NO_STREAM_BODY', 'Response stream body is empty');
+    }
+
+    const reader = response.body.getReader();
+    const parser = new SseStreamParser(
+      (sseEvent) => {
+        const validated = validateChatStreamEvent(sseEvent.event, sseEvent.data);
+        if (validated) {
+          onEvent(validated);
+        }
+      },
+      { enforceTerminalIdempotency: true }
+    );
+
+    try {
+      while (true) {
+        if (options?.signal?.aborted) {
+          try {
+            await reader.cancel();
+          } catch {
+            // Ignore cancel error on abort
+          }
+          break;
+        }
+
+        const { done, value } = await reader.read();
+        if (done) {
+          parser.flush();
+          break;
+        }
+        if (value) {
+          parser.feedBytes(value);
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+  }
+
+  async getGeneration(
+    conversationId: string,
+    generationId: string
+  ): Promise<{ generation: ChatGeneration }> {
+    return this.request<{ generation: ChatGeneration }>(
+      `/api/v1/conversations/${encodeURIComponent(conversationId)}/generations/${encodeURIComponent(generationId)}`,
+      { method: 'GET' }
+    );
+  }
+
+  async cancelGeneration(
+    conversationId: string,
+    generationId: string,
+    idempotencyKey?: string
+  ): Promise<{ generation: ChatGeneration }> {
+    const headers = new Headers();
+    const key =
+      idempotencyKey ||
+      (typeof crypto !== 'undefined' && crypto.randomUUID
+        ? crypto.randomUUID()
+        : `cancel_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`);
+    headers.set('Idempotency-Key', key);
+
+    return this.request<{ generation: ChatGeneration }>(
+      `/api/v1/conversations/${encodeURIComponent(conversationId)}/generations/${encodeURIComponent(generationId)}/cancel`,
+      {
+        method: 'POST',
+        headers,
+      }
+    );
   }
 
   // Agent Operations
