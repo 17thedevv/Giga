@@ -78,7 +78,7 @@ describe('Agent PostgreSQL constraints and terminal fencing', () => {
     await db.pool.query(`INSERT INTO agent_runs (id,owner_id,workspace_id,task,mode,runtime,model_alias,status,last_event_id,idempotency_key,request_fingerprint)
       VALUES ($1,$2,$3,'Pending','ask','cloud',$4,'queued',1,$5,$6)`, [pendingId, owner, workspaceId, AGENT_MODEL_ALIAS, randomUUID(), 'f'.repeat(64)]);
     await assert.rejects(db.pool.query("INSERT INTO agent_run_events (owner_id,run_id,sequence,event_type,status) VALUES ($1,$2,1,'run.status','running')",
-      [owner, pendingId]), /event must match/);
+      [owner, pendingId]), /must match/i);
     assert.deepEqual((await repository.events(owner, created.run.id, 0)).items.map((event) => event.sequence), [1, 2]);
     const indexes = await db.pool.query("SELECT indexname FROM pg_indexes WHERE tablename IN ('agent_workspaces','agent_runs','agent_run_events')");
     for (const name of ['idx_agent_workspace_history', 'idx_agent_run_history', 'idx_agent_workspace_runs', 'idx_agent_event_replay']) {
@@ -96,5 +96,65 @@ describe('Agent PostgreSQL constraints and terminal fencing', () => {
     assert.equal(rejected?.status === 'rejected' && rejected.reason.code, 'CONFLICT');
     assert.equal((await db.pool.query('SELECT id FROM agent_runs WHERE owner_id = $1', [owner])).rows.length, 1);
     assert.equal((await db.pool.query('SELECT sequence FROM agent_run_events WHERE owner_id = $1', [owner])).rows.length, 2);
+  });
+
+  it('real PostgreSQL enforces monotonic step numbering, step immutability, and step delete protection', async (t) => {
+    if (db.isMemory) return t.skip('Requires PostgreSQL PL/pgSQL trigger enforcement');
+    const queued = await repository.enqueueRun(
+      owner,
+      { workspaceId, task: 'Step test task', mode: 'execute', runtime: 'cloud', modelId: AGENT_MODEL_ALIAS },
+      randomUUID(),
+      'b'.repeat(64)
+    );
+    const claimed = await repository.claimRun(owner, queued.run.id, 'worker-trigger-test');
+    assert.ok(claimed);
+
+    // 1. Insert step 1 (valid)
+    const step1 = await repository.recordStepStarted(owner, queued.run.id, claimed.leaseToken, {
+      toolName: 'list_files',
+      toolCallId: 'call-trg-1',
+      risk: 'read',
+      arguments: {},
+    });
+    assert.equal(step1.step.stepNumber, 1);
+
+    // 2. Reject non-monotonic step insert (step 5 instead of 2)
+    await assert.rejects(
+      db.pool.query(
+        `INSERT INTO agent_run_steps (owner_id, run_id, step_number, status, tool_name, tool_call_id, tool_risk)
+         VALUES ($1, $2, 5, 'running', 'list_files', 'call-gap-5', 'read')`,
+        [owner, queued.run.id]
+      ),
+      /monotonic/i
+    );
+
+    // 3. Complete step 1
+    await repository.recordStepCompleted(owner, queued.run.id, claimed.leaseToken, 1, {
+      output: { count: 0 },
+      durationMs: 15,
+    });
+
+    // 4. Reject updating committed step
+    await assert.rejects(
+      db.pool.query(
+        `UPDATE agent_run_steps SET tool_name = 'malicious' WHERE run_id = $1 AND step_number = 1`,
+        [queued.run.id]
+      ),
+      /immutable/i
+    );
+
+    // 5. Reject direct delete on step
+    await assert.rejects(
+      db.pool.query(
+        `DELETE FROM agent_run_steps WHERE run_id = $1 AND step_number = 1`,
+        [queued.run.id]
+      ),
+      /cannot be deleted directly/i
+    );
+
+    // 6. Cascading delete from agent_runs succeeds
+    await db.pool.query('DELETE FROM agent_runs WHERE id = $1', [queued.run.id]);
+    const remainingSteps = await db.pool.query('SELECT * FROM agent_run_steps WHERE run_id = $1', [queued.run.id]);
+    assert.equal(remainingSteps.rows.length, 0);
   });
 });

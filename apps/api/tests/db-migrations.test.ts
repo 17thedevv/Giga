@@ -39,7 +39,7 @@ describe('Database Migrations and Utilities', () => {
     try {
       // First run: applies all pending migrations
       const firstRun = await runMigrations(pool);
-      assert.strictEqual(firstRun.length, 11);
+      assert.strictEqual(firstRun.length, 12);
       assert.strictEqual(firstRun[0], '001_initial_users_and_sessions');
       assert.strictEqual(firstRun[1], '002_conversations_and_messages');
       assert.strictEqual(firstRun[2], '003_skills_and_preferences');
@@ -51,6 +51,7 @@ describe('Database Migrations and Utilities', () => {
       assert.strictEqual(firstRun[8], '009_chat_byok_credentials');
       assert.strictEqual(firstRun[9], '010_chat_reasoning_effort');
       assert.strictEqual(firstRun[10], '011_agent_control_plane');
+      assert.strictEqual(firstRun[11], '012_agent_orchestrator');
 
       const versions = await getAppliedMigrationVersions(pool);
       assert.ok(versions.has(1));
@@ -64,6 +65,7 @@ describe('Database Migrations and Utilities', () => {
       assert.ok(versions.has(9));
       assert.ok(versions.has(10));
       assert.ok(versions.has(11));
+      assert.ok(versions.has(12));
 
       // Second run: idempotent, applies 0 migrations
       const secondRun = await runMigrations(pool);
