@@ -1,8 +1,14 @@
 # GigaAgent — Behavioral, Sandbox, Security & E2E Acceptance Plan v0.2
 
-> **NOT EXECUTED.** [17T-24](https://linear.app/17thedev/issue/17T-24/redesign-gigaagent-as-agentic-workspace-with-sandbox-runtime). Pair with [Runtime Security](GIGA_AGENT_RUNTIME_SECURITY_V0.2.md), [Agent API](../contracts/GIGA_AGENT_API_V0.2.md), [Architecture](GIGA_AGENT_ARCHITECTURE_V0.2.md).
+> **BROADER RUNTIME PLAN NOT EXECUTED; foundation-only test evidence linked below.** [17T-24](https://linear.app/17thedev/issue/17T-24/redesign-gigaagent-as-agentic-workspace-with-sandbox-runtime). Pair with [Runtime Security](GIGA_AGENT_RUNTIME_SECURITY_V0.2.md), [Agent API](../contracts/GIGA_AGENT_API_V0.2.md), [Architecture](GIGA_AGENT_ARCHITECTURE_V0.2.md).
 
 ## 1. Test environments and evidence
+
+**17T-44 candidate:** deterministic backend coverage for AG-01/02 (Workspace/Run/Event scope),
+AG-17/18 (observer disconnect/replay) and AG-34 (honest runtime unavailability), plus
+admission, PostgreSQL constraints and populated migration tests, is recorded in
+[17T-44 evidence](../evidence/17T-44-agent-control-plane.md). This does not pass AG-03's
+queued-to-running execution or any sandbox/tool/artifact/browser/security gate below.
 
 | Layer | Environment | Evidence |
 |---|---|---|

@@ -145,6 +145,9 @@ export async function createTestDatabase(migrations?: readonly Migration[]): Pro
   let activeTxBackup: ReturnType<typeof db.backup> | null = null;
 
   db.public.interceptQueries((sql) => {
+    if (sql.includes('to_char(created_at') && sql.includes('cursor_created_at')) {
+      return db.public.many(sql.replace(/to_char\(created_at AT TIME ZONE 'UTC', '[^']+'\) AS cursor_created_at/g, 'NULL AS cursor_created_at'));
+    }
     // pg-mem has millisecond precision only and no AT TIME ZONE formatting.
     if (sql.includes('to_char(updated_at')) {
       return db.public.many(sql.replace(/to_char\(updated_at AT TIME ZONE 'UTC', '[^']+'\) AS cursor_updated_at/g, 'NULL AS cursor_updated_at'));
@@ -232,6 +235,11 @@ export async function createTestDatabase(migrations?: readonly Migration[]): Pro
   await runMigrations(pool, migrations);
 
   const cleanup = async (): Promise<void> => {
+    try {
+      await pool.query('DELETE FROM agent_run_events;');
+      await pool.query('DELETE FROM agent_runs;');
+      await pool.query('DELETE FROM agent_workspaces;');
+    } catch { /* Older migration fixtures do not contain Agent tables. */ }
     try {
       // pg-mem cannot order account cascades across the composite credential FK.
       await pool.query('DELETE FROM chat_credential_preferences;');

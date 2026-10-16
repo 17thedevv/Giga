@@ -104,7 +104,13 @@ data: {"messageId":"msg_1","createdAt":"2026-10-12T00:00:00.000Z"}
 
 ## 5. GigaAgent — Workspace-first Runs and Approvals (DRAFT v0.2)
 
-> **Design direction changed 2026-10-13.** The GitHub-first repository→diff→PR design below was an unfrozen draft, not a required Agent behavior. GigaAgent is now a general-purpose Agentic Workspace, independent from GigaChat. [Agent API v0.2](GIGA_AGENT_API_V0.2.md), [Architecture](../architecture/GIGA_AGENT_ARCHITECTURE_V0.2.md) and proposed [ADR-003](../decisions/ADR-003-agentic-workspace-and-isolated-runtime.md) are the current candidates. No new endpoint here is implemented or FROZEN.
+The [17T-44 implementation candidate](GIGA_AGENT_API_V0.2.md#implementation-candidate--17t-44)
+implements only blank Workspace create/list/get, Run create/list/get, and durable event
+replay. No runner exists: admitted runs persist `failed` / `RUNTIME_UNAVAILABLE`.
+The table below remains the broader proposal; files/messages/cancel/artifacts/approvals
+are not implemented by this slice. See [ADR-008](../decisions/ADR-008-agent-control-plane-foundation.md).
+
+> **Design direction changed 2026-10-13.** The GitHub-first repository→diff→PR design was an unfrozen draft, not a required Agent behavior. GigaAgent is now a general-purpose Agentic Workspace, independent from GigaChat. [Agent API v0.2](GIGA_AGENT_API_V0.2.md), [Architecture](../architecture/GIGA_AGENT_ARCHITECTURE_V0.2.md) and proposed [ADR-003](../decisions/ADR-003-agentic-workspace-and-isolated-runtime.md) are the current candidates. Only the 17T-44 subset above has an implementation candidate; nothing is FROZEN.
 
 | Method | Route | Responsibility |
 |---|---|---|

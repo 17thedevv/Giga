@@ -11,6 +11,8 @@ describe('Database Migrations and Utilities', () => {
     const db = newDb({ noAstCoverageCheck: true });
     db.public.registerFunction({ name: 'octet_length', args: [DataType.text], returns: DataType.integer,
       implementation: (text: string) => Buffer.byteLength(text) });
+    db.public.registerFunction({ name: 'char_length', args: [DataType.text], returns: DataType.integer,
+      implementation: (text: string) => Array.from(text).length });
     db.public.interceptQueries((sql) => {
       const original = sql;
       sql = sql.replace("status VARCHAR(20) NOT NULL CHECK", "status VARCHAR(20) NOT NULL CONSTRAINT chat_generations_status_check CHECK")
@@ -37,7 +39,7 @@ describe('Database Migrations and Utilities', () => {
     try {
       // First run: applies all pending migrations
       const firstRun = await runMigrations(pool);
-      assert.strictEqual(firstRun.length, 10);
+      assert.strictEqual(firstRun.length, 11);
       assert.strictEqual(firstRun[0], '001_initial_users_and_sessions');
       assert.strictEqual(firstRun[1], '002_conversations_and_messages');
       assert.strictEqual(firstRun[2], '003_skills_and_preferences');
@@ -48,6 +50,7 @@ describe('Database Migrations and Utilities', () => {
       assert.strictEqual(firstRun[7], '008_chat_resolved_model');
       assert.strictEqual(firstRun[8], '009_chat_byok_credentials');
       assert.strictEqual(firstRun[9], '010_chat_reasoning_effort');
+      assert.strictEqual(firstRun[10], '011_agent_control_plane');
 
       const versions = await getAppliedMigrationVersions(pool);
       assert.ok(versions.has(1));
@@ -60,6 +63,7 @@ describe('Database Migrations and Utilities', () => {
       assert.ok(versions.has(8));
       assert.ok(versions.has(9));
       assert.ok(versions.has(10));
+      assert.ok(versions.has(11));
 
       // Second run: idempotent, applies 0 migrations
       const secondRun = await runMigrations(pool);
