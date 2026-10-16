@@ -48,6 +48,7 @@ export const ChatView: React.FC = () => {
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamingText, setStreamingText] = useState('');
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
+  const [showMobileSidebar, setShowMobileSidebar] = useState(false);
 
   const abortControllerRef = useRef<AbortController | null>(null);
   const accumulatedTextRef = useRef('');
@@ -95,6 +96,9 @@ export const ChatView: React.FC = () => {
     activeGenerationIdRef.current = null;
     isStoppingRef.current = false;
     setErrorBanner(null);
+    setModels([]);
+    setSelectedModelId('');
+    setSelectedReasoningEffort(undefined);
   }, [mode]);
 
   // Load conversations list
@@ -174,10 +178,16 @@ export const ChatView: React.FC = () => {
             setSelectedReasoningEffort(urlEffort);
           }
         }
+      } else {
+        setModels([]);
+        setSelectedModelId('');
+        setSelectedReasoningEffort(undefined);
       }
     } catch {
       if (modelsLoadRequestIdRef.current !== reqId) return;
       setModels([]);
+      setSelectedModelId('');
+      setSelectedReasoningEffort(undefined);
     }
   }, [mode]);
 
@@ -767,7 +777,7 @@ export const ChatView: React.FC = () => {
           },
           {
             signal: abortControllerRef.current.signal,
-            modelId: selectedModelId || undefined,
+            modelId: activeModel ? activeModel.id : undefined,
             reasoningEffort: effectiveReasoningEffort,
           }
         );
@@ -1083,7 +1093,7 @@ export const ChatView: React.FC = () => {
           },
           {
             signal: abortControllerRef.current.signal,
-            modelId: selectedModelId || undefined,
+            modelId: activeModel ? activeModel.id : undefined,
             reasoningEffort: effectiveReasoningEffort,
           }
         );
@@ -1166,7 +1176,7 @@ export const ChatView: React.FC = () => {
           },
           {
             signal: abortControllerRef.current.signal,
-            modelId: selectedModelId || undefined,
+            modelId: activeModel ? activeModel.id : undefined,
             reasoningEffort: effectiveReasoningEffort,
           }
         );
@@ -1276,10 +1286,17 @@ export const ChatView: React.FC = () => {
       <ConversationSidebar
         conversations={conversations}
         activeId={conversationId}
-        onSelect={(id) => navigate(`/chat/${id}`)}
-        onCreate={handleCreateConversation}
+        onSelect={(id) => {
+          navigate(`/chat/${id}`);
+          setShowMobileSidebar(false);
+        }}
+        onCreate={() => {
+          handleCreateConversation();
+          setShowMobileSidebar(false);
+        }}
         onDelete={handleDeleteConversation}
         isLoading={isLoading}
+        isOpenOnMobile={showMobileSidebar}
       />
 
       {/* Main Chat Workspace */}
@@ -1293,6 +1310,29 @@ export const ChatView: React.FC = () => {
           minWidth: 0,
         }}
       >
+        {/* Mobile Header Bar for discussions toggle (< 768px) */}
+        <div
+          className="mobile-chat-bar"
+          style={{
+            padding: '8px 16px',
+            borderBottom: '1px solid var(--giga-border, #1E293B)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            backgroundColor: 'var(--giga-surface, #111C2D)',
+          }}
+        >
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => setShowMobileSidebar(!showMobileSidebar)}
+          >
+            {showMobileSidebar ? '✕ Close Discussions' : '☰ Discussions'}
+          </Button>
+          <span style={{ fontSize: '12px', color: 'var(--giga-text-secondary, #94A3B8)' }}>
+            {models.find((m) => m.id === selectedModelId)?.id || 'GigaChat'}
+          </span>
+        </div>
         {/* Banner notification for Mock Mode */}
         {mode === 'mock' && (
           <div

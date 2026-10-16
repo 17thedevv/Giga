@@ -1065,6 +1065,21 @@ describe('17T-42 — Capability-Driven Reasoning Controls in GigaChat', () => {
     });
 
     it('Scenario 16: Regenerate operates smoothly in Mock Mode', async () => {
+      let mockVariantInvoked = false;
+      vi.spyOn(mockDataAdapter, 'streamVariant').mockImplementation(
+        async (_convId, _userMsgId, _action, onEvent) => {
+          mockVariantInvoked = true;
+          onEvent({
+            event: 'message.started',
+            data: { messageId: 'm_mock_1', generationId: 'g_mock_1', conversationId: 'c1' },
+          });
+          onEvent({
+            event: 'message.completed',
+            data: { messageId: 'm_mock_1', generationId: 'g_mock_1' },
+          });
+        }
+      );
+
       render(
         <ApiModeProvider initialMode="mock">
           <AuthProvider>
@@ -1094,10 +1109,166 @@ describe('17T-42 — Capability-Driven Reasoning Controls in GigaChat', () => {
       // Click regenerate
       fireEvent.click(regenButtons[0]);
 
-      // Streaming should start in mock mode
       await waitFor(() => {
-        expect(screen.getByTestId('composer-reasoning-select')).toBeDefined();
+        expect(mockVariantInvoked).toBe(true);
       });
+    });
+
+    it('Scenario 17: Resets selection when model discovery fails or returns empty and never transmits stale modelId', async () => {
+      vi.spyOn(realApiClient, 'listConversations').mockResolvedValue({
+        items: [
+          {
+            id: 'conv_stale_test',
+            title: 'Stale Model Test',
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          },
+        ],
+        nextCursor: null,
+      });
+      vi.spyOn(realApiClient, 'getConversation').mockResolvedValue({
+        conversation: {
+          id: 'conv_stale_test',
+          title: 'Stale Model Test',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+        messages: [],
+      });
+
+      // listModels fails
+      vi.spyOn(realApiClient, 'listModels').mockRejectedValue(new Error('Network failure'));
+
+      let capturedOptions: any;
+      const streamSpy = vi
+        .spyOn(realApiClient, 'streamMessage')
+        .mockImplementation(async (_convId, _content, onEvent, options) => {
+          capturedOptions = options;
+          onEvent({
+            event: 'message.started',
+            data: { messageId: 'm1', generationId: 'g1', conversationId: 'conv_stale_test' },
+          });
+          onEvent({
+            event: 'message.completed',
+            data: { messageId: 'm1', generationId: 'g1' },
+          });
+        });
+
+      render(
+        <ApiModeProvider initialMode="real">
+          <AuthProvider>
+            <RouterProvider>
+              <ChatView />
+            </RouterProvider>
+          </AuthProvider>
+        </ApiModeProvider>
+      );
+
+      // Model select should have no options and reasoning select disabled
+      await waitFor(() => {
+        const reasoningSelect = screen.getByTestId('composer-reasoning-select') as HTMLSelectElement;
+        expect(reasoningSelect.disabled).toBe(true);
+      });
+
+      // Submit message
+      const textarea = screen.getByPlaceholderText(/Ask Giga anything/);
+      fireEvent.change(textarea, { target: { value: 'Testing stale model resilience' } });
+      fireEvent.click(screen.getByRole('button', { name: /Send Message/i }));
+
+      await waitFor(() => {
+        expect(streamSpy).toHaveBeenCalled();
+      });
+
+      // modelId and reasoningEffort MUST be undefined (never send stale or unverified modelId)
+      expect(capturedOptions.modelId).toBeUndefined();
+      expect(capturedOptions.reasoningEffort).toBeUndefined();
+    });
+
+    it('Scenario 18: Handles empty models discovery by clearing selections and disabling reasoning controls', async () => {
+      vi.spyOn(realApiClient, 'listConversations').mockResolvedValue({
+        items: [
+          {
+            id: 'conv_empty_test',
+            title: 'Empty Model Test',
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          },
+        ],
+        nextCursor: null,
+      });
+      vi.spyOn(realApiClient, 'getConversation').mockResolvedValue({
+        conversation: {
+          id: 'conv_empty_test',
+          title: 'Empty Model Test',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+        messages: [
+          {
+            id: 'u_empty_1',
+            conversationId: 'conv_empty_test',
+            role: 'user',
+            content: 'Hello empty',
+            createdAt: '2026-10-15T10:00:00.000Z',
+          },
+          {
+            id: 'a_empty_1',
+            conversationId: 'conv_empty_test',
+            role: 'assistant',
+            content: 'Empty model response',
+            createdAt: '2026-10-15T10:00:05.000Z',
+            status: 'completed',
+          },
+        ],
+      });
+
+      // listModels returns empty array
+      vi.spyOn(realApiClient, 'listModels').mockResolvedValue({ models: [] });
+
+      let capturedVariantOptions: any;
+      const variantSpy = vi
+        .spyOn(realApiClient, 'streamVariant')
+        .mockImplementation(async (_convId, _userMsgId, _action, onEvent, options) => {
+          capturedVariantOptions = options;
+          onEvent({
+            event: 'message.started',
+            data: { messageId: 'm_empty_variant', generationId: 'g_empty_variant', conversationId: 'conv_empty_test' },
+          });
+          onEvent({
+            event: 'message.completed',
+            data: { messageId: 'm_empty_variant', generationId: 'g_empty_variant' },
+          });
+        });
+
+      render(
+        <ApiModeProvider initialMode="real">
+          <AuthProvider>
+            <RouterProvider>
+              <ChatView />
+            </RouterProvider>
+          </AuthProvider>
+        </ApiModeProvider>
+      );
+
+      // Model select should have no options and reasoning select disabled
+      await waitFor(() => {
+        const reasoningSelect = screen.getByTestId('composer-reasoning-select') as HTMLSelectElement;
+        expect(reasoningSelect.disabled).toBe(true);
+      });
+
+      // Click Regenerate
+      await waitFor(() => {
+        expect(screen.getByTestId('regenerate-btn-a_empty_1')).toBeDefined();
+      });
+      fireEvent.click(screen.getByTestId('regenerate-btn-a_empty_1'));
+
+      await waitFor(() => {
+        expect(variantSpy).toHaveBeenCalled();
+      });
+
+      // When models list is empty, modelId and reasoningEffort must be undefined
+      expect(capturedVariantOptions.modelId).toBeUndefined();
+      expect(capturedVariantOptions.reasoningEffort).toBeUndefined();
     });
   });
 });
