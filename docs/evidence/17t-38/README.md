@@ -1,7 +1,7 @@
 # Chat generation controls — local evidence
 
 Issue: [17T-38](https://linear.app/17thedev/issue/17T-38/implement-gigachat-stop-retry-and-regenerate-controls-ui).
-Intended owner: Thư. Reviewer: Trà; human review remains pending.
+Intended owner: Thư. Reviewer: Trà; re-review remains pending after Request Changes.
 Date: 2026-10-16 (Asia/Saigon).
 
 ## Scope and compatibility
@@ -30,7 +30,7 @@ Environment: Windows, Node v24.12.0, npm 11.6.2. Base: `6dc2b1a` from `origin/ma
 - `npm ci` in `apps/web`: succeeded; lockfile unchanged. npm reported three existing dependency audit findings (one moderate, two critical); no dependency upgrades were made.
 - `npm run typecheck --prefix apps/web`: PASS.
 - `npm run build --prefix apps/web`: PASS.
-- `npm test --prefix apps/web`: PASS, 122 tests across 10 files.
+- `npm test --prefix apps/web`: PASS, 125 tests across 10 files.
 - `node --test .agents/scripts/validate-git-workflow.test.mjs`: PASS, six tests.
 - `node .agents/scripts/validate-skills.mjs`: PASS, eight skills.
 - `git diff --check`: PASS.
@@ -42,9 +42,33 @@ synchronous double actions including conversation creation, active-generation ro
 refresh, and Enter-to-send. Existing stream, model capability, auth and other web
 regressions remain in the full suite.
 
+## Review follow-up: stale operations and duplicate active admission
+
+Reviewed head: `840075e`. Both reported P1 cases were reproduced by new deferred
+promise regression tests before the fixes (16 focused tests passed, two failed).
+
+- A late creation rejection now checks operation, mode and route before releasing
+  state or showing an error. The test navigates from pending creation at `/chat`
+  to conversation B, starts B's generation, then rejects the old request. B keeps
+  its action lock, accepts later deltas and sends Stop for its own generation ID.
+- The same route fence now covers a late history-recovery rejection. A third test
+  verifies that this related failure cannot hide B's ongoing stream.
+- A same-conversation duplicate admission enables Stop for its nonterminal
+  generation before GET completes. Authoritative nonterminal GET responses keep
+  Stop enabled through bounded polling while new actions remain locked. The test
+  then cancels that generation and reconciles stopped state.
+
+`npm test -- --run tests/chat-generation-controls.test.tsx`: PASS, 19 focused tests
+after the fixes. Full typecheck, build, 125 web tests, six Git-validator tests,
+eight skill validations and whitespace checks were rerun successfully. No public
+contract, backend, dependency or deployment changes were needed.
+
 ## Local browser evidence
 
 In-app browser at `http://127.0.0.1:5173`, explicit Mock mode, 614 × 508 viewport:
+
+These screenshots were captured on the initial implementation at `840075e`;
+the review follow-up changes were verified through automated regression tests.
 
 1. Regenerate, then Stop: original completed answer stays selected; stopped status
    and Retry/Regenerate are visible. Controls wrap and use 44px minimum height.

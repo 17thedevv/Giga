@@ -2,8 +2,8 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ChatView } from '../src/features/chat/ChatView.js';
 import { ApiModeProvider } from '../src/app/context/ApiModeContext.js';
-import { RouterProvider } from '../src/app/router.js';
-import { RealApiClient, realApiClient } from '../src/lib/api/client.js';
+import { RouterProvider, useRouter } from '../src/app/router.js';
+import { ApiException, RealApiClient, realApiClient } from '../src/lib/api/client.js';
 import { MockDataAdapter } from '../src/lib/api/mock-adapter.js';
 import type { ChatGeneration, ChatStreamEvent, ChatTurnVariants, Message } from '../src/lib/api/types.js';
 
@@ -160,6 +160,91 @@ describe('latest-turn generation controls', () => {
     expect(await screen.findByRole('button', { name: 'Retry' })).toBeDefined();
     expect(spy).toHaveBeenCalledTimes(1);
     expect(realApiClient.getGeneration).toHaveBeenCalledWith('c1', 'g2');
+  });
+
+  it('duplicate active admission enables Stop while keeping new actions locked through polling', async () => {
+    view(); await ready(); attempt('streaming');
+    const admission = vi.spyOn(realApiClient, 'streamVariant').mockRejectedValue(
+      new ApiException(409, 'CONFLICT', 'Already admitted', { generation })
+    );
+    let resolveStatus!: (result: { generation: ChatGeneration }) => void;
+    vi.spyOn(realApiClient, 'getGeneration').mockImplementationOnce(
+      () => new Promise(resolve => { resolveStatus = resolve; })
+    );
+    let resolveCancel!: (result: { generation: ChatGeneration }) => void;
+    const cancel = vi.spyOn(realApiClient, 'cancelGeneration').mockImplementation(
+      () => new Promise(resolve => { resolveCancel = resolve; })
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Regenerate' }));
+    await waitFor(() => expect(realApiClient.getGeneration).toHaveBeenCalledWith('c1', 'g2'));
+    // The verified conflict envelope permits Stop even before GET finishes.
+    expect((screen.getByRole('button', { name: 'Stop Generating' }) as HTMLButtonElement).disabled).toBe(false);
+    await act(async () => resolveStatus({ generation }));
+    // Bounded polling must retain both the action lock and durable Stop access.
+    await screen.findByText(/Generation cancellation is taking longer than expected/);
+    const stop = screen.getByRole('button', { name: 'Stop Generating' }) as HTMLButtonElement;
+    expect(stop.disabled).toBe(false);
+    expect((screen.getByRole('button', { name: 'Regenerate' }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.submit(stop.closest('form')!);
+    expect(admission).toHaveBeenCalledTimes(1);
+    fireEvent.click(stop);
+    expect(cancel).toHaveBeenCalledWith('c1', 'g2');
+    attempt('stopped');
+    await act(async () => resolveCancel({ generation }));
+    expect(await screen.findByRole('button', { name: 'Retry' })).toBeDefined();
+    expect(screen.getByText(answer.content)).toBeDefined();
+  });
+
+  it.each(['creation', 'history recovery'] as const)('late %s failure cannot release the generation on a newer route', async source => {
+    let rejectCreate!: (reason: Error) => void;
+    const create = vi.spyOn(realApiClient, 'createConversation').mockImplementation(
+      () => new Promise((_resolve, reject) => { rejectCreate = reject; })
+    );
+    vi.spyOn(realApiClient, 'listConversations').mockResolvedValue({ items: [], nextCursor: null });
+    let rejectHistory!: (reason: Error) => void;
+    let oldHistoryLoads = 0;
+    vi.spyOn(realApiClient, 'getConversation').mockImplementation(async id => {
+      if (id === 'cA') {
+        if (++oldHistoryLoads > 1) return new Promise((_resolve, reject) => { rejectHistory = reject; });
+        return { conversation: { ...conversation, id }, messages: [] };
+      }
+      return { conversation, messages: [...history] };
+    });
+    let emitB!: (event: ChatStreamEvent) => void;
+    const stream = vi.spyOn(realApiClient, 'streamMessage').mockImplementation(async (_id, _text, callback) => {
+      if (_id === 'cA') throw new TypeError('Admission connection lost');
+      emitB = callback;
+      callback({ event: 'message.started', data: { conversationId: 'c1', messageId: 'gB', generationId: 'gB' } });
+      callback({ event: 'message.delta', data: { messageId: 'gB', generationId: 'gB', text: 'B stays active' } });
+      return new Promise<void>(() => {});
+    });
+    const cancel = vi.spyOn(realApiClient, 'cancelGeneration').mockImplementation(() => new Promise(() => {}));
+    function Navigation() {
+      const { navigate } = useRouter();
+      return <button onClick={() => navigate('/chat/c1')}>Open conversation B</button>;
+    }
+    render(<ApiModeProvider initialMode="real"><RouterProvider initialPath={source === 'creation' ? '/chat' : '/chat/cA'}><Navigation /><ChatView /></RouterProvider></ApiModeProvider>);
+    const input = await screen.findByPlaceholderText(/Ask Giga anything/);
+    fireEvent.change(input, { target: { value: 'Create conversation A' } });
+    fireEvent.submit(input.closest('form')!);
+    if (source === 'creation') expect(create).toHaveBeenCalledTimes(1);
+    else await waitFor(() => expect(rejectHistory).toBeDefined());
+    fireEvent.click(screen.getByRole('button', { name: 'Open conversation B' }));
+    await ready();
+    const inputB = screen.getByPlaceholderText(/Ask Giga anything/);
+    fireEvent.change(inputB, { target: { value: 'Start generation B' } });
+    fireEvent.submit(inputB.closest('form')!);
+    expect(await screen.findByText('B stays active')).toBeDefined();
+    await act(async () => (source === 'creation' ? rejectCreate : rejectHistory)(new Error('Stale request failed')));
+    const stop = screen.getByRole('button', { name: 'Stop Generating' }) as HTMLButtonElement;
+    expect(stop.disabled).toBe(false);
+    expect(screen.queryByText('Stale request failed')).toBeNull();
+    fireEvent.submit(stop.closest('form')!);
+    expect(stream).toHaveBeenCalledTimes(source === 'creation' ? 1 : 2);
+    await act(async () => emitB({ event: 'message.delta', data: { messageId: 'gB', generationId: 'gB', text: ' after stale rejection' } }));
+    expect(screen.getByText('B stays active after stale rejection')).toBeDefined();
+    fireEvent.click(screen.getByRole('button', { name: 'Stop Generating' }));
+    expect(cancel).toHaveBeenCalledWith('c1', 'gB');
   });
 
   it('synchronous double Regenerate starts one request', async () => {

@@ -281,6 +281,7 @@ export const ChatView: React.FC = () => {
       const generation = snapshot || (await api.getGeneration(id, generationId)).generation;
       if (!current(id, op) || activeGenerationIdRef.current !== generationId) return false;
       if (!isTerminalStatus(generation.status)) {
+        setCanStop(true);
         if (generation.partialContent) setStreamingText(generation.partialContent);
         if (attempt < MAX_POLL_ATTEMPTS) {
           await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
@@ -546,10 +547,21 @@ export const ChatView: React.FC = () => {
         }
       }
     } catch (err) {
-      if (!id) { release(); setErrorBanner(err instanceof Error ? err.message : 'Failed to create conversation'); return; }
+      // Creation can reject after navigation, mode changes, or a newer admission.
+      // A stale operation must never release the current generation's lock/IDs.
+      if (op !== operationRef.current || modeRef.current !== mode) return;
+      if (!id) {
+        if (conversationIdRef.current) return;
+        release();
+        setErrorBanner(err instanceof Error ? err.message : 'Failed to create conversation');
+        return;
+      }
       if (!current(id, op) || controller.signal.aborted && !actionLockRef.current) return;
       const duplicate = err instanceof ApiException ? err.details?.generation as ChatGeneration | undefined : undefined;
-      if (duplicate?.conversationId === id) activeGenerationIdRef.current = duplicate.id;
+      if (duplicate?.conversationId === id) {
+        activeGenerationIdRef.current = duplicate.id;
+        setCanStop(!isTerminalStatus(duplicate.status));
+      }
       if (activeGenerationIdRef.current) {
         await reconcileAuthoritativeGeneration(id, activeGenerationIdRef.current,
           err instanceof Error ? err.message : 'Stream error', accumulatedTextRef.current);
@@ -563,6 +575,7 @@ export const ChatView: React.FC = () => {
           await inspectTurn(id, history.messages, op);
           if (current(id, op) && !activeGenerationIdRef.current) release();
         } catch {
+          if (!current(id, op)) return;
           // Unknown admission: keep actions locked until a successful status refresh.
           setIsStreaming(false);
         }
