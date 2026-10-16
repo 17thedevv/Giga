@@ -355,14 +355,12 @@ export class MockDataAdapter {
   async getMe(): Promise<{ user: User }> {
     await this.delay(150);
     if (!this.currentUser) {
-      if (typeof window !== 'undefined' && window.sessionStorage) {
-        try {
-          if (window.sessionStorage.getItem(MOCK_AUTH_STORAGE_KEY) === 'true') {
-            this.currentUser = { ...MOCK_USER };
-            return { user: this.currentUser };
-          }
-        } catch {
-          // Ignore
+      if (typeof window !== 'undefined') {
+        const hasDemoParam = typeof window.location !== 'undefined' && window.location.search?.includes('demo=1');
+        const hasSession = window.sessionStorage?.getItem(MOCK_AUTH_STORAGE_KEY) === 'true';
+        if (hasDemoParam || hasSession) {
+          this.currentUser = { ...MOCK_USER };
+          return { user: this.currentUser };
         }
       }
       throw new ApiException(401, 'UNAUTHORIZED', 'No active mock session. Please sign in.');

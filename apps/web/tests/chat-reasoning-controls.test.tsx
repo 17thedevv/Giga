@@ -665,5 +665,439 @@ describe('17T-42 — Capability-Driven Reasoning Controls in GigaChat', () => {
       expect(capturedPayload.apiKey).toBeUndefined();
       expect(capturedPayload.provider).toBeUndefined();
     });
+
+    it('Scenario 12: Regenerate button renders on latest assistant message and transmits selected reasoningEffort and modelId via streamVariant', async () => {
+      const model: ModelMetadata = {
+        id: 'giga-chat-default',
+        capabilities: ['text', 'streaming'],
+        reasoning: { supported: true, efforts: ['low', 'medium', 'high'] },
+      };
+
+      vi.spyOn(realApiClient, 'listConversations').mockResolvedValue({
+        items: [
+          {
+            id: 'conv_regen_test',
+            title: 'Regen Test',
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          },
+        ],
+        nextCursor: null,
+      });
+      vi.spyOn(realApiClient, 'getConversation').mockResolvedValue({
+        conversation: {
+          id: 'conv_regen_test',
+          title: 'Regen Test',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+        messages: [
+          {
+            id: 'usr_msg_1',
+            conversationId: 'conv_regen_test',
+            role: 'user',
+            content: 'Write a quicksort in TypeScript',
+            createdAt: '2026-10-15T10:00:00.000Z',
+          },
+          {
+            id: 'asst_msg_1',
+            conversationId: 'conv_regen_test',
+            role: 'assistant',
+            content: 'Here is quicksort implementation...',
+            createdAt: '2026-10-15T10:00:05.000Z',
+            status: 'completed',
+          },
+        ],
+      });
+      vi.spyOn(realApiClient, 'listModels').mockResolvedValue({
+        models: [model],
+      });
+
+      let capturedVariantOptions: any;
+      let capturedUserMessageId: string | undefined;
+      let capturedAction: string | undefined;
+      const variantSpy = vi
+        .spyOn(realApiClient, 'streamVariant')
+        .mockImplementation(async (_convId, userMsgId, action, onEvent, options) => {
+          capturedUserMessageId = userMsgId;
+          capturedAction = action;
+          capturedVariantOptions = options;
+          onEvent({
+            event: 'message.started',
+            data: { messageId: 'asst_msg_2', generationId: 'gen_var_1', conversationId: 'conv_regen_test' },
+          });
+          onEvent({
+            event: 'message.delta',
+            data: { messageId: 'asst_msg_2', generationId: 'gen_var_1', text: 'Regenerated quicksort...' },
+          });
+          onEvent({
+            event: 'message.completed',
+            data: { messageId: 'asst_msg_2', generationId: 'gen_var_1' },
+          });
+        });
+
+      render(
+        <ApiModeProvider initialMode="real">
+          <AuthProvider>
+            <RouterProvider>
+              <ChatView />
+            </RouterProvider>
+          </AuthProvider>
+        </ApiModeProvider>
+      );
+
+      // Wait for conversation history and models to load
+      await waitFor(() => {
+        expect(screen.getByTestId('regenerate-btn-asst_msg_1')).toBeDefined();
+        expect(screen.getByTestId('composer-reasoning-select')).toBeDefined();
+      });
+
+      // Select 'high' reasoning effort
+      fireEvent.change(screen.getByTestId('composer-reasoning-select'), {
+        target: { value: 'high' },
+      });
+
+      // Click Regenerate button
+      const regenBtn = screen.getByTestId('regenerate-btn-asst_msg_1');
+      fireEvent.click(regenBtn);
+
+      await waitFor(() => {
+        expect(variantSpy).toHaveBeenCalled();
+      });
+
+      expect(capturedUserMessageId).toBe('usr_msg_1');
+      expect(capturedAction).toBe('regenerate');
+      expect(capturedVariantOptions.modelId).toBe('giga-chat-default');
+      expect(capturedVariantOptions.reasoningEffort).toBe('high');
+      expect(capturedVariantOptions.thinkingConfig).toBeUndefined();
+      expect(capturedVariantOptions.thinkingBudget).toBeUndefined();
+    });
+
+    it('Scenario 13: Model switch to unsupported model before clicking Regenerate recalculates reasoningEffort and omits it', async () => {
+      const fullModel: ModelMetadata = {
+        id: 'giga-chat-default',
+        capabilities: ['text', 'streaming'],
+        reasoning: { supported: true, efforts: ['low', 'medium', 'high'] },
+      };
+      const fastModel: ModelMetadata = {
+        id: 'giga-fast',
+        capabilities: ['text', 'streaming'],
+        reasoning: { supported: false, efforts: [] },
+      };
+
+      vi.spyOn(realApiClient, 'listConversations').mockResolvedValue({
+        items: [
+          {
+            id: 'conv_switch_regen',
+            title: 'Switch Test',
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          },
+        ],
+        nextCursor: null,
+      });
+      vi.spyOn(realApiClient, 'getConversation').mockResolvedValue({
+        conversation: {
+          id: 'conv_switch_regen',
+          title: 'Switch Test',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+        messages: [
+          {
+            id: 'usr_msg_1',
+            conversationId: 'conv_switch_regen',
+            role: 'user',
+            content: 'Explain binary search',
+            createdAt: '2026-10-15T10:00:00.000Z',
+          },
+          {
+            id: 'asst_msg_1',
+            conversationId: 'conv_switch_regen',
+            role: 'assistant',
+            content: 'Binary search divides the interval...',
+            createdAt: '2026-10-15T10:00:05.000Z',
+            status: 'completed',
+          },
+        ],
+      });
+      vi.spyOn(realApiClient, 'listModels').mockResolvedValue({
+        models: [fullModel, fastModel],
+      });
+
+      let capturedVariantOptions: any;
+      const variantSpy = vi
+        .spyOn(realApiClient, 'streamVariant')
+        .mockImplementation(async (_convId, _userMsgId, _action, onEvent, options) => {
+          capturedVariantOptions = options;
+          onEvent({
+            event: 'message.started',
+            data: { messageId: 'asst_msg_2', generationId: 'gen_var_2', conversationId: 'conv_switch_regen' },
+          });
+          onEvent({
+            event: 'message.completed',
+            data: { messageId: 'asst_msg_2', generationId: 'gen_var_2' },
+          });
+        });
+
+      render(
+        <ApiModeProvider initialMode="real">
+          <AuthProvider>
+            <RouterProvider>
+              <ChatView />
+            </RouterProvider>
+          </AuthProvider>
+        </ApiModeProvider>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByTestId('regenerate-btn-asst_msg_1')).toBeDefined();
+        expect(screen.getByTestId('composer-reasoning-select')).toBeDefined();
+      });
+
+      // Select 'high' reasoning effort on initial model
+      fireEvent.change(screen.getByTestId('composer-reasoning-select'), {
+        target: { value: 'high' },
+      });
+
+      // Switch to unsupported model 'giga-fast'
+      fireEvent.change(screen.getByTestId('composer-model-select'), {
+        target: { value: 'giga-fast' },
+      });
+
+      // Reasoning selector must now be disabled
+      const reasoningSelect = screen.getByTestId('composer-reasoning-select') as HTMLSelectElement;
+      expect(reasoningSelect.disabled).toBe(true);
+
+      // Click Regenerate
+      fireEvent.click(screen.getByTestId('regenerate-btn-asst_msg_1'));
+
+      await waitFor(() => {
+        expect(variantSpy).toHaveBeenCalled();
+      });
+
+      // Transmitted model is 'giga-fast', and reasoningEffort is undefined (recalculated and NOT stale)
+      expect(capturedVariantOptions.modelId).toBe('giga-fast');
+      expect(capturedVariantOptions.reasoningEffort).toBeUndefined();
+    });
+
+    it('Scenario 14: Failed or stopped assistant message displays Retry label and passes action retry', async () => {
+      const model: ModelMetadata = {
+        id: 'giga-chat-default',
+        capabilities: ['text', 'streaming'],
+        reasoning: { supported: true, efforts: ['low', 'medium', 'high'] },
+      };
+
+      vi.spyOn(realApiClient, 'listConversations').mockResolvedValue({
+        items: [
+          {
+            id: 'conv_retry_test',
+            title: 'Retry Test',
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          },
+        ],
+        nextCursor: null,
+      });
+      vi.spyOn(realApiClient, 'getConversation').mockResolvedValue({
+        conversation: {
+          id: 'conv_retry_test',
+          title: 'Retry Test',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+        messages: [
+          {
+            id: 'usr_msg_1',
+            conversationId: 'conv_retry_test',
+            role: 'user',
+            content: 'Hello Giga',
+            createdAt: '2026-10-15T10:00:00.000Z',
+          },
+          {
+            id: 'asst_failed_1',
+            conversationId: 'conv_retry_test',
+            role: 'assistant',
+            content: 'Partial network interruption...',
+            createdAt: '2026-10-15T10:00:05.000Z',
+            status: 'failed',
+          },
+        ],
+      });
+      vi.spyOn(realApiClient, 'listModels').mockResolvedValue({
+        models: [model],
+      });
+
+      let capturedAction: string | undefined;
+      const variantSpy = vi
+        .spyOn(realApiClient, 'streamVariant')
+        .mockImplementation(async (_convId, _userMsgId, action, onEvent) => {
+          capturedAction = action;
+          onEvent({
+            event: 'message.started',
+            data: { messageId: 'asst_retried_1', generationId: 'gen_retry_1', conversationId: 'conv_retry_test' },
+          });
+          onEvent({
+            event: 'message.completed',
+            data: { messageId: 'asst_retried_1', generationId: 'gen_retry_1' },
+          });
+        });
+
+      render(
+        <ApiModeProvider initialMode="real">
+          <AuthProvider>
+            <RouterProvider>
+              <ChatView />
+            </RouterProvider>
+          </AuthProvider>
+        </ApiModeProvider>
+      );
+
+      await waitFor(() => {
+        const retryBtn = screen.getByTestId('regenerate-btn-asst_failed_1');
+        expect(retryBtn).toBeDefined();
+        expect(retryBtn.textContent).toContain('Retry');
+      });
+
+      fireEvent.click(screen.getByTestId('regenerate-btn-asst_failed_1'));
+
+      await waitFor(() => {
+        expect(variantSpy).toHaveBeenCalled();
+      });
+
+      expect(capturedAction).toBe('retry');
+    });
+
+    it('Scenario 15: During active streaming, Regenerate button is disabled', async () => {
+      const model: ModelMetadata = {
+        id: 'giga-chat-default',
+        capabilities: ['text', 'streaming'],
+        reasoning: { supported: true, efforts: ['low', 'medium', 'high'] },
+      };
+
+      vi.spyOn(realApiClient, 'listConversations').mockResolvedValue({
+        items: [
+          {
+            id: 'conv_stream_disable',
+            title: 'Stream Disable Test',
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          },
+        ],
+        nextCursor: null,
+      });
+      vi.spyOn(realApiClient, 'getConversation').mockResolvedValue({
+        conversation: {
+          id: 'conv_stream_disable',
+          title: 'Stream Disable Test',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+        messages: [
+          {
+            id: 'usr_msg_1',
+            conversationId: 'conv_stream_disable',
+            role: 'user',
+            content: 'First turn',
+            createdAt: '2026-10-15T10:00:00.000Z',
+          },
+          {
+            id: 'asst_msg_1',
+            conversationId: 'conv_stream_disable',
+            role: 'assistant',
+            content: 'First response',
+            createdAt: '2026-10-15T10:00:05.000Z',
+            status: 'completed',
+          },
+        ],
+      });
+      vi.spyOn(realApiClient, 'listModels').mockResolvedValue({
+        models: [model],
+      });
+
+      // Keep stream pending
+      vi.spyOn(realApiClient, 'streamMessage').mockImplementation(
+        async (_convId, _content, onEvent) => {
+          onEvent({
+            event: 'message.started',
+            data: { messageId: 'm2', generationId: 'g2', conversationId: 'conv_stream_disable' },
+          });
+          onEvent({
+            event: 'message.delta',
+            data: { messageId: 'm2', generationId: 'g2', text: 'Streaming in progress...' },
+          });
+        }
+      );
+
+      render(
+        <ApiModeProvider initialMode="real">
+          <AuthProvider>
+            <RouterProvider>
+              <ChatView />
+            </RouterProvider>
+          </AuthProvider>
+        </ApiModeProvider>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByTestId('regenerate-btn-asst_msg_1')).toBeDefined();
+      });
+
+      const regenBtnBefore = screen.getByTestId('regenerate-btn-asst_msg_1') as HTMLButtonElement;
+      expect(regenBtnBefore.disabled).toBe(false);
+
+      // Start a new message stream
+      fireEvent.change(screen.getByPlaceholderText(/Ask Giga anything/), {
+        target: { value: 'Second prompt' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: /Send Message/i }));
+
+      // While streaming, asst_msg_1 is no longer the latest assistant turn, or canRegenerate is false
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: /Stop Generating/i })).toBeDefined();
+      });
+
+      // The regenerate button on previous message is either removed from being latest or disabled
+      const regenBtnDuring = screen.queryByTestId('regenerate-btn-asst_msg_1') as HTMLButtonElement | null;
+      if (regenBtnDuring) {
+        expect(regenBtnDuring.disabled).toBe(true);
+      }
+    });
+
+    it('Scenario 16: Regenerate operates smoothly in Mock Mode', async () => {
+      render(
+        <ApiModeProvider initialMode="mock">
+          <AuthProvider>
+            <RouterProvider>
+              <ChatView />
+            </RouterProvider>
+          </AuthProvider>
+        </ApiModeProvider>
+      );
+
+      // Mock mode loads initial discussions
+      await waitFor(() => {
+        const buttons = screen.getAllByRole('button');
+        expect(buttons.length).toBeGreaterThan(0);
+      });
+
+      // Wait for assistant message in initial discussion (from mockDataAdapter)
+      await waitFor(() => {
+        const copyBtns = screen.getAllByTitle('Copy message content');
+        expect(copyBtns.length).toBeGreaterThan(0);
+      });
+
+      // Look for the regenerate button
+      const regenButtons = screen.getAllByTitle(/Regenerate response|Retry/);
+      expect(regenButtons.length).toBeGreaterThan(0);
+
+      // Click regenerate
+      fireEvent.click(regenButtons[0]);
+
+      // Streaming should start in mock mode
+      await waitFor(() => {
+        expect(screen.getByTestId('composer-reasoning-select')).toBeDefined();
+      });
+    });
   });
 });

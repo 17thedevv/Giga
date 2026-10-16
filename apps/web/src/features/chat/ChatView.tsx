@@ -161,8 +161,19 @@ export const ChatView: React.FC = () => {
       if (normalized.length > 0) {
         setSelectedModelId((prev) => {
           if (prev && normalized.some((m) => m.id === prev)) return prev;
+          if (typeof window !== 'undefined' && window.location) {
+            const urlModel = new URLSearchParams(window.location.search).get('model');
+            if (urlModel && normalized.some((m) => m.id === urlModel)) return urlModel;
+          }
           return normalized[0].id;
         });
+
+        if (typeof window !== 'undefined' && window.location) {
+          const urlEffort = new URLSearchParams(window.location.search).get('effort');
+          if (urlEffort === 'low' || urlEffort === 'medium' || urlEffort === 'high') {
+            setSelectedReasoningEffort(urlEffort);
+          }
+        }
       }
     } catch {
       if (modelsLoadRequestIdRef.current !== reqId) return;
@@ -838,6 +849,336 @@ export const ChatView: React.FC = () => {
     }
   };
 
+  const handleRegenerateMessage = async (targetMessage: Message) => {
+    if (isStreaming) return;
+    const targetConvId = conversationIdRef.current;
+    if (!targetConvId) return;
+
+    // Locate the preceding user message to obtain userMessageId
+    const targetIdx = messages.findIndex((m) => m.id === targetMessage.id);
+    let userMessage: Message | undefined;
+    const searchFrom = targetIdx >= 0 ? targetIdx - 1 : messages.length - 1;
+    for (let i = searchFrom; i >= 0; i--) {
+      if (messages[i].role === 'user') {
+        userMessage = messages[i];
+        break;
+      }
+    }
+
+    if (!userMessage) {
+      setErrorBanner('No preceding user message found to regenerate');
+      return;
+    }
+
+    const userMessageId = userMessage.id;
+    const action: 'retry' | 'regenerate' =
+      targetMessage.status === 'failed' || targetMessage.status === 'stopped'
+        ? 'retry'
+        : 'regenerate';
+
+    // Recalculate effective reasoning effort dynamically at action invocation time
+    const activeModel = models.find((m) => m.id === selectedModelId);
+    const effectiveReasoningEffort = getEffectiveReasoningEffort(
+      activeModel,
+      selectedReasoningEffort
+    );
+
+    if (stopTimeoutRef.current) {
+      clearTimeout(stopTimeoutRef.current);
+      stopTimeoutRef.current = null;
+    }
+
+    setIsStreaming(true);
+    setStreamingText('');
+    accumulatedTextRef.current = '';
+    activeGenerationIdRef.current = null;
+    isStoppingRef.current = false;
+    abortControllerRef.current = new AbortController();
+
+    if (mode === 'real') {
+      try {
+        await realApiClient.streamVariant(
+          targetConvId,
+          userMessageId,
+          action,
+          async (event) => {
+            if (event.event === 'message.started') {
+              activeGenerationIdRef.current = event.data.generationId;
+            } else if (event.event === 'message.delta') {
+              const deltaGenId = event.data.generationId;
+              const isCurrentConv =
+                conversationIdRef.current === targetConvId ||
+                createdConversationIdRef.current === targetConvId;
+              if (
+                !isCurrentConv ||
+                (activeGenerationIdRef.current && deltaGenId && activeGenerationIdRef.current !== deltaGenId)
+              ) {
+                return;
+              }
+              accumulatedTextRef.current += event.data.text;
+              setStreamingText(accumulatedTextRef.current);
+            } else if (event.event === 'message.completed') {
+              const completedGenId = event.data.generationId;
+              const isCurrentConv =
+                conversationIdRef.current === targetConvId ||
+                createdConversationIdRef.current === targetConvId;
+              if (
+                !isCurrentConv ||
+                (activeGenerationIdRef.current && completedGenId && activeGenerationIdRef.current !== completedGenId)
+              ) {
+                return;
+              }
+
+              if (stopTimeoutRef.current) {
+                clearTimeout(stopTimeoutRef.current);
+                stopTimeoutRef.current = null;
+              }
+              const fullText = accumulatedTextRef.current;
+              setIsStreaming(false);
+              setStreamingText('');
+              accumulatedTextRef.current = '';
+
+              // Immediately commit regenerated assistant turn locally
+              setMessages((prev) => {
+                const updatedMsg: Message = {
+                  id: event.data.messageId,
+                  conversationId: targetConvId,
+                  role: 'assistant',
+                  content: fullText,
+                  createdAt: event.data.createdAt || new Date().toISOString(),
+                  status: 'completed',
+                };
+                const exists = prev.some((m) => m.id === targetMessage.id);
+                if (exists) {
+                  return prev.map((m) => (m.id === targetMessage.id ? updatedMsg : m));
+                }
+                return [...prev, updatedMsg];
+              });
+
+              // Reconcile messages from backend asynchronously
+              realApiClient
+                .getConversation(targetConvId)
+                .then((convRes) => {
+                  const isStillCurrent =
+                    conversationIdRef.current === targetConvId ||
+                    createdConversationIdRef.current === targetConvId;
+                  if (
+                    !isStillCurrent ||
+                    activeGenerationIdRef.current !== completedGenId
+                  ) {
+                    return;
+                  }
+                  if (
+                    convRes.messages.length > 0 &&
+                    convRes.messages.some((m) => m.role === 'assistant')
+                  ) {
+                    setMessages(convRes.messages);
+                  }
+                })
+                .catch(() => {})
+                .finally(() => {
+                  if (activeGenerationIdRef.current === completedGenId) {
+                    activeGenerationIdRef.current = null;
+                    isStoppingRef.current = false;
+                  }
+                });
+            } else if (event.event === 'message.failed') {
+              const failedGenId = event.data?.generationId || activeGenerationIdRef.current;
+              const isCurrentConv =
+                conversationIdRef.current === targetConvId ||
+                createdConversationIdRef.current === targetConvId;
+              if (
+                !isCurrentConv ||
+                (activeGenerationIdRef.current && failedGenId && activeGenerationIdRef.current !== failedGenId)
+              ) {
+                return;
+              }
+              if (stopTimeoutRef.current) {
+                clearTimeout(stopTimeoutRef.current);
+                stopTimeoutRef.current = null;
+              }
+              setIsStreaming(false);
+              const partial = accumulatedTextRef.current;
+              setStreamingText('');
+              accumulatedTextRef.current = '';
+              const errMsg = event.data?.error?.message || 'Variant generation failed';
+              setErrorBanner(errMsg);
+              if (partial) {
+                setMessages((prev) => {
+                  const failMsg: Message = {
+                    id: event.data?.messageId || `fail_${Date.now()}`,
+                    conversationId: targetConvId,
+                    role: 'assistant',
+                    content: partial,
+                    createdAt: new Date().toISOString(),
+                    status: 'failed',
+                  };
+                  const exists = prev.some((m) => m.id === targetMessage.id);
+                  if (exists) {
+                    return prev.map((m) => (m.id === targetMessage.id ? failMsg : m));
+                  }
+                  return [...prev, failMsg];
+                });
+              }
+              if (activeGenerationIdRef.current === failedGenId) {
+                activeGenerationIdRef.current = null;
+                isStoppingRef.current = false;
+              }
+            } else if (event.event === 'stream.error') {
+              const failedGenId = event.data?.generationId || activeGenerationIdRef.current;
+              const isCurrentConv =
+                conversationIdRef.current === targetConvId ||
+                createdConversationIdRef.current === targetConvId;
+              if (
+                !isCurrentConv ||
+                (activeGenerationIdRef.current && failedGenId && activeGenerationIdRef.current !== failedGenId)
+              ) {
+                return;
+              }
+              if (stopTimeoutRef.current) {
+                clearTimeout(stopTimeoutRef.current);
+                stopTimeoutRef.current = null;
+              }
+              setIsStreaming(false);
+              const partial = accumulatedTextRef.current;
+              setStreamingText('');
+              accumulatedTextRef.current = '';
+              const genId = activeGenerationIdRef.current;
+              const errMsg = event.data?.error?.message || 'Variant generation failed';
+
+              if (genId && targetConvId) {
+                await reconcileAuthoritativeGeneration(
+                  targetConvId,
+                  genId,
+                  errMsg,
+                  partial
+                );
+              } else {
+                setErrorBanner(errMsg);
+              }
+            } else if (event.event === 'message.stopped') {
+              const stoppedGenId = event.data?.generationId || activeGenerationIdRef.current;
+              const isCurrentConv =
+                conversationIdRef.current === targetConvId ||
+                createdConversationIdRef.current === targetConvId;
+              if (
+                !isCurrentConv ||
+                (activeGenerationIdRef.current && stoppedGenId && activeGenerationIdRef.current !== stoppedGenId)
+              ) {
+                return;
+              }
+              if (stopTimeoutRef.current) {
+                clearTimeout(stopTimeoutRef.current);
+                stopTimeoutRef.current = null;
+              }
+              const partial = accumulatedTextRef.current;
+              setIsStreaming(false);
+              setStreamingText('');
+              accumulatedTextRef.current = '';
+              const genId = activeGenerationIdRef.current;
+              if (genId && targetConvId) {
+                await reconcileAuthoritativeGeneration(targetConvId, genId, undefined, partial);
+              }
+            }
+          },
+          {
+            signal: abortControllerRef.current.signal,
+            modelId: selectedModelId || undefined,
+            reasoningEffort: effectiveReasoningEffort,
+          }
+        );
+      } catch (err: unknown) {
+        if (stopTimeoutRef.current) {
+          clearTimeout(stopTimeoutRef.current);
+          stopTimeoutRef.current = null;
+        }
+        const partial = accumulatedTextRef.current;
+        setIsStreaming(false);
+        setStreamingText('');
+        accumulatedTextRef.current = '';
+
+        const isAbort =
+          (err instanceof Error &&
+            (err.name === 'AbortError' || err.message.toLowerCase().includes('abort'))) ||
+          abortControllerRef.current?.signal.aborted;
+
+        const genId = activeGenerationIdRef.current;
+        const errMsg =
+          err instanceof ApiException
+            ? err.message
+            : err instanceof Error
+              ? err.message
+              : 'Variant stream error';
+
+        if (genId && targetConvId) {
+          await reconcileAuthoritativeGeneration(
+            targetConvId,
+            genId,
+            isAbort ? undefined : errMsg,
+            partial
+          );
+        } else {
+          if (!isAbort && !isStoppingRef.current) {
+            setErrorBanner(errMsg);
+          }
+        }
+      }
+    } else {
+      // Mock mode
+      try {
+        await mockDataAdapter.streamVariant(
+          targetConvId,
+          userMessageId,
+          action,
+          async (event) => {
+            if (event.event === 'message.started') {
+              activeGenerationIdRef.current = event.data.generationId;
+            } else if (event.event === 'message.delta') {
+              accumulatedTextRef.current += event.data.text;
+              setStreamingText(accumulatedTextRef.current);
+            } else if (event.event === 'message.completed') {
+              const fullText = accumulatedTextRef.current;
+              setIsStreaming(false);
+              setStreamingText('');
+              accumulatedTextRef.current = '';
+              const variantMsg: Message = {
+                id: event.data.messageId,
+                conversationId: targetConvId,
+                role: 'assistant',
+                content: fullText,
+                createdAt: event.data.createdAt || new Date().toISOString(),
+                status: 'completed',
+              };
+              setMessages((prev) => {
+                const exists = prev.some((m) => m.id === targetMessage.id);
+                if (exists) {
+                  return prev.map((m) => (m.id === targetMessage.id ? variantMsg : m));
+                }
+                return [...prev, variantMsg];
+              });
+              activeGenerationIdRef.current = null;
+            } else if (event.event === 'message.stopped') {
+              setIsStreaming(false);
+              setStreamingText('');
+              accumulatedTextRef.current = '';
+              activeGenerationIdRef.current = null;
+            }
+          },
+          {
+            signal: abortControllerRef.current.signal,
+            modelId: selectedModelId || undefined,
+            reasoningEffort: effectiveReasoningEffort,
+          }
+        );
+      } catch (err) {
+        setIsStreaming(false);
+        setStreamingText('');
+        accumulatedTextRef.current = '';
+        setErrorBanner(err instanceof Error ? err.message : 'Variant stream error');
+      }
+    }
+  };
+
   const handleStopStreaming = async () => {
     if (mode === 'real') {
       const targetId = conversationId;
@@ -1054,9 +1395,18 @@ export const ChatView: React.FC = () => {
             </div>
           )}
 
-          {messages.map((msg) => (
-            <MessageBubble key={msg.id} message={msg} />
-          ))}
+          {messages.map((msg) => {
+            const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant');
+            const isLatestAssistant = msg.role === 'assistant' && msg.id === lastAssistant?.id;
+            return (
+              <MessageBubble
+                key={msg.id}
+                message={msg}
+                onRegenerate={isLatestAssistant ? handleRegenerateMessage : undefined}
+                canRegenerate={!isStreaming && isLatestAssistant}
+              />
+            );
+          })}
 
           {/* Active streaming bubble */}
           {isStreaming && streamingText && (
