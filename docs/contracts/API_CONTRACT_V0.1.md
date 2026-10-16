@@ -26,6 +26,12 @@ type AgentRun = { id: ID; workspaceId: ID; status: AgentRunStatus; task: string;
 // ChangeProposal is an OPTIONAL GitHub integration artifact, not a required Agent outcome.
 type ChangeProposal = { id: ID; runId: ID; baseCommitSha: string; files: Array<{ path: string; status: 'added' | 'modified' | 'deleted'; unifiedDiff: string }>; createdAt: ISODateTime };
 type ApiError = { code: string; message: string; details?: Record<string, unknown>; requestId?: string };
+type ReasoningEffort = 'low' | 'medium' | 'high';
+type ModelMetadata = {
+  id: string;
+  capabilities: ('text' | 'streaming' | 'structured' | 'embeddings' | 'tool_calling')[];
+  reasoning: { supported: boolean; efforts: ReasoningEffort[] };
+};
 ```
 
 **JSON response convention:** one object for single-resource operations; collection responses contain `{ items: T[], nextCursor: string | null }`; failures contain `{ error: ApiError }`. HTTP status conveys success/failure.

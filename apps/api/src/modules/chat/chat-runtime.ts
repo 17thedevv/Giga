@@ -60,12 +60,12 @@ export class ChatRuntime {
 
   listModels(): readonly ModelMetadata[] {
     if (this.engine?.listModels) {
-      return this.engine.listModels();
+      return this.engine.listModels().filter((model) => model.capabilities.includes('streaming'));
     }
     return this.engine ? [{
       id: CHAT_MODEL_ALIAS,
       capabilities: ['text', 'streaming'],
-      reasoning: { supported: true, efforts: ['low', 'medium', 'high'] },
+      reasoning: { supported: false, efforts: [] },
     }] : [];
   }
 
@@ -83,7 +83,7 @@ export class ChatRuntime {
       throw new ValidationError('Content must be nonempty and at most 16384 UTF-8 bytes');
     }
     const modelId = input.modelId === undefined ? CHAT_MODEL_ALIAS : input.modelId;
-    if (modelId !== CHAT_MODEL_ALIAS) throw new ValidationError('Unsupported model alias');
+    if (typeof modelId !== 'string' || (this.engine ? !this.getModel(modelId) : modelId !== CHAT_MODEL_ALIAS)) throw new ValidationError('Unsupported model alias');
     let reasoningEffort: ReasoningEffort | undefined;
     if (input.reasoningEffort !== undefined) {
       if (typeof input.reasoningEffort !== 'string' || !VALID_REASONING_EFFORTS.includes(input.reasoningEffort as ReasoningEffort)) {
@@ -101,7 +101,8 @@ export class ChatRuntime {
         throw new ValidationError(`Model '${modelId}' does not support reasoningEffort '${reasoningEffort}'`);
       }
     }
-    const fingerprint = createHash('sha256').update(JSON.stringify([conversationId, input.content, modelId, reasoningEffort ?? null])).digest('hex');
+    const fingerprint = createHash('sha256').update(JSON.stringify([conversationId, input.content, modelId,
+      ...(reasoningEffort === undefined ? [] : [reasoningEffort])])).digest('hex');
     return this.repository.admit({ ownerId, conversationId, content: input.content, modelId, reasoningEffort, key: validatedKey, fingerprint });
   }
 
@@ -120,7 +121,7 @@ export class ChatRuntime {
     conversationId = conversationId.toLowerCase();
     if (input.action !== 'retry' && input.action !== 'regenerate') throw new ValidationError('Unsupported generation action');
     const modelId = input.modelId === undefined ? CHAT_MODEL_ALIAS : input.modelId;
-    if (modelId !== CHAT_MODEL_ALIAS) throw new ValidationError('Unsupported model alias');
+    if (typeof modelId !== 'string' || (this.engine ? !this.getModel(modelId) : modelId !== CHAT_MODEL_ALIAS)) throw new ValidationError('Unsupported model alias');
     let reasoningEffort: ReasoningEffort | undefined;
     if (input.reasoningEffort !== undefined) {
       if (typeof input.reasoningEffort !== 'string' || !VALID_REASONING_EFFORTS.includes(input.reasoningEffort as ReasoningEffort)) {
@@ -138,7 +139,8 @@ export class ChatRuntime {
         throw new ValidationError(`Model '${modelId}' does not support reasoningEffort '${reasoningEffort}'`);
       }
     }
-    const fingerprint = createHash('sha256').update(JSON.stringify([conversationId, input.action, userMessageId, modelId, reasoningEffort ?? null])).digest('hex');
+    const fingerprint = createHash('sha256').update(JSON.stringify([conversationId, input.action, userMessageId, modelId,
+      ...(reasoningEffort === undefined ? [] : [reasoningEffort])])).digest('hex');
     return this.repository.admit({ ownerId, conversationId, userMessageId, action: input.action, modelId, reasoningEffort, key: validatedKey, fingerprint });
   }
 

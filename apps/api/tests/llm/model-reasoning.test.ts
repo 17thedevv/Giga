@@ -332,19 +332,12 @@ describe('Provider-agnostic Model Reasoning Capability', () => {
       };
       const provider = new GeminiProvider(transport);
 
-      // Platform path
-      for await (const _ of provider.streamText(makeResolvedRequest('medium'), platformCredential)) { /* drain */ }
-      // BYOK path
-      for await (const _ of provider.streamText(makeResolvedRequest('medium'), byokCredential)) { /* drain */ }
-
-      assert.equal(requestBodies.length, 2);
-      const body0 = requestBodies[0]!;
-      const body1 = requestBodies[1]!;
-      assert.deepEqual(body0.generationConfig, body1.generationConfig);
-      assert.deepEqual(
-        (body0.generationConfig as { thinkingConfig: unknown }).thinkingConfig,
-        { thinkingLevel: 'MEDIUM', includeThoughts: false }
-      );
+      for (const effort of [undefined, 'low', 'medium', 'high'] as const) {
+        for await (const _ of provider.streamText(makeResolvedRequest(effort), platformCredential)) { /* drain */ }
+        for await (const _ of provider.streamText(makeResolvedRequest(effort), byokCredential)) { /* drain */ }
+        assert.deepEqual(requestBodies.at(-2), requestBodies.at(-1));
+      }
+      assert.equal(requestBodies.length, 8);
     });
   });
 
@@ -367,11 +360,14 @@ describe('Provider-agnostic Model Reasoning Capability', () => {
       const runtime = new ChatRuntime(repo, undefined);
 
       // Unknown fields must be rejected with 400
-      for (const badField of ['thinkingLevel', 'thinkingBudget', 'reasoning.effort', 'output_config.effort', 'rawBudget']) {
+      for (const badField of ['thinkingLevel', 'thinkingBudget', 'reasoning.effort', 'output_config.effort', 'rawBudget',
+        'reasoning', 'output_config', 'providerUrl', 'providerId', 'maxOutputTokens']) {
         await assert.rejects(
           runtime.admit(owner, conversation, { content: 'test', [badField]: 'something' }, randomUUID()),
           /Unknown request field/
         );
+        await assert.rejects(runtime.admitVariant(owner, conversation,
+          { userMessageId: randomUUID(), action: 'retry', [badField]: { effort: 'high' } }, randomUUID()), /Unknown request field/);
       }
 
       // Invalid reasoningEffort values
@@ -389,6 +385,8 @@ describe('Provider-agnostic Model Reasoning Capability', () => {
       try {
         if (!server.listening) await new Promise<void>((resolve) => server.once('listening', resolve));
         const port = (server.address() as AddressInfo).port;
+        const unauthenticated = await fetch(`http://127.0.0.1:${port}/api/v1/models`);
+        assert.equal(unauthenticated.status, 401);
         const res = await fetch(`http://127.0.0.1:${port}/api/v1/models`, {
           headers: { Cookie: cookie, Origin: origin },
         });

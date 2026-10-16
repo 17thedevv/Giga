@@ -51,6 +51,7 @@ it('010 upgrades populated 009 preserving existing generations and leaves histor
         VALUES ($1,$2,$3,$4,'giga-chat-default','pending',$5,$6,$7)`, [genId, owner, conv, user, randomUUID(), 'a'.repeat(64), valid]);
       const res = await pool.query('SELECT reasoning_effort FROM chat_generations WHERE id = $1', [genId]);
       assert.equal(res.rows[0].reasoning_effort, valid);
+      await pool.query("UPDATE chat_generations SET status = 'failed', finished_at = NOW(), error_code = 'TEST' WHERE id = $1", [genId]);
     }
 
     // Check invalid value rejected by CHECK constraint
@@ -64,7 +65,10 @@ it('010 upgrades populated 009 preserving existing generations and leaves histor
 
 it('prevent_chat_reasoning_effort_rewrite trigger rejects updating reasoning_effort on Real PostgreSQL', async (t) => {
   const initial = await createTestDatabase(MIGRATIONS);
-  if (initial.isMemory) return t.skip('PostgreSQL trigger enforcement is not emulated in pg-mem');
+  if (initial.isMemory) {
+    await initial.pool.end();
+    return t.skip('PostgreSQL trigger enforcement is not emulated in pg-mem');
+  }
   let pool = initial.pool;
   const schema = `reasoning_trigger_${randomUUID().replaceAll('-', '')}`;
   await initial.pool.query(`CREATE SCHEMA ${schema}`);

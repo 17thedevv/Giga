@@ -34,6 +34,27 @@ const VALID_EFFORTS: ReadonlySet<ReasoningEffort> = new Set(VALID_REASONING_EFFO
 
 const VALID_ALIAS_REGEX = /^[a-zA-Z0-9_-]+$/;
 
+function copyReasoning(reasoning: ModelReasoningConfig, alias: string): ModelReasoningConfig {
+  if (!reasoning || typeof reasoning !== 'object') {
+    throw new LLMValidationError(`Alias '${alias}' reasoning must be an object`);
+  }
+  if (typeof reasoning.supported !== 'boolean') {
+    throw new LLMValidationError(`Alias '${alias}' reasoning.supported must be a boolean`);
+  }
+  if (!Array.isArray(reasoning.efforts)) {
+    throw new LLMValidationError(`Alias '${alias}' reasoning.efforts must be an array`);
+  }
+  for (const effort of reasoning.efforts) {
+    if (!VALID_EFFORTS.has(effort)) {
+      throw new LLMValidationError(`Alias '${alias}' contains invalid reasoning effort: '${effort}'`);
+    }
+  }
+  if (reasoning.supported !== (reasoning.efforts.length > 0) || new Set(reasoning.efforts).size !== reasoning.efforts.length) {
+    throw new LLMValidationError(`Alias '${alias}' has inconsistent reasoning capabilities`);
+  }
+  return { supported: reasoning.supported, efforts: [...reasoning.efforts] };
+}
+
 export class ModelRegistry {
   private readonly adapters = new Map<string, ProviderAdapter>();
   private readonly aliases = new Map<string, ModelAliasConfig>();
@@ -110,24 +131,11 @@ export class ModelRegistry {
         );
       }
     }
-    if (config.reasoning !== undefined) {
-      if (typeof config.reasoning !== 'object' || config.reasoning === null) {
-        throw new LLMValidationError(`Alias '${config.alias}' reasoning must be an object`);
-      }
-      if (typeof config.reasoning.supported !== 'boolean') {
-        throw new LLMValidationError(`Alias '${config.alias}' reasoning.supported must be a boolean`);
-      }
-      if (!Array.isArray(config.reasoning.efforts)) {
-        throw new LLMValidationError(`Alias '${config.alias}' reasoning.efforts must be an array`);
-      }
-      for (const effort of config.reasoning.efforts) {
-        if (!VALID_EFFORTS.has(effort)) {
-          throw new LLMValidationError(`Alias '${config.alias}' contains invalid reasoning effort: '${effort}'`);
-        }
-      }
-    }
-
-    this.aliases.set(config.alias, { ...config });
+    this.aliases.set(config.alias, {
+      ...config,
+      requiredCapabilities: [...config.requiredCapabilities],
+      ...(config.reasoning === undefined ? {} : { reasoning: copyReasoning(config.reasoning, config.alias) }),
+    });
   }
 
   /**
@@ -142,7 +150,11 @@ export class ModelRegistry {
    */
   public getAliasConfig(alias: string): ModelAliasConfig | undefined {
     const config = this.aliases.get(alias);
-    return config ? { ...config } : undefined;
+    return config ? {
+      ...config,
+      requiredCapabilities: [...config.requiredCapabilities],
+      ...(config.reasoning === undefined ? {} : { reasoning: copyReasoning(config.reasoning, alias) }),
+    } : undefined;
   }
 
   /**
@@ -164,17 +176,18 @@ export class ModelRegistry {
     if (!config) {
       throw new UnknownModelAliasError(alias);
     }
-    if (config.reasoning) {
-      return { supported: config.reasoning.supported, efforts: [...config.reasoning.efforts] };
-    }
     const adapter = this.adapters.get(config.providerId);
-    if (adapter?.getReasoningCapabilities) {
-      const adapterCapabilities = adapter.getReasoningCapabilities(config.modelId);
-      if (adapterCapabilities) {
-        return { supported: adapterCapabilities.supported, efforts: [...adapterCapabilities.efforts] };
+    const declared = adapter?.getReasoningCapabilities?.(config.modelId);
+    const available = declared === undefined ? { supported: false, efforts: [] } : copyReasoning(declared, alias);
+    if (config.reasoning) {
+      for (const effort of config.reasoning.efforts) {
+        if (!available.supported || !available.efforts.includes(effort)) {
+          throw new LLMValidationError(`Alias '${alias}' requires reasoning effort '${effort}', but its adapter model does not support it`);
+        }
       }
+      return copyReasoning(config.reasoning, alias);
     }
-    return { supported: false, efforts: [] };
+    return available;
   }
 
   /**
@@ -226,7 +239,7 @@ export class ModelRegistry {
       throw new UnsupportedCapabilityError(requiredCapability, adapter.providerId);
     }
 
-    return { adapter, config };
+    return { adapter, config: this.getAliasConfig(alias)! };
   }
 
   /**
@@ -246,21 +259,7 @@ export class ModelRegistry {
           throw new UnsupportedCapabilityError(cap, `${alias} -> ${adapter.providerId}`);
         }
       }
-      if (config.reasoning?.supported) {
-        if (adapter.getReasoningCapabilities) {
-          const adapterReasoning = adapter.getReasoningCapabilities(config.modelId);
-          if (!adapterReasoning?.supported) {
-            throw new UnsupportedCapabilityError('reasoning' as Capability, `${alias} -> ${adapter.providerId} (${config.modelId})`);
-          }
-          for (const effort of config.reasoning.efforts) {
-            if (!adapterReasoning.efforts.includes(effort)) {
-              throw new LLMValidationError(
-                `Alias '${alias}' requires reasoning effort '${effort}', but adapter '${adapter.providerId}' model '${config.modelId}' does not support it`
-              );
-            }
-          }
-        }
-      }
+      this.getReasoningCapabilities(alias);
     }
   }
 }

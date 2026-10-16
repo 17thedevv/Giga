@@ -149,6 +149,33 @@ describe('Chat-only BYOK REST, persistence, routing and races', { timeout: 15000
     assert.equal(calls, 1); assert.equal(resolutions, 1);
   });
 
+  it('platform and encrypted BYOK routing persist identical normalized reasoning policy at every level', async () => {
+    const key = secret(); const saved = await service.save(owner, 'gemini', key);
+    const bodies: unknown[] = [];
+    let expectedKey = platform;
+    const run = runtime(async (_url, init) => {
+      matchesKey(init, expectedKey);
+      bodies.push(JSON.parse(String(init.body)));
+      return providerResponse();
+    });
+    for (const reasoningEffort of [undefined, 'low', 'medium', 'high'] as const) {
+      for (const mode of ['platform', 'byok'] as const) {
+        expectedKey = mode === 'platform' ? platform : key;
+        await service.setPreference(owner, mode, mode === 'byok' ? saved.id : undefined);
+        const conv = await conversation();
+        const admitted = await run.admit(owner, conv, { content: 'Same reasoning request',
+          ...(reasoningEffort === undefined ? {} : { reasoningEffort }) }, randomUUID());
+        const events: ChatEvent[] = [];
+        await run.run(owner, admitted.generation, async (event) => { events.push(event); }, new AbortController().signal);
+        assert.equal(events.at(-1)?.event, 'message.completed');
+        const persisted = await run.get(owner, conv, admitted.generation.id);
+        assert.equal(persisted.reasoningEffort, reasoningEffort);
+      }
+      assert.deepEqual(bodies.at(-2), bodies.at(-1));
+    }
+    assert.equal(bodies.length, 8);
+  });
+
   it('platform provider failure keeps existing generic generation error semantics', async () => {
     const events = await generate(runtime(async (_url, init) => { matchesKey(init, platform); return new Response('private', { status: 503 }); }));
     assert.equal((events.at(-1)!.data.error as { code: string }).code, 'GENERATION_FAILED');

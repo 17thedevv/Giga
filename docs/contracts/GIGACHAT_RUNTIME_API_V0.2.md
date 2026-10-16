@@ -22,8 +22,7 @@ Read [ADR-007](../decisions/ADR-007-model-reasoning-capability.md).
    {
      models: Array<{
        id: string;
-       displayName: string;
-       provider: string;
+       capabilities: ('text' | 'streaming' | 'structured' | 'embeddings' | 'tool_calling')[];
        reasoning: {
          supported: boolean;
          efforts: ('low' | 'medium' | 'high')[];
@@ -31,6 +30,8 @@ Read [ADR-007](../decisions/ADR-007-model-reasoning-capability.md).
      }>;
    }
    ```
+   Returns only registered aliases eligible for Chat streaming. Disabled Chat returns an
+   empty list. The response contains no native model IDs, provider configuration or URLs.
 2. **Streaming Prompt:** `POST /api/v1/conversations/:id/messages:stream`
    Accepts `{ content: string, modelId?: string, reasoningEffort?: 'low' | 'medium' | 'high' }`.
 3. **Streaming Variant:** `POST /api/v1/conversations/:id/generations:stream`
@@ -39,6 +40,17 @@ Read [ADR-007](../decisions/ADR-007-model-reasoning-capability.md).
    Response includes `reasoningEffort?: 'low' | 'medium' | 'high'`.
 5. **Turn Variants:** `GET /api/v1/conversations/:id/messages/:userMessageId/generations`
    Response `items` array entries include `reasoningEffort?: 'low' | 'medium' | 'high'`.
+
+The selected alias and its advertised capabilities are authoritative for both admission
+routes. Unsupported effort returns 400 `VALIDATION_ERROR` before generation persistence or
+provider invocation. Omission selects that generation's model default independently; Retry
+and Regenerate do not inherit a previous attempt's override. Explicit normalized effort is
+both the requested and effective Giga policy: adapters must map it exactly or reject it.
+Default/legacy generations retain NULL internally and omit the public snapshot field; the
+system does not infer normalized effort from native provider defaults.
+
+Omitted effort preserves the pre-upgrade idempotency fingerprint. Specifying or changing
+effort changes request identity, so the same key cannot select a different effort.
 
 ## Streamed Retry / Regenerate candidate — 17T-35
 

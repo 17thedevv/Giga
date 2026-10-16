@@ -45,8 +45,7 @@ interface ModelReasoningConfig {
 
 interface ModelMetadata {
   readonly id: string;
-  readonly displayName: string;
-  readonly provider: string;
+  readonly capabilities: readonly Capability[];
   readonly reasoning: ModelReasoningConfig;
 }
 ```
@@ -58,6 +57,11 @@ interface ModelMetadata {
 - The system never silently downgrades or invents an unreviewed mapping.
 - The Core LLM Engine fail-fast preflights alias claims against underlying adapter
   capabilities at startup.
+- Alias declarations cannot claim unsupported adapter levels, including adapters without a
+  reasoning capability hook. Contradictory, duplicate or native-only effort declarations
+  fail validation. Registry copies isolate trusted policy from metadata/caller mutation.
+- Chat discovers streaming aliases from the registry and admits those aliases without
+  provider branches. Stream-only legacy test doubles default to no controllable reasoning.
 
 ### 3. Core Engine Provider Agnosticism & Adapter-Owned Mapping
 
@@ -67,9 +71,15 @@ interface ModelMetadata {
 - Adapter implementations own the translation hook:
   * Gemini adapter: maps `low -> LOW`, `medium -> MEDIUM`, `high -> HIGH`, and absent -> `MINIMAL`.
     Always sets `includeThoughts: false`.
-  * Future OpenAI adapter: will map normalized effort to native `reasoning_effort` (`low`, `medium`, `high`).
-  * Future Anthropic adapter: will map normalized effort to native thinking budget / effort policy.
+  * Future adapters: implement and test a reviewed native effort/thinking policy per model.
+    Native request shape and extra native modes remain adapter concerns.
 - Models with no controllable reasoning advertise `{ supported: false, efforts: [] }`.
+
+The initial model's reviewed native levels and minimal default are documented in Google's
+[Gemini 3 developer guide](https://ai.google.dev/gemini-api/docs/gemini-3) and
+[thinking configuration reference](https://ai.google.dev/gemini-api/docs/generate-content/thinking).
+This is model-specific evidence, not a provider-wide capability guarantee. Live transport
+verification remains separate from the deterministic adapter fixtures.
 
 ### 4. Persistence & Generation Semantics
 
@@ -78,6 +88,9 @@ interface ModelMetadata {
   immutability trigger preventing row update tampering.
 - Historical generations (migrations 001–009) remain `null`, cleanly preserving legacy records.
 - Each generation snapshots normalized requested/effective `reasoning_effort`.
+- Explicit requested effort is the effective normalized policy because adapters cannot
+  downgrade it. Omission leaves the snapshot null/unspecified; native defaults are not
+  reverse-mapped into invented normalized values. One nullable column serves all adapters.
 - New message (`POST /messages:stream`), Retry, and Regenerate (`POST /generations:stream`) each
   independently validate and snapshot reasoning effort against the model selected for that generation.
 - Durable Stop (`POST /generations/:id/cancel`) remains race-safe and aborts provider streams
@@ -87,13 +100,15 @@ interface ModelMetadata {
 ## Compatibility & Migration
 
 - Existing clients that omit `reasoningEffort` continue to function identically with zero changes.
+- Omission preserves pre-upgrade prompt/variant idempotency fingerprints; an explicit
+  effort becomes part of the request identity and cannot change under the same key.
 - The `GET /api/v1/models` route is purely additive and requires authenticated session access.
 - `ChatGeneration` and `ChatTurnVariants.items` DTOs include optional `reasoningEffort`.
 - Database migration 010 is non-blocking, nullable, and fully backward-compatible.
 
 ## Review Questions for Thư
 
-1. Does the shape `{ models: [{ id, displayName, provider, reasoning: { supported, efforts } }] }`
+1. Does the shape `{ models: [{ id, capabilities, reasoning: { supported, efforts } }] }`
    satisfy the frontend model selector and reasoning control requirements?
 2. Does omitting `reasoningEffort` when the user has not chosen an override align with the UI expectation
    of "model default"?

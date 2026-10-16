@@ -894,6 +894,8 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
     await testDb.pool.query('DELETE FROM schema_migrations WHERE version = 6;');
     await testDb.pool.query('DELETE FROM schema_migrations WHERE version = 7;');
     await testDb.pool.query('DELETE FROM schema_migrations WHERE version = 8;');
+    // Recreating chat_generations also removes migration 010's column and trigger.
+    await testDb.pool.query('DELETE FROM schema_migrations WHERE version = 10;');
     await testDb.pool.query('DROP TABLE IF EXISTS messages CASCADE;');
     await testDb.pool.query('DROP TABLE IF EXISTS conversations CASCADE;');
     if (testDb.isMemory) {
@@ -969,6 +971,7 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
       }
       await testDb.pool.query('DELETE FROM schema_migrations WHERE version = 2;');
       await runMigrations(testDb.pool);
+      await testDb.pool.query('SELECT reasoning_effort FROM chat_generations LIMIT 0');
     }
   });
 });
