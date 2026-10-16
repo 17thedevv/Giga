@@ -1,9 +1,15 @@
 # GigaAgent — Agentic Workspace Architecture v0.2
 
-> **Status: PROPOSED TECHNICAL DESIGN / PRODUCT DIRECTION CONFIRMED (2026-10-13). NOT IMPLEMENTED.**
+> **Status: PROPOSED TECHNICAL DESIGN / PRODUCT DIRECTION CONFIRMED (2026-10-13). FULL RUNTIME NOT IMPLEMENTED; control-plane candidate below.**
 > Owner: Trà; UX and API reviewer: Thư. Tracking: [17T-24](https://linear.app/17thedev/issue/17T-24/redesign-gigaagent-as-agentic-workspace-with-sandbox-runtime). See [ADR-003](../decisions/ADR-003-agentic-workspace-and-isolated-runtime.md), [Sandbox and Permissions](GIGA_AGENT_RUNTIME_SECURITY_V0.2.md), [Data Model](GIGA_AGENT_DATA_MODEL_V0.2.md), [Draft API](../contracts/GIGA_AGENT_API_V0.2.md), [UX](../design/frontend/GIGA_AGENT_UX_V0.2.md), [Delivery Plan](../planning/GIGA_AGENT_DELIVERY_V0.2.md).
 
 ## 1. Product definition and agreed scope
+
+**17T-44 implementation boundary:** [ADR-008](../decisions/ADR-008-agent-control-plane-foundation.md)
+and the [API subset](../contracts/GIGA_AGENT_API_V0.2.md#implementation-candidate--17t-44)
+provide durable Workspace metadata, unavailable Run admission/history and replayable events.
+The orchestrator, execution plane, sandbox tools and artifacts described below remain proposals.
+No actual Agent task execution is claimed by the control-plane foundation.
 
 **GigaAgent is a general-purpose tool-using agentic development/workspace environment**, with coding as a flagship capability, not a GitHub bot. It accepts a user goal, explores allowed context, plans tasks, selects registered tools, executes work in an isolated runtime, observes/verifies results, repairs failures within limits, and returns durable artifacts and truthful status.
 

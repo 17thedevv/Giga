@@ -25,6 +25,9 @@ import { ChatCredentialsService } from '../modules/credentials/service.js';
 import { createCredentialRoutes } from '../modules/credentials/routes.js';
 import { ProviderCredential } from '../modules/llm/provider-credential.js';
 import type { ProviderTransport } from '../modules/llm/providers/gemini/gemini-provider.js';
+import { AgentRepository } from '../modules/agent/repository.js';
+import { AgentService } from '../modules/agent/service.js';
+import { createAgentRoutes } from '../modules/agent/routes.js';
 
 export interface HealthResponse {
   readonly status: 'ok';
@@ -99,6 +102,10 @@ export function createApp(dependencies: AppDependencies = {}): Hono {
       cookieConfig,
     });
     app.route('/api/v1/auth', authRouter);
+  }
+
+  if (dependencies.pool && authService) {
+    app.route('/api/v1/agent', createAgentRoutes(new AgentService(new AgentRepository(dependencies.pool)), authService));
   }
 
   // Mount Conversations module if conversationsService or pool is available alongside authService

@@ -1,6 +1,85 @@
 # GigaAgent — Workspace-first REST/SSE API Proposal v0.2
 
-> **STATUS: DRAFT / NOT IMPLEMENTED / NOT FROZEN.** Trà (Backend) + Thư (Frontend) must review exact route, DTO, statuses, SSE payloads and security. This candidate updates the historical GitHub-first agent assumptions in [canonical API v0.1](API_CONTRACT_V0.1.md) while retaining shared Auth/Chat semantics. [ADR-001](../decisions/ADR-001-api-compatibility.md) controls actual freeze/compatibility; [17T-24](https://linear.app/17thedev/issue/17T-24/redesign-gigaagent-as-agentic-workspace-with-sandbox-runtime).
+> **STATUS: DRAFT / NOT FROZEN.** Only the 17T-44 implementation candidate below is implemented by its PR; the broader proposal remains future work. Trà (Backend) + Thư (Frontend) must review exact route, DTO, statuses, SSE payloads and security. This candidate updates the historical GitHub-first agent assumptions in [canonical API v0.1](API_CONTRACT_V0.1.md) while retaining shared Auth/Chat semantics. [ADR-001](../decisions/ADR-001-api-compatibility.md) controls actual freeze/compatibility; [17T-24](https://linear.app/17thedev/issue/17T-24/redesign-gigaagent-as-agentic-workspace-with-sandbox-runtime).
+
+## Implementation candidate — 17T-44
+
+Tracking: [17T-44](https://linear.app/17thedev/issue/17T-44).
+[ADR-008](../decisions/ADR-008-agent-control-plane-foundation.md),
+[verification evidence](../evidence/17T-44-agent-control-plane.md). Independent review pending.
+
+| Previous implementation | Candidate behavior | Compatibility / consumers |
+|---|---|---|
+| No Agent backend routes or durable Agent data | Blank Workspace create/list/get; Run create/list/get/events | Additive server routes; old Agent frontend fixtures remain mocks |
+| Proposed queued execution without a runner | Persist admission and immediate `failed` / `RUNTIME_UNAVAILABLE` atomically | Truthful control-plane behavior; no promise of queued execution |
+| Proposed replay semantics | Persist per-run sequences; SSE is read-only replay/tail | Client must retain last processed ID per run, deduplicate and ignore unknown future event types |
+| Auth and GigaChat routes | Unchanged | Existing clients unaffected; API remains DRAFT |
+
+Implemented endpoints only:
+
+| Method | Path | Concrete DTO / response |
+|---|---|---|
+| POST | `/api/v1/agent/workspaces` | `{ name?: string, source: { kind: 'blank' } }` → 201 `{ workspace }` |
+| GET | `/api/v1/agent/workspaces` | `limit?`, `cursor?` → 200 `{ items, nextCursor }` |
+| GET | `/api/v1/agent/workspaces/:id` | 200 `{ workspace }` |
+| POST | `/api/v1/agent/runs` | `{ workspaceId, task, mode?, runtime?, modelId? }`, required `Idempotency-Key` → 201 `{ run }`; exact replay → 200 `{ run }` |
+| GET | `/api/v1/agent/runs` | `workspaceId?`, `limit?`, `cursor?` → 200 `{ items, nextCursor }` |
+| GET | `/api/v1/agent/runs/:id` | 200 `{ run }` |
+| GET | `/api/v1/agent/runs/:id/events` | `Last-Event-ID?` → 200 `text/event-stream` |
+
+- Workspace DTO is `{ id, name, sourceKind: 'blank', revision: 1, createdAt, updatedAt }`.
+  Blank means durable metadata only; no directory, snapshot or files are created.
+- Names default to `New Workspace`; supplied names are trimmed, nonempty, max 255 UTF-8 bytes.
+- `workspaceId` is an owned UUID. Task is trimmed, nonempty, max 16,384 UTF-8 bytes.
+  Mode accepts `ask | plan | execute`, default `ask`; runtime is `cloud`, default `cloud`.
+  The sole accepted/default Agent alias is `giga-agent-default`. It is an admission alias,
+  with no provider/model execution configured. It does not reuse Chat credentials or Memory.
+- Body bound is 100,000 bytes. Unknown fields, unsupported sources/models/runtime, null or
+  malformed values, missing/invalid idempotency keys and invalid cursors return 400
+  `VALIDATION_ERROR`. Keys follow the existing 1–128 ASCII letter/digit/`._:-` policy.
+- Run DTO includes `{ id, workspaceId, task, mode, runtime, modelId, status, createdAt,
+  updatedAt, finishedAt?, error? }`. Current admission always returns `status: 'failed'`,
+  `finishedAt`, and `error: { code: 'RUNTIME_UNAVAILABLE', message: 'Agent execution runtime is not available' }`.
+  It never returns a result, artifacts or fabricated verification. Seven public statuses
+  remain unchanged; unavailable is an error code, not an eighth status.
+- Owner-qualified queries and composite FKs scope workspaces, runs and events. Cross-owner
+  and missing resource IDs return the same generic 404. All routes require a session;
+  POSTs use existing Origin/CSRF middleware. No provider configuration is public.
+- Idempotency namespace is Agent run creation per authenticated owner. SHA-256 covers the
+  normalized workspace/task/mode/runtime/model tuple. Defaults, whitespace trimming and UUID
+  case normalize before hashing. Changed identity under the same key returns 409. Admission,
+  queued event and terminal failure commit together. Replays create neither runs nor events.
+- Lists use `{ items, nextCursor: string | null }`, default limit 20, max 100, ordered by
+  immutable `createdAt DESC, id DESC`. Opaque cursors preserve PostgreSQL microseconds and
+  bind collection kind/workspace filter. Unknown/repeated list parameters are rejected.
+
+SSE candidate details:
+
+1. A new admitted run stores `id: 1`, `event: run.status`, data
+   `{ runId, status: 'queued', phase: 'waiting_runtime' }` and then `id: 2`,
+   `event: run.failed`, data `{ runId, code: 'RUNTIME_UNAVAILABLE', message }` in the
+   same transaction as the final run row. The queued event is historical admission state.
+2. Replay is strictly greater than `Last-Event-ID` (missing/empty = 0). IDs are canonical
+   decimal integers 0–2,147,483,647; malformed or future IDs return 400 before headers,
+   after owner authorization. Query `after` is not implemented.
+3. Replay fetches at most 100 events per database read and drains pages in ascending order
+   through the captured committed high-water mark. Terminal streams close after replay;
+   reconnecting at the terminal ID returns an empty 200 stream.
+4. Nonterminal observations poll durable rows every 500 ms. `heartbeat` has `data: {}`
+   with no ID every 15 seconds while idle and is never persisted. Subscriptions close
+   after 60 seconds of active observation; reconnect resumes from the last processed ID.
+5. Disconnect, backpressure, observer timeout and database-read failure close only the
+   subscription. They never write state, start a worker, cancel or restart a run. There
+   is no event retention/truncation in this slice; future retention needs a reviewed
+   replay-expired contract. Clients must tolerate duplicate delivery and unknown events.
+
+All other endpoints in the proposal below (including cancel/messages/files/uploads,
+artifacts/approvals/imports/previews) remain unimplemented. Real runner selection,
+dispatch, leases/fencing, budgets, snapshot lifecycle and sandbox security are later work.
+
+Review questions: Does the immediate persisted unavailable failure and 201/200 replay
+behavior fit the Agent UI? Does the frontend retain a separate cursor per run, ignore
+unknown events and reconcile terminal state with GET? No compatibility approval is claimed.
 
 ## 1. Conventions / authority
 

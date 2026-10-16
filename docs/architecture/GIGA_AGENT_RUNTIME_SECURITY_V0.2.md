@@ -4,6 +4,11 @@
 
 ## 1. Separation of execution authority
 
+**17T-44 boundary:** the control-plane candidate persists metadata and unavailable outcomes
+only. Its execution port has an unavailable adapter; the API never dispatches it. No
+sandbox, host command fallback, provider credentials or tool execution is added. The
+security gates in this document remain required before any real runner is provisioned.
+
 **Hono Control Plane:** session/Auth/CSRF, policy, budgets, approval decision, LLM orchestration, audited events, DB queries, artifact metadata. It **never executes model-generated shell commands on its process host**, even for local development convenience.
 
 **Cloud Sandbox Runner (first implementation candidate):** separate, isolated environment whose CPU, memory, filesystem, process tree, storage, egress and lifetime are governed by a host/runner service with independent credentials. It may run untrusted dependencies/code inside explicit Workspace mounts, but NEVER gets the Control Plane's production DB credentials, GitHub write token, host Docker socket, Cloud IAM admin keys or blanket filesystem access.

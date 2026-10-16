@@ -1,8 +1,14 @@
 # GigaAgent — Data Model, Persistence and State v0.2
 
-> **DRAFT / NON-EXECUTABLE SCHEMA PROPOSAL.** No migration is authorized or applied. Reference: [Architecture](GIGA_AGENT_ARCHITECTURE_V0.2.md), [Sandbox Security](GIGA_AGENT_RUNTIME_SECURITY_V0.2.md), [API](../contracts/GIGA_AGENT_API_V0.2.md). Source tables users/sessions currently exist; conversation migration 002 belongs to 17T-21 and is unrelated.
+> **DRAFT / BROADER SCHEMA PROPOSAL.** Only the 17T-44 subset below has a migration candidate, exercised in isolated tests; no production migration is claimed. Reference: [Architecture](GIGA_AGENT_ARCHITECTURE_V0.2.md), [Sandbox Security](GIGA_AGENT_RUNTIME_SECURITY_V0.2.md), [API](../contracts/GIGA_AGENT_API_V0.2.md). Existing Auth/Chat tables are independent of this foundation.
 
 ## 1. Separation of concerns
+
+**17T-44 candidate migration 011:** implements only `agent_workspaces`, `agent_runs` and
+`agent_run_events` (the concrete name for the proposed events entity). See
+[ADR-008](../decisions/ADR-008-agent-control-plane-foundation.md) for exact invariants and
+[verification](../evidence/17T-44-agent-control-plane.md). Existing tables remain unchanged;
+the inventory below is still a broader proposal, not a list of implemented tables.
 
 - **PostgreSQL** is authoritative for workspace/run/job state, messages, tool-call records, approvals, event replay metadata and artifact manifests.
 - **Durable object/artifact storage** holds immutable workspace snapshots, large tool outputs, screenshots and downloadable ZIPs. Never rely on ephemeral runtime volume for persistence.
