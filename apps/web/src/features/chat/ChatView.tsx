@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useRouter } from '../../app/router.js';
 import { useApiMode } from '../../app/context/ApiModeContext.js';
-import type { Conversation, Message } from '../../lib/api/types.js';
+import type { Conversation, Message, ModelMetadata, ReasoningEffort } from '../../lib/api/types.js';
 import { realApiClient, ApiException } from '../../lib/api/client.js';
 import { mockDataAdapter } from '../../lib/api/mock-adapter.js';
 import { ConversationSidebar } from './ConversationSidebar.js';
@@ -10,6 +10,10 @@ import { Composer } from './Composer.js';
 import { Alert } from '../../components/Alert.js';
 import { Button } from '../../components/Button.js';
 import { GigaLogo } from '../../components/GigaLogo.js';
+import {
+  normalizeModelMetadata,
+  getEffectiveReasoningEffort,
+} from './model-capabilities.js';
 
 const MAX_POLL_ATTEMPTS = 5;
 const POLL_INTERVAL_MS = 150;
@@ -34,6 +38,11 @@ export const ChatView: React.FC = () => {
 
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [models, setModels] = useState<ModelMetadata[]>([]);
+  const [selectedModelId, setSelectedModelId] = useState<string>('');
+  const [selectedReasoningEffort, setSelectedReasoningEffort] = useState<ReasoningEffort | undefined>(
+    undefined
+  );
   const [isLoading, setIsLoading] = useState(false);
   const [isMessagesLoading, setIsMessagesLoading] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
@@ -49,6 +58,7 @@ export const ChatView: React.FC = () => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messageLoadRequestIdRef = useRef(0);
   const conversationsLoadRequestIdRef = useRef(0);
+  const modelsLoadRequestIdRef = useRef(0);
 
   // Auto-scroll helper
   const scrollToBottom = () => {
@@ -136,6 +146,65 @@ export const ChatView: React.FC = () => {
   useEffect(() => {
     loadConversations();
   }, [loadConversations]);
+
+  // Load available models and their capabilities
+  const loadModels = useCallback(async () => {
+    const reqId = ++modelsLoadRequestIdRef.current;
+    try {
+      const res =
+        mode === 'real'
+          ? await realApiClient.listModels()
+          : await mockDataAdapter.listModels();
+      if (modelsLoadRequestIdRef.current !== reqId) return;
+      const normalized = (res.models || []).map(normalizeModelMetadata);
+      setModels(normalized);
+      if (normalized.length > 0) {
+        setSelectedModelId((prev) => {
+          if (prev && normalized.some((m) => m.id === prev)) return prev;
+          return normalized[0].id;
+        });
+      }
+    } catch {
+      if (modelsLoadRequestIdRef.current !== reqId) return;
+      setModels([]);
+    }
+  }, [mode]);
+
+  useEffect(() => {
+    loadModels();
+  }, [loadModels]);
+
+  // Model selection handler that enforces capability fencing:
+  // When switching models, existing reasoning selection MUST be cleared if not supported by the new model.
+  const handleSelectModel = useCallback(
+    (modelId: string) => {
+      setSelectedModelId(modelId);
+      const targetModel = models.find((m) => m.id === modelId);
+      if (
+        !targetModel ||
+        !targetModel.reasoning?.supported ||
+        !selectedReasoningEffort ||
+        !targetModel.reasoning.efforts.includes(selectedReasoningEffort)
+      ) {
+        setSelectedReasoningEffort(undefined);
+      }
+    },
+    [models, selectedReasoningEffort]
+  );
+
+  // Synchronize reasoning selection if models list changes
+  useEffect(() => {
+    if (selectedReasoningEffort) {
+      const activeModel = models.find((m) => m.id === selectedModelId);
+      if (
+        !activeModel ||
+        !activeModel.reasoning?.supported ||
+        !activeModel.reasoning.efforts.includes(selectedReasoningEffort)
+      ) {
+        setSelectedReasoningEffort(undefined);
+      }
+    }
+  }, [models, selectedModelId, selectedReasoningEffort]);
 
   // Authoritative reconciliation via GET generation
   const reconcileAuthoritativeGeneration = useCallback(
@@ -482,6 +551,12 @@ export const ChatView: React.FC = () => {
     isStoppingRef.current = false;
     abortControllerRef.current = new AbortController();
 
+    const activeModel = models.find((m) => m.id === selectedModelId);
+    const effectiveReasoningEffort = getEffectiveReasoningEffort(
+      activeModel,
+      selectedReasoningEffort
+    );
+
     if (mode === 'real') {
       try {
         await realApiClient.streamMessage(
@@ -679,7 +754,11 @@ export const ChatView: React.FC = () => {
               }
             }
           },
-          { signal: abortControllerRef.current.signal }
+          {
+            signal: abortControllerRef.current.signal,
+            modelId: selectedModelId || undefined,
+            reasoningEffort: effectiveReasoningEffort,
+          }
         );
       } catch (err: unknown) {
         if (stopTimeoutRef.current) {
@@ -1002,6 +1081,11 @@ export const ChatView: React.FC = () => {
           onStop={handleStopStreaming}
           isStreaming={isStreaming}
           disabled={false}
+          models={models}
+          selectedModelId={selectedModelId}
+          onSelectModel={handleSelectModel}
+          reasoningEffort={selectedReasoningEffort}
+          onSelectReasoningEffort={setSelectedReasoningEffort}
         />
       </div>
     </div>

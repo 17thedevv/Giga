@@ -18,10 +18,40 @@ import type {
   UpdatePreferencesDto,
   ChatStreamEvent,
   ChatGeneration,
+  ModelMetadata,
+  ModelsResponse,
+  ReasoningEffort,
 } from './types.js';
 import { ApiException } from './client.js';
 
 export const MOCK_AUTH_STORAGE_KEY = 'giga_mock_auth_active';
+
+export const INITIAL_MODELS: ModelMetadata[] = [
+  {
+    id: 'giga-chat-default',
+    capabilities: ['text', 'streaming'],
+    reasoning: {
+      supported: true,
+      efforts: ['low', 'medium', 'high'],
+    },
+  },
+  {
+    id: 'giga-fast',
+    capabilities: ['text', 'streaming'],
+    reasoning: {
+      supported: false,
+      efforts: [],
+    },
+  },
+  {
+    id: 'giga-reasoning-preview',
+    capabilities: ['text', 'streaming'],
+    reasoning: {
+      supported: true,
+      efforts: ['low', 'medium'],
+    },
+  },
+];
 
 // Pre-loaded fixture data based on apps/web/mocks
 export const MOCK_USER: User = {
@@ -273,6 +303,7 @@ export class MockDataAdapter {
   private preferences: UserPreferences = { ...INITIAL_PREFERENCES };
   private skills: SkillListItem[] = INITIAL_SKILLS.map((s) => ({ ...s }));
   private skillVersions: Record<string, SkillVersion[]> = JSON.parse(JSON.stringify(INITIAL_SKILL_VERSIONS));
+  private models: ModelMetadata[] = [...INITIAL_MODELS];
 
   constructor(initialUser: User | null = null) {
     if (initialUser) {
@@ -442,12 +473,27 @@ export class MockDataAdapter {
     onComplete();
   }
 
+  // Model Capabilities Discovery
+  async listModels(): Promise<ModelsResponse> {
+    await this.delay(50);
+    return { models: [...this.models] };
+  }
+
+  setModels(models: ModelMetadata[]): void {
+    this.models = [...models];
+  }
+
   // Typed Stream Chat simulation for GigaChat Runtime
   async streamMessage(
     conversationId: string,
     content: string,
     onEvent: (event: ChatStreamEvent) => void,
-    options?: { signal?: AbortSignal; idempotencyKey?: string; modelId?: string }
+    options?: {
+      signal?: AbortSignal;
+      idempotencyKey?: string;
+      modelId?: string;
+      reasoningEffort?: ReasoningEffort;
+    }
   ): Promise<void> {
     const generationId = `gen_${Date.now()}`;
     const assistantMsgId = `msg_a_${Date.now()}`;
@@ -477,6 +523,72 @@ export class MockDataAdapter {
       "3. Remote writes are strictly executed only after authenticated owner confirmation.";
 
     const chunks = fullAnswer.match(/.{1,12}/g) || [fullAnswer];
+    let accumulated = '';
+
+    for (const chunk of chunks) {
+      if (options?.signal?.aborted) {
+        onEvent({
+          event: 'message.stopped',
+          data: {
+            messageId: assistantMsgId,
+            generationId,
+            finishReason: 'cancelled',
+          },
+        });
+        return;
+      }
+      await this.delay(60);
+      accumulated += chunk;
+      onEvent({
+        event: 'message.delta',
+        data: {
+          messageId: assistantMsgId,
+          generationId,
+          text: chunk,
+        },
+      });
+    }
+
+    await this.addMessage(conversationId, 'assistant', accumulated);
+
+    onEvent({
+      event: 'message.completed',
+      data: {
+        messageId: assistantMsgId,
+        generationId,
+        createdAt: new Date().toISOString(),
+        finishReason: 'stop',
+      },
+    });
+  }
+
+  // Typed Stream Variant simulation (Retry / Regenerate)
+  async streamVariant(
+    conversationId: string,
+    _userMessageId: string,
+    _action: 'retry' | 'regenerate',
+    onEvent: (event: ChatStreamEvent) => void,
+    options?: {
+      signal?: AbortSignal;
+      idempotencyKey?: string;
+      modelId?: string;
+      reasoningEffort?: ReasoningEffort;
+    }
+  ): Promise<void> {
+    const generationId = `gen_var_${Date.now()}`;
+    const assistantMsgId = `msg_a_var_${Date.now()}`;
+
+    onEvent({
+      event: 'message.started',
+      data: {
+        messageId: assistantMsgId,
+        generationId,
+        conversationId,
+      },
+    });
+
+    const variantAnswer = 'This is a regenerated assistant response variant.';
+    const chunks = variantAnswer.match(/.{1,10}/g) || [variantAnswer];
     let accumulated = '';
 
     for (const chunk of chunks) {
