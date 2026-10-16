@@ -104,7 +104,9 @@ verification remains separate from the deterministic adapter fixtures.
   effort becomes part of the request identity and cannot change under the same key.
 - The `GET /api/v1/models` route is purely additive and requires authenticated session access.
 - `ChatGeneration` and `ChatTurnVariants.items` DTOs include optional `reasoningEffort`.
-- Database migration 010 is non-blocking, nullable, and fully backward-compatible.
+- Database migration 010 is additive and nullable. PostgreSQL ALTER TABLE takes a table
+  lock; assess migration duration on the target data volume before deployment. Roll back
+  application code while retaining the added column rather than dropping historical snapshots.
 
 ## Review Questions for Thư
 
