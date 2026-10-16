@@ -2,6 +2,56 @@
 
 > **DRAFT, NOT FROZEN.** Product design accepted on 2026-10-13; exact endpoints, DTOs, new SSE event types and browser compatibility still require Trà/Thư review. Tracking [17T-25](https://linear.app/17thedev/issue/17T-25/specify-gigachat-runtime-and-shared-llm-engine-v02). Read [Runtime](../architecture/GIGACHAT_RUNTIME_V0.2.md), [LLM Engine](../architecture/LLM_ENGINE_V0.1.md), [API v0.1](API_CONTRACT_V0.1.md) and ADR-001.
 
+## Model reasoning capability candidate — 17T-41
+
+**DRAFT; Thư compatibility review pending.** Tracking [17T-41](https://linear.app/17thedev/issue/17T-41).
+Read [ADR-007](../decisions/ADR-007-model-reasoning-capability.md).
+
+| Old behavior | Candidate behavior | Consumers / compatibility / evidence |
+|---|---|---|
+| Uncontrollable / implicit reasoning | Normalized `reasoningEffort?: 'low' \| 'medium' \| 'high'` | Additive client field; omission means no explicit override — registered model/adapter default policy applies (Gemini adapter maps absent to MINIMAL for backward compatibility) |
+| No model capability discovery | Add GET `/api/v1/models` | Additive authenticated endpoint returning allowlisted models and reasoning capabilities |
+| Generation without reasoning metadata | Persist `reasoning_effort` per generation (migration 010) | Snapshot per generation; historical records remain null; variants expose field |
+| Provider-native fields risk | Strict validation rejects unknown fields (`thinkingLevel`, token budgets) | Fail-fast 400 `VALIDATION_ERROR`; zero provider leaks |
+
+### Endpoints and DTOs
+
+1. **Discovery:** `GET /api/v1/models` (requires authenticated session cookie)
+   Response `200 OK`:
+   ```ts
+   {
+     models: Array<{
+       id: string;
+       capabilities: ('text' | 'streaming' | 'structured' | 'embeddings' | 'tool_calling')[];
+       reasoning: {
+         supported: boolean;
+         efforts: ('low' | 'medium' | 'high')[];
+       };
+     }>;
+   }
+   ```
+   Returns only registered aliases eligible for Chat streaming. Disabled Chat returns an
+   empty list. The response contains no native model IDs, provider configuration or URLs.
+2. **Streaming Prompt:** `POST /api/v1/conversations/:id/messages:stream`
+   Accepts `{ content: string, modelId?: string, reasoningEffort?: 'low' | 'medium' | 'high' }`.
+3. **Streaming Variant:** `POST /api/v1/conversations/:id/generations:stream`
+   Accepts `{ userMessageId: UUID, action: 'retry' | 'regenerate', modelId?: string, reasoningEffort?: 'low' | 'medium' | 'high' }`.
+4. **Generation Inspection:** `GET /api/v1/conversations/:id/generations/:generationId`
+   Response includes `reasoningEffort?: 'low' | 'medium' | 'high'`.
+5. **Turn Variants:** `GET /api/v1/conversations/:id/messages/:userMessageId/generations`
+   Response `items` array entries include `reasoningEffort?: 'low' | 'medium' | 'high'`.
+
+The selected alias and its advertised capabilities are authoritative for both admission
+routes. Unsupported effort returns 400 `VALIDATION_ERROR` before generation persistence or
+provider invocation. Omission selects that generation's model default independently; Retry
+and Regenerate do not inherit a previous attempt's override. Explicit normalized effort is
+both the requested and effective Giga policy: adapters must map it exactly or reject it.
+Default/legacy generations retain NULL internally and omit the public snapshot field; the
+system does not infer normalized effort from native provider defaults.
+
+Omitted effort preserves the pre-upgrade idempotency fingerprint. Specifying or changing
+effort changes request identity, so the same key cannot select a different effort.
+
 ## Streamed Retry / Regenerate candidate — 17T-35
 
 17T-36 integration note: normal server startup can supply the real engine using server-only

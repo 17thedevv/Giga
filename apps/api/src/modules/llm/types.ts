@@ -49,6 +49,21 @@ export type LLMStreamEvent =
       readonly finishReason: FinishReason;
     };
 
+export type ReasoningEffort = 'low' | 'medium' | 'high';
+
+export const VALID_REASONING_EFFORTS: readonly ReasoningEffort[] = ['low', 'medium', 'high'] as const;
+
+export interface ModelReasoningConfig {
+  readonly supported: boolean;
+  readonly efforts: readonly ReasoningEffort[];
+}
+
+export interface ModelMetadata {
+  readonly id: string;
+  readonly capabilities: readonly Capability[];
+  readonly reasoning: ModelReasoningConfig;
+}
+
 export interface LLMRequest {
   readonly modelAlias: string;
   readonly messages: readonly ModelMessage[];
@@ -56,6 +71,7 @@ export interface LLMRequest {
   readonly requestId: string;
   readonly caller: LLMCaller;
   readonly signal: AbortSignal;
+  readonly reasoningEffort?: ReasoningEffort;
 }
 
 export interface ResolvedLLMRequest extends LLMRequest {
@@ -80,6 +96,7 @@ export interface ModelAliasConfig {
   readonly modelId: string;
   readonly requiredCapabilities: readonly Capability[];
   readonly maxOutputTokensLimit?: number;
+  readonly reasoning?: ModelReasoningConfig;
 }
 
 export interface ToolSchema {

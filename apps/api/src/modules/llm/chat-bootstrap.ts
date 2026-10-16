@@ -32,7 +32,8 @@ export function createChatEngine(config: ChatProviderConfig | undefined, transpo
   const registry = new ModelRegistry();
   registry.registerAdapter(new GeminiProvider(transport));
   registry.registerAlias({ alias: CHAT_MODEL_ALIAS, providerId: 'gemini', modelId: config.modelId,
-    requiredCapabilities: ['text', 'streaming'], maxOutputTokensLimit: config.maxOutputTokens });
+    requiredCapabilities: ['text', 'streaming'], maxOutputTokensLimit: config.maxOutputTokens,
+    reasoning: { supported: true, efforts: ['low', 'medium', 'high'] } });
   registry.validate();
   registry.resolve(CHAT_MODEL_ALIAS, 'streaming');
   return new LLMEngine(registry, new ProviderCredential(config.apiKey, 'platform'));

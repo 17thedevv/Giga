@@ -9,19 +9,22 @@ import {
   LLMCancelledError,
   LLMValidationError,
   ProviderFailureError,
+  UnsupportedReasoningEffortError,
   toLLMError,
 } from './errors.js';
 import type { ModelRegistry } from './registry.js';
 import type { CredentialResolver, ProviderCredential } from './provider-credential.js';
 import type { ProviderAdapter } from './adapter.js';
-import type {
-  LLMCaller,
-  LLMRequest,
-  LLMStreamEvent,
-  ModelMessage,
-  ModelResult,
-  ResolvedLLMRequest,
-  ResolvedModelIdentity,
+import {
+  VALID_REASONING_EFFORTS,
+  type LLMCaller,
+  type LLMRequest,
+  type LLMStreamEvent,
+  type ModelMessage,
+  type ModelMetadata,
+  type ModelResult,
+  type ResolvedLLMRequest,
+  type ResolvedModelIdentity,
 } from './types.js';
 
 export const MAX_REQUEST_ID_LENGTH = 128;
@@ -120,6 +123,19 @@ export class LLMEngine {
     ) {
       throw new LLMValidationError('maxOutputTokens must be a positive integer');
     }
+
+    if (req.reasoningEffort !== undefined) {
+      if (typeof req.reasoningEffort !== 'string' || !VALID_REASONING_EFFORTS.includes(req.reasoningEffort)) {
+        throw new LLMValidationError(`Invalid reasoningEffort: '${req.reasoningEffort}'. Must be one of: low, medium, high`);
+      }
+    }
+  }
+
+  /**
+   * Lists all registered models with their trusted capabilities.
+   */
+  public listModels(): readonly ModelMetadata[] {
+    return this.registry.listModels();
   }
 
   /**
@@ -146,6 +162,13 @@ export class LLMEngine {
       throw new LLMValidationError(
         `Requested maxOutputTokens (${req.maxOutputTokens}) exceeds alias limit of ${config.maxOutputTokensLimit}`
       );
+    }
+
+    if (req.reasoningEffort !== undefined) {
+      const reasoning = this.registry.getReasoningCapabilities(req.modelAlias);
+      if (!reasoning.supported || !reasoning.efforts.includes(req.reasoningEffort)) {
+        throw new UnsupportedReasoningEffortError(req.reasoningEffort, req.modelAlias);
+      }
     }
 
     const resolvedReq: ResolvedLLMRequest = {
@@ -231,6 +254,13 @@ export class LLMEngine {
       throw new LLMValidationError(
         `Requested maxOutputTokens (${req.maxOutputTokens}) exceeds alias limit of ${config.maxOutputTokensLimit}`
       );
+    }
+
+    if (req.reasoningEffort !== undefined) {
+      const reasoning = this.registry.getReasoningCapabilities(req.modelAlias);
+      if (!reasoning.supported || !reasoning.efforts.includes(req.reasoningEffort)) {
+        throw new UnsupportedReasoningEffortError(req.reasoningEffort, req.modelAlias);
+      }
     }
 
     const resolvedReq: ResolvedLLMRequest = {

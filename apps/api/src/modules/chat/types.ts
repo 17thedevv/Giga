@@ -1,4 +1,4 @@
-import type { ModelMessage, ResolvedModelIdentity } from '../llm/types.js';
+import type { ModelMessage, ReasoningEffort, ResolvedModelIdentity } from '../llm/types.js';
 
 export type GenerationStatus = 'pending' | 'streaming' | 'completed' | 'failed' | 'interrupted' | 'stopped';
 export type ChatFinishReason = 'stop' | 'length' | 'other' | 'cancelled';
@@ -15,6 +15,7 @@ export interface ChatTurnVariants {
     readonly content?: string;
     readonly createdAt: string;
     readonly finishedAt?: string;
+    readonly reasoningEffort?: ReasoningEffort;
   }[];
 }
 export interface ChatGeneration {
@@ -31,6 +32,7 @@ export interface ChatGeneration {
   readonly startedAt?: string;
   readonly finishedAt?: string;
   readonly cancelRequestedAt?: string;
+  readonly reasoningEffort?: ReasoningEffort;
 }
 
 export const SAFE_GENERATION_ERROR = 'Generation could not be completed';
@@ -46,6 +48,7 @@ export type AdmissionInput = {
   readonly modelId: string;
   readonly key: string;
   readonly fingerprint: string;
+  readonly reasoningEffort?: ReasoningEffort;
 } & ({ readonly content: string; readonly action?: never; readonly userMessageId?: never }
   | { readonly userMessageId: string; readonly action: 'retry' | 'regenerate'; readonly content?: never });
 export type Admission = { readonly generation: ChatGeneration; readonly duplicate: boolean };

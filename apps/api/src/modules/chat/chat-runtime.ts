@@ -3,7 +3,7 @@ import { AppError, ValidationError } from '../auth/auth-validation.js';
 import type { LLMEngine } from '../llm/engine.js';
 import { BYOKCredentialInvalidError, BYOKProviderError, ChatCredentialUnavailableError } from '../llm/errors.js';
 import type { ProviderCredential } from '../llm/provider-credential.js';
-import type { LLMStreamEvent } from '../llm/types.js';
+import { VALID_REASONING_EFFORTS, type LLMStreamEvent, type ModelMetadata, type ReasoningEffort } from '../llm/types.js';
 import {
   MAX_OUTPUT_BYTES, MAX_PROMPT_BYTES, SAFE_GENERATION_ERROR,
   type Admission, type Cancellation, type ChatGeneration, type ChatTurnVariants, type EventSink, type GenerationRepository,
@@ -54,24 +54,56 @@ export class ChatRuntime {
   get activeGenerationCount(): number { return this.active.size; }
   constructor(
     private readonly repository: GenerationRepository,
-    private readonly engine: (Pick<LLMEngine, 'streamText'> & Partial<Pick<LLMEngine, 'prepareStream'>>) | undefined,
+    private readonly engine: (Pick<LLMEngine, 'streamText'> & Partial<Pick<LLMEngine, 'prepareStream' | 'listModels'>>) | undefined,
     private readonly options: RuntimeOptions = {},
   ) {}
+
+  listModels(): readonly ModelMetadata[] {
+    if (this.engine?.listModels) {
+      return this.engine.listModels().filter((model) => model.capabilities.includes('streaming'));
+    }
+    return this.engine ? [{
+      id: CHAT_MODEL_ALIAS,
+      capabilities: ['text', 'streaming'],
+      reasoning: { supported: false, efforts: [] },
+    }] : [];
+  }
+
+  getModel(modelId: string): ModelMetadata | undefined {
+    return this.listModels().find((m) => m.id === modelId);
+  }
 
   async admit(ownerId: string, conversationId: string, body: unknown, key: string | undefined): Promise<Admission> {
     await this.repository.authorize(ownerId, conversationId);
     const validatedKey = validateIdempotencyKey(key);
     if (!body || typeof body !== 'object' || Array.isArray(body)) throw new ValidationError('Expected a JSON object');
     const input = body as Record<string, unknown>;
-    if (Object.keys(input).some((name) => name !== 'content' && name !== 'modelId')) throw new ValidationError('Unknown request field');
+    if (Object.keys(input).some((name) => name !== 'content' && name !== 'modelId' && name !== 'reasoningEffort')) throw new ValidationError('Unknown request field');
     if (typeof input.content !== 'string' || !input.content.trim() || Buffer.byteLength(input.content) > MAX_PROMPT_BYTES) {
       throw new ValidationError('Content must be nonempty and at most 16384 UTF-8 bytes');
     }
     const modelId = input.modelId === undefined ? CHAT_MODEL_ALIAS : input.modelId;
-    if (modelId !== CHAT_MODEL_ALIAS) throw new ValidationError('Unsupported model alias');
+    if (typeof modelId !== 'string' || (this.engine ? !this.getModel(modelId) : modelId !== CHAT_MODEL_ALIAS)) throw new ValidationError('Unsupported model alias');
+    let reasoningEffort: ReasoningEffort | undefined;
+    if (input.reasoningEffort !== undefined) {
+      if (typeof input.reasoningEffort !== 'string' || !VALID_REASONING_EFFORTS.includes(input.reasoningEffort as ReasoningEffort)) {
+        throw new ValidationError('Invalid reasoningEffort. Must be one of: low, medium, high');
+      }
+      reasoningEffort = input.reasoningEffort as ReasoningEffort;
+    }
     if (!this.engine) throw new AppError('SERVICE_UNAVAILABLE', 'Chat model is not configured', 503);
-    const fingerprint = createHash('sha256').update(JSON.stringify([conversationId, input.content, modelId])).digest('hex');
-    return this.repository.admit({ ownerId, conversationId, content: input.content, modelId, key: validatedKey, fingerprint });
+    if (reasoningEffort !== undefined) {
+      const modelMeta = this.getModel(modelId);
+      if (!modelMeta || !modelMeta.reasoning.supported) {
+        throw new ValidationError(`Model '${modelId}' does not support reasoning`);
+      }
+      if (!modelMeta.reasoning.efforts.includes(reasoningEffort)) {
+        throw new ValidationError(`Model '${modelId}' does not support reasoningEffort '${reasoningEffort}'`);
+      }
+    }
+    const fingerprint = createHash('sha256').update(JSON.stringify([conversationId, input.content, modelId,
+      ...(reasoningEffort === undefined ? [] : [reasoningEffort])])).digest('hex');
+    return this.repository.admit({ ownerId, conversationId, content: input.content, modelId, reasoningEffort, key: validatedKey, fingerprint });
   }
 
   get(ownerId: string, conversationId: string, generationId: string): Promise<ChatGeneration> {
@@ -83,16 +115,33 @@ export class ChatRuntime {
     const validatedKey = validateIdempotencyKey(key);
     if (!body || typeof body !== 'object' || Array.isArray(body)) throw new ValidationError('Expected a JSON object');
     const input = body as Record<string, unknown>;
-    if (Object.keys(input).some((name) => !['userMessageId', 'action', 'modelId'].includes(name))) throw new ValidationError('Unknown request field');
+    if (Object.keys(input).some((name) => !['userMessageId', 'action', 'modelId', 'reasoningEffort'].includes(name))) throw new ValidationError('Unknown request field');
     if (typeof input.userMessageId !== 'string') throw new ValidationError('Expected userMessageId');
     const userMessageId = validateUuid(input.userMessageId).toLowerCase();
     conversationId = conversationId.toLowerCase();
     if (input.action !== 'retry' && input.action !== 'regenerate') throw new ValidationError('Unsupported generation action');
     const modelId = input.modelId === undefined ? CHAT_MODEL_ALIAS : input.modelId;
-    if (modelId !== CHAT_MODEL_ALIAS) throw new ValidationError('Unsupported model alias');
+    if (typeof modelId !== 'string' || (this.engine ? !this.getModel(modelId) : modelId !== CHAT_MODEL_ALIAS)) throw new ValidationError('Unsupported model alias');
+    let reasoningEffort: ReasoningEffort | undefined;
+    if (input.reasoningEffort !== undefined) {
+      if (typeof input.reasoningEffort !== 'string' || !VALID_REASONING_EFFORTS.includes(input.reasoningEffort as ReasoningEffort)) {
+        throw new ValidationError('Invalid reasoningEffort. Must be one of: low, medium, high');
+      }
+      reasoningEffort = input.reasoningEffort as ReasoningEffort;
+    }
     if (!this.engine) throw new AppError('SERVICE_UNAVAILABLE', 'Chat model is not configured', 503);
-    const fingerprint = createHash('sha256').update(JSON.stringify([conversationId, input.action, userMessageId, modelId])).digest('hex');
-    return this.repository.admit({ ownerId, conversationId, userMessageId, action: input.action, modelId, key: validatedKey, fingerprint });
+    if (reasoningEffort !== undefined) {
+      const modelMeta = this.getModel(modelId);
+      if (!modelMeta || !modelMeta.reasoning.supported) {
+        throw new ValidationError(`Model '${modelId}' does not support reasoning`);
+      }
+      if (!modelMeta.reasoning.efforts.includes(reasoningEffort)) {
+        throw new ValidationError(`Model '${modelId}' does not support reasoningEffort '${reasoningEffort}'`);
+      }
+    }
+    const fingerprint = createHash('sha256').update(JSON.stringify([conversationId, input.action, userMessageId, modelId,
+      ...(reasoningEffort === undefined ? [] : [reasoningEffort])])).digest('hex');
+    return this.repository.admit({ ownerId, conversationId, userMessageId, action: input.action, modelId, reasoningEffort, key: validatedKey, fingerprint });
   }
 
   variants(ownerId: string, conversationId: string, userMessageId: string): Promise<ChatTurnVariants> {
@@ -150,7 +199,7 @@ export class ChatRuntime {
       controller.signal.throwIfAborted();
       if (!this.engine) throw new RuntimeFailure('SERVICE_UNAVAILABLE');
       const request = { modelAlias: generation.modelId, messages, maxOutputTokens: this.options.maxOutputTokens ?? 2048,
-        requestId: generation.id, caller: 'chat' as const, signal: controller.signal };
+        requestId: generation.id, caller: 'chat' as const, signal: controller.signal, reasoningEffort: generation.reasoningEffort };
       if (this.engine.prepareStream) {
         const prepared = this.engine.prepareStream(request, this.options.resolveCredential ? () => this.options.resolveCredential!(ownerId) : undefined);
         await this.repository.recordResolvedModel(ownerId, generation.id, prepared.identity);

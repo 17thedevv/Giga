@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { ConflictError, NotFoundError } from '../auth/auth-validation.js';
-import type { ModelMessage, ResolvedModelIdentity } from '../llm/types.js';
+import type { ModelMessage, ReasoningEffort, ResolvedModelIdentity } from '../llm/types.js';
 import { CHAT_HISTORY_FROM, CHAT_HISTORY_VISIBLE } from './chat-history.js';
 import {
   GENERATION_LIFETIME_MS, MAX_CONTEXT_BYTES, SAFE_GENERATION_ERROR,
@@ -16,6 +16,7 @@ interface GenerationRow {
   request_fingerprint: string; created_at: Date; started_at: Date | null; finished_at: Date | null;
   cancel_requested_at: Date | null;
   action: GenerationAction;
+  reasoning_effort: string | null;
 }
 const iso = (value: Date): string => new Date(value).toISOString();
 function map(row: GenerationRow): ChatGeneration {
@@ -29,6 +30,7 @@ function map(row: GenerationRow): ChatGeneration {
     ...(row.started_at ? { startedAt: iso(row.started_at) } : {}),
     ...(row.finished_at ? { finishedAt: iso(row.finished_at) } : {}),
     ...(row.cancel_requested_at ? { cancelRequestedAt: iso(row.cancel_requested_at) } : {}),
+    ...(row.reasoning_effort ? { reasoningEffort: row.reasoning_effort as ReasoningEffort } : {}),
   };
 }
 
@@ -104,6 +106,7 @@ export class PostgresGenerationRepository implements GenerationRepository {
         userMessageId, selectedGenerationId: selection.rows[0]?.selected_generation_id ?? null,
         items: attempts.rows.map((row) => ({
           id: row.id, action: row.action, modelId: row.model_alias, status: row.status,
+          ...(row.reasoning_effort ? { reasoningEffort: row.reasoning_effort as ReasoningEffort } : {}),
           ...(row.status === 'completed' ? { assistantMessageId: row.assistant_message_id!, content: row.partial_content } : {}),
           createdAt: iso(row.created_at), ...(row.finished_at ? { finishedAt: iso(row.finished_at) } : {}),
         })),
@@ -157,9 +160,9 @@ export class PostgresGenerationRepository implements GenerationRepository {
           await client.query("INSERT INTO messages (id, conversation_id, role, content) VALUES ($1, $2, 'user', $3)", [userMessageId, input.conversationId, input.content]);
         }
         const result = await client.query<GenerationRow>(`INSERT INTO chat_generations
-          (owner_id, conversation_id, user_message_id, model_alias, status, idempotency_key, request_fingerprint, action)
-          VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7) RETURNING *`,
-        [input.ownerId, input.conversationId, userMessageId, input.modelId, input.key, input.fingerprint, input.action ?? 'new_prompt']);
+          (owner_id, conversation_id, user_message_id, model_alias, status, idempotency_key, request_fingerprint, action, reasoning_effort)
+          VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, $8) RETURNING *`,
+        [input.ownerId, input.conversationId, userMessageId, input.modelId, input.key, input.fingerprint, input.action ?? 'new_prompt', input.reasoningEffort ?? null]);
         await this.bindKey(client, input.ownerId, result.rows[0]!.id, input.key, input.action ?? 'prompt');
         await client.query('UPDATE conversations SET updated_at = NOW() WHERE id = $1 AND user_id = $2', [input.conversationId, input.ownerId]);
         return { generation: map(result.rows[0]!), duplicate: false };

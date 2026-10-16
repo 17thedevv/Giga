@@ -26,13 +26,14 @@ it('009 upgrades populated 008 without changing legacy data and is idempotent', 
     await pool.query("INSERT INTO user_preferences (user_id,custom_instructions,response_length,response_style) VALUES ($1,'Do not read credentials','balanced','professional')", [owner]);
     const tables = ['users','sessions','conversations','messages','chat_generations','chat_operation_keys','chat_turn_selections','user_preferences','skill_definitions','skill_versions','skill_installations'];
     const snapshots = await Promise.all(tables.map((table) => pool.query(`SELECT * FROM ${table} ORDER BY 1`)));
-    assert.deepEqual(await runMigrations(pool), ['009_chat_byok_credentials']);
+    const target = MIGRATIONS.filter((migration) => migration.version <= 9);
+    assert.deepEqual(await runMigrations(pool, target), ['009_chat_byok_credentials']);
     for (let i = 0; i < tables.length; i++) assert.deepEqual((await pool.query(`SELECT * FROM ${tables[i]} ORDER BY 1`)).rows, snapshots[i]!.rows);
     assert.equal((await pool.query('SELECT * FROM user_provider_credentials')).rows.length, 0);
     assert.equal((await pool.query('SELECT * FROM chat_credential_preferences')).rows.length, 0);
     const sql = await readFile(new URL('../../src/db/migrations/009_chat_byok_credentials.sql', import.meta.url), 'utf8');
     assert.equal(MIGRATIONS.find((m) => m.version === 9)!.sql.trim(), sql.replace(/\r\n/g, '\n').trim());
-    assert.deepEqual(await runMigrations(pool), []);
+    assert.deepEqual(await runMigrations(pool, target), []);
   } finally {
     if (!initial.isMemory) { await pool.end(); await initial.pool.query(`DROP SCHEMA ${schema} CASCADE`); }
     await initial.pool.end();
