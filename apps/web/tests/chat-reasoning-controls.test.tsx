@@ -19,6 +19,8 @@ import type { ModelMetadata } from '../src/lib/api/types.js';
 
 describe('17T-42 — Capability-Driven Reasoning Controls in GigaChat', () => {
   beforeEach(() => {
+    // Legacy fixtures predate turn inspection; explicit empty response retains legacy answers.
+    vi.spyOn(realApiClient, 'getTurnVariants').mockImplementation(async (_id, userMessageId) => ({ userMessageId, selectedGenerationId: null, items: [] }));
     if (typeof window !== 'undefined') {
       if (window.sessionStorage) {
         window.sessionStorage.clear();

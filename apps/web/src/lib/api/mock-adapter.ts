@@ -18,6 +18,7 @@ import type {
   UpdatePreferencesDto,
   ChatStreamEvent,
   ChatGeneration,
+  ChatTurnVariants,
   ModelMetadata,
   ModelsResponse,
   ReasoningEffort,
@@ -293,6 +294,8 @@ export const INITIAL_SKILL_VERSIONS: Record<string, SkillVersion[]> = {
  * Mock Data Adapter implementing stateful in-memory demo operations.
  */
 export class MockDataAdapter {
+  private generations = new Map<string, ChatGeneration & { action: 'new_prompt' | 'retry' | 'regenerate' }>();
+  private selections = new Map<string, string>();
   private currentUser: User | null = null;
   private conversations = [...INITIAL_CONVERSATIONS];
   private messages: Record<string, Message[]> = { ...INITIAL_MESSAGES };
@@ -405,7 +408,10 @@ export class MockDataAdapter {
     }
     return {
       conversation: conv,
-      messages: this.messages[id] ? [...this.messages[id]] : [],
+      messages: (this.messages[id] || []).filter(message => {
+        const generation = [...this.generations.values()].find(g => g.assistantMessageId === message.id);
+        return !generation || this.selections.get(generation.userMessageId) === generation.id;
+      }),
     };
   }
 
@@ -431,7 +437,7 @@ export class MockDataAdapter {
 
   async addMessage(conversationId: string, role: 'user' | 'assistant', content: string): Promise<Message> {
     const msg: Message = {
-      id: `msg_${Date.now()}`,
+      id: `msg_${crypto.randomUUID()}`,
       conversationId,
       role,
       content,
@@ -481,192 +487,105 @@ export class MockDataAdapter {
     this.models = [...models];
   }
 
-  // Typed Stream Chat simulation for GigaChat Runtime
   async streamMessage(
-    conversationId: string,
-    content: string,
-    onEvent: (event: ChatStreamEvent) => void,
-    options?: {
-      signal?: AbortSignal;
-      idempotencyKey?: string;
-      modelId?: string;
-      reasoningEffort?: ReasoningEffort;
-    }
+    conversationId: string, content: string, onEvent: (event: ChatStreamEvent) => void,
+    options?: { signal?: AbortSignal; idempotencyKey?: string; modelId?: string; reasoningEffort?: ReasoningEffort }
   ): Promise<void> {
-    const generationId = `gen_${Date.now()}`;
-    const assistantMsgId = `msg_a_${Date.now()}`;
-
-    // Add user message if not already recorded
-    const existingMessages = this.messages[conversationId] || [];
-    const lastMsg = existingMessages[existingMessages.length - 1];
-    if (!lastMsg || lastMsg.role !== 'user' || lastMsg.content !== content) {
-      await this.addMessage(conversationId, 'user', content);
-    }
-
-    // Event: message.started
-    onEvent({
-      event: 'message.started',
-      data: {
-        messageId: assistantMsgId,
-        generationId,
-        conversationId,
-      },
-    });
-
-    const fullAnswer =
-      "This is a **[DEMO / MOCK]** response.\n\n" +
-      "The Giga Coding Agent enforces a human-in-the-loop gate governed by Architecture Invariant `INV-07`.\n\n" +
-      "1. Read-only tools analyze the codebase.\n" +
-      "2. A stable unified diff proposal is synthesized.\n" +
-      "3. Remote writes are strictly executed only after authenticated owner confirmation.";
-
-    const chunks = fullAnswer.match(/.{1,12}/g) || [fullAnswer];
-    let accumulated = '';
-
-    for (const chunk of chunks) {
-      if (options?.signal?.aborted) {
-        onEvent({
-          event: 'message.stopped',
-          data: {
-            messageId: assistantMsgId,
-            generationId,
-            finishReason: 'cancelled',
-          },
-        });
-        return;
-      }
-      await this.delay(60);
-      accumulated += chunk;
-      onEvent({
-        event: 'message.delta',
-        data: {
-          messageId: assistantMsgId,
-          generationId,
-          text: chunk,
-        },
-      });
-    }
-
-    await this.addMessage(conversationId, 'assistant', accumulated);
-
-    onEvent({
-      event: 'message.completed',
-      data: {
-        messageId: assistantMsgId,
-        generationId,
-        createdAt: new Date().toISOString(),
-        finishReason: 'stop',
-      },
-    });
+    const user = await this.addMessage(conversationId, 'user', content);
+    return this.runMockGeneration(conversationId, user.id, 'new_prompt', content, onEvent, options);
   }
 
-  // Typed Stream Variant simulation (Retry / Regenerate)
   async streamVariant(
-    conversationId: string,
-    _userMessageId: string,
-    _action: 'retry' | 'regenerate',
+    conversationId: string, userMessageId: string, action: 'retry' | 'regenerate',
     onEvent: (event: ChatStreamEvent) => void,
-    options?: {
-      signal?: AbortSignal;
-      idempotencyKey?: string;
-      modelId?: string;
-      reasoningEffort?: ReasoningEffort;
-    }
+    options?: { signal?: AbortSignal; idempotencyKey?: string; modelId?: string; reasoningEffort?: ReasoningEffort }
   ): Promise<void> {
-    const generationId = `gen_var_${Date.now()}`;
-    const assistantMsgId = `msg_a_var_${Date.now()}`;
+    const user = (this.messages[conversationId] || []).filter(m => m.role === 'user').at(-1);
+    if (!user || user.id !== userMessageId) throw new Error('Only the latest turn can be retried or regenerated');
+    return this.runMockGeneration(conversationId, userMessageId, action, user.content, onEvent, options);
+  }
 
-    onEvent({
-      event: 'message.started',
-      data: {
-        messageId: assistantMsgId,
-        generationId,
-        conversationId,
-      },
-    });
-
-    const variantAnswer = 'This is a regenerated assistant response variant.';
-    const chunks = variantAnswer.match(/.{1,10}/g) || [variantAnswer];
-    let accumulated = '';
-
-    for (const chunk of chunks) {
-      if (options?.signal?.aborted) {
-        onEvent({
-          event: 'message.stopped',
-          data: {
-            messageId: assistantMsgId,
-            generationId,
-            finishReason: 'cancelled',
-          },
-        });
-        return;
+  private async runMockGeneration(
+    conversationId: string, userMessageId: string, action: 'new_prompt' | 'retry' | 'regenerate',
+    content: string, onEvent: (event: ChatStreamEvent) => void,
+    options?: { signal?: AbortSignal; modelId?: string; reasoningEffort?: ReasoningEffort }
+  ): Promise<void> {
+    const id = 'mock_' + crypto.randomUUID();
+    let generation: ChatGeneration & { action: typeof action } = {
+      id, conversationId, userMessageId, action, modelId: options?.modelId || 'giga-chat-default',
+      reasoningEffort: options?.reasoningEffort, status: 'streaming', partialContent: '', createdAt: new Date().toISOString(),
+    };
+    this.generations.set(id, generation);
+    onEvent({ event: 'message.started', data: { messageId: id, generationId: id, conversationId } });
+    let complete = false;
+    try {
+      await this.simulateChatStream(content, text => {
+        if (options?.signal?.aborted || this.generations.get(id)?.status === 'stopped') return;
+        generation = { ...generation, partialContent: generation.partialContent + text };
+        this.generations.set(id, generation);
+        onEvent({ event: 'message.delta', data: { messageId: id, generationId: id, text } });
+      }, () => { complete = true; }, options?.signal);
+      if (options?.signal?.aborted || this.generations.get(id)?.status === 'stopped') {
+        generation = { ...generation, status: 'stopped', finishReason: 'cancelled', finishedAt: new Date().toISOString() };
+        this.generations.set(id, generation);
+        onEvent({ event: 'message.stopped', data: { messageId: id, generationId: id, finishReason: 'cancelled' } });
+      } else if (complete) {
+        const message: Message = { id, conversationId, role: 'assistant', content: generation.partialContent, createdAt: new Date().toISOString(), status: 'completed' };
+        this.messages[conversationId].push(message);
+        generation = { ...generation, status: 'completed', assistantMessageId: id, finishedAt: message.createdAt };
+        this.generations.set(id, generation);
+        this.selections.set(userMessageId, id);
+        onEvent({ event: 'message.completed', data: { messageId: id, generationId: id, createdAt: message.createdAt } });
+      } else {
+        throw new Error('Mock stream interrupted');
       }
-      await this.delay(60);
-      accumulated += chunk;
-      onEvent({
-        event: 'message.delta',
-        data: {
-          messageId: assistantMsgId,
-          generationId,
-          text: chunk,
-        },
-      });
+    } catch (err) {
+      const error = { code: 'GENERATION_FAILED', message: err instanceof Error ? err.message : 'Mock generation failed' };
+      this.generations.set(id, { ...generation, status: 'failed', error });
+      onEvent({ event: 'stream.error', data: { messageId: id, generationId: id, error } });
+      onEvent({ event: 'message.failed', data: { messageId: id, generationId: id, error } });
     }
-
-    await this.addMessage(conversationId, 'assistant', accumulated);
-
-    onEvent({
-      event: 'message.completed',
-      data: {
-        messageId: assistantMsgId,
-        generationId,
-        createdAt: new Date().toISOString(),
-        finishReason: 'stop',
-      },
-    });
   }
 
-  async getGeneration(
-    conversationId: string,
-    generationId: string
-  ): Promise<{ generation: ChatGeneration }> {
-    await this.delay(80);
-    const existingMessages = this.messages[conversationId] || [];
-    const lastAssistant = existingMessages.filter((m) => m.role === 'assistant').pop();
+  async getTurnVariants(conversationId: string, userMessageId: string): Promise<ChatTurnVariants> {
+    // Seed legacy demo answers so a successful regeneration selects only its new answer.
+    if (![...this.generations.values()].some(g => g.userMessageId === userMessageId)) {
+      const messages = this.messages[conversationId] || [];
+      const userIndex = messages.findIndex(m => m.id === userMessageId && m.role === 'user');
+      const answer = userIndex >= 0 ? messages[userIndex + 1] : undefined;
+      if (answer?.role === 'assistant' && (!answer.status || answer.status === 'completed')) {
+        const id = 'legacy_' + answer.id;
+        this.generations.set(id, {
+          id, conversationId, userMessageId, action: 'new_prompt', modelId: 'giga-chat-default',
+          status: 'completed', assistantMessageId: answer.id, partialContent: answer.content, createdAt: answer.createdAt,
+        });
+        this.selections.set(userMessageId, id);
+      }
+    }
     return {
-      generation: {
-        id: generationId,
-        conversationId,
-        userMessageId: 'usr_msg_mock',
-        assistantMessageId: lastAssistant?.id,
-        modelId: 'giga-chat-default',
-        status: 'completed',
-        partialContent: lastAssistant?.content || '',
-        finishReason: 'stop',
-        createdAt: new Date().toISOString(),
-      },
+      userMessageId, selectedGenerationId: this.selections.get(userMessageId) || null,
+      items: [...this.generations.values()].filter(g => g.conversationId === conversationId && g.userMessageId === userMessageId).map(g => ({
+        id: g.id, action: g.action, modelId: g.modelId, status: g.status,
+        assistantMessageId: g.assistantMessageId, content: g.status === 'completed' ? g.partialContent : undefined,
+        createdAt: g.createdAt, finishedAt: g.finishedAt, reasoningEffort: g.reasoningEffort,
+      })),
     };
   }
 
-  async cancelGeneration(
-    conversationId: string,
-    generationId: string,
-    _idempotencyKey?: string
-  ): Promise<{ generation: ChatGeneration }> {
-    await this.delay(80);
-    return {
-      generation: {
-        id: generationId,
-        conversationId,
-        userMessageId: 'usr_msg_mock',
-        modelId: 'giga-chat-default',
-        status: 'stopped',
-        partialContent: '',
-        finishReason: 'cancelled',
-        createdAt: new Date().toISOString(),
-        cancelRequestedAt: new Date().toISOString(),
-      },
-    };
+  async getGeneration(conversationId: string, generationId: string): Promise<{ generation: ChatGeneration }> {
+    const generation = this.generations.get(generationId);
+    if (!generation || generation.conversationId !== conversationId) throw new Error('Generation not found');
+    return { generation };
+  }
+
+  async cancelGeneration(conversationId: string, generationId: string, _idempotencyKey?: string): Promise<{ generation: ChatGeneration }> {
+    const { generation } = await this.getGeneration(conversationId, generationId);
+    if (generation.status === 'streaming' || generation.status === 'pending') {
+      const stopped = { ...generation, status: 'stopped' as const, finishReason: 'cancelled' as const, cancelRequestedAt: new Date().toISOString() };
+      this.generations.set(generationId, { ...this.generations.get(generationId)!, ...stopped });
+      return { generation: stopped };
+    }
+    return { generation };
   }
 
   // Agent Runs

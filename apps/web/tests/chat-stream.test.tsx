@@ -163,6 +163,9 @@ describe('Chat Stream Finalization Regression Tests', () => {
       expect(screen.getByRole('button', { name: /Stop/i })).toBeDefined();
     });
 
+    // Wait for admission before Stop can durably target a generation.
+    await waitFor(() => expect(cancelSignal).toBeDefined());
+    await waitFor(() => expect((screen.getByRole('button', { name: /Stop/i }) as HTMLButtonElement).disabled).toBe(false));
     // Click stop
     fireEvent.click(screen.getByRole('button', { name: /Stop/i }));
 
@@ -171,16 +174,16 @@ describe('Chat Stream Finalization Regression Tests', () => {
       expect(screen.getByText(/Response stopped by user/i)).toBeDefined();
     });
 
-    // Verify stop indicator was persisted without duplicate messages
+    // Incomplete output is generation state, never a fabricated completed answer.
     const convs = await mockDataAdapter.listConversations();
     const activeConvId = convs.items[0].id;
     const convData = await mockDataAdapter.getConversation(activeConvId);
-    const assistantMsgs = convData.messages.filter((m) => m.role === 'assistant');
-    const stoppedMsgs = assistantMsgs.filter((m) => m.content.includes('*[Response stopped by user]*'));
-
-    expect(stoppedMsgs.length).toBe(1);
-    expect(stoppedMsgs[0].content).toContain('Initial chunk received...');
-    expect(stoppedMsgs[0].content).toContain('*[Response stopped by user]*');
+    const userId = convData.messages.filter(m => m.role === 'user').at(-1)!.id;
+    const variants = await mockDataAdapter.getTurnVariants(activeConvId, userId);
+    const stopped = await mockDataAdapter.getGeneration(activeConvId, variants.items.at(-1)!.id);
+    expect(stopped.generation.status).toBe('stopped');
+    expect(stopped.generation.partialContent).toContain('Initial chunk received...');
+    expect(convData.messages.filter(m => m.role === 'assistant')).toHaveLength(0);
 
     simulateSpy.mockRestore();
   });

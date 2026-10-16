@@ -8,6 +8,8 @@ export interface ComposerProps {
   onSend: (content: string) => void;
   onStop: () => void;
   isStreaming: boolean;
+  isStopping?: boolean;
+  canStop?: boolean;
   disabled?: boolean;
   models?: readonly ModelMetadata[];
   selectedModelId?: string;
@@ -20,6 +22,8 @@ export const Composer: React.FC<ComposerProps> = ({
   onSend,
   onStop,
   isStreaming,
+  isStopping = false,
+  canStop = true,
   disabled = false,
   models,
   selectedModelId,
@@ -174,11 +178,12 @@ export const Composer: React.FC<ComposerProps> = ({
             type="button"
             variant="danger"
             onClick={onStop}
+            disabled={isStopping || !canStop}
             title="Stop Generating"
             aria-label="Stop Generating"
             icon={<StopIcon size={16} />}
           >
-            Stop
+            {isStopping ? 'Stopping…' : 'Stop'}
           </Button>
         ) : (
           <Button
