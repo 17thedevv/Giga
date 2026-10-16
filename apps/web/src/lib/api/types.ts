@@ -32,6 +32,40 @@ export interface Message {
 }
 
 // ==========================================
+// Model Capabilities & Reasoning (Task 17T-41 / 17T-42)
+// ==========================================
+
+export type Capability =
+  | 'text'
+  | 'streaming'
+  | 'structured'
+  | 'embeddings'
+  | 'tool_calling';
+
+export type ReasoningEffort = 'low' | 'medium' | 'high';
+
+export const VALID_REASONING_EFFORTS: readonly ReasoningEffort[] = [
+  'low',
+  'medium',
+  'high',
+] as const;
+
+export interface ModelReasoningConfig {
+  readonly supported: boolean;
+  readonly efforts: readonly ReasoningEffort[];
+}
+
+export interface ModelMetadata {
+  readonly id: string;
+  readonly capabilities: readonly Capability[];
+  readonly reasoning: ModelReasoningConfig;
+}
+
+export interface ModelsResponse {
+  readonly models: ModelMetadata[];
+}
+
+// ==========================================
 // GigaChat Runtime & Streaming Types (Task 17T-33 / GigaChat v0.2)
 // ==========================================
 
@@ -53,6 +87,7 @@ export interface ChatGeneration {
   readonly userMessageId: string;
   readonly assistantMessageId?: string;
   readonly modelId: string;
+  readonly reasoningEffort?: ReasoningEffort;
   readonly status: GenerationStatus;
   readonly partialContent: string;
   readonly finishReason?: ChatFinishReason;
@@ -66,6 +101,7 @@ export interface ChatGeneration {
 export interface StreamChatRequest {
   readonly content: string;
   readonly modelId?: string;
+  readonly reasoningEffort?: ReasoningEffort;
 }
 
 export interface MessageStartedEventData {

@@ -1,14 +1,21 @@
 import React, { useState } from 'react';
 import type { Message } from '../../lib/api/types.js';
-import { CopyIcon, CheckIcon } from '../../components/Icons.js';
+import { CopyIcon, CheckIcon, RefreshCwIcon } from '../../components/Icons.js';
 import { Badge } from '../../components/Badge.js';
 
 interface MessageBubbleProps {
   message: Message;
   isStreaming?: boolean;
+  onRegenerate?: (message: Message) => void;
+  canRegenerate?: boolean;
 }
 
-export const MessageBubble: React.FC<MessageBubbleProps> = ({ message, isStreaming = false }) => {
+export const MessageBubble: React.FC<MessageBubbleProps> = ({
+  message,
+  isStreaming = false,
+  onRegenerate,
+  canRegenerate = true,
+}) => {
   const isUser = message.role === 'user';
   const [copied, setCopied] = useState(false);
 
@@ -70,26 +77,55 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({ message, isStreami
       </div>
 
       {!isUser && !isStreaming && (
-        <button
-          onClick={handleCopy}
-          style={{
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: '4px',
-            background: 'transparent',
-            border: 'none',
-            color: 'var(--giga-text-muted, #94A3B8)',
-            fontSize: '12px',
-            cursor: 'pointer',
-            marginTop: '6px',
-            padding: '2px 4px',
-            borderRadius: 'var(--giga-radius-sm, 4px)',
-          }}
-          title="Copy message content"
-        >
-          {copied ? <CheckIcon size={14} /> : <CopyIcon size={14} />}
-          <span>{copied ? 'Copied' : 'Copy'}</span>
-        </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '6px' }}>
+          <button
+            onClick={handleCopy}
+            data-testid={`copy-btn-${message.id}`}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '4px',
+              background: 'transparent',
+              border: 'none',
+              color: 'var(--giga-text-muted, #94A3B8)',
+              fontSize: '12px',
+              cursor: 'pointer',
+              padding: '2px 4px',
+              borderRadius: 'var(--giga-radius-sm, 4px)',
+            }}
+            title="Copy message content"
+            aria-label="Copy message content"
+          >
+            {copied ? <CheckIcon size={14} /> : <CopyIcon size={14} />}
+            <span>{copied ? 'Copied' : 'Copy'}</span>
+          </button>
+
+          {onRegenerate && (
+            <button
+              onClick={() => onRegenerate(message)}
+              disabled={!canRegenerate}
+              data-testid={`regenerate-btn-${message.id}`}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '4px',
+                background: 'transparent',
+                border: 'none',
+                color: !canRegenerate ? 'var(--giga-border, #475569)' : 'var(--giga-text-muted, #94A3B8)',
+                fontSize: '12px',
+                cursor: !canRegenerate ? 'not-allowed' : 'pointer',
+                padding: '2px 4px',
+                borderRadius: 'var(--giga-radius-sm, 4px)',
+                opacity: !canRegenerate ? 0.6 : 1,
+              }}
+              title={message.status === 'failed' || message.status === 'stopped' ? 'Retry generation' : 'Regenerate response'}
+              aria-label={message.status === 'failed' || message.status === 'stopped' ? 'Retry generation' : 'Regenerate response'}
+            >
+              <RefreshCwIcon size={14} />
+              <span>{message.status === 'failed' || message.status === 'stopped' ? 'Retry' : 'Regenerate'}</span>
+            </button>
+          )}
+        </div>
       )}
     </div>
   );

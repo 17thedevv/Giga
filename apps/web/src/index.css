@@ -95,6 +95,9 @@ pre, code {
   .mobile-header {
     display: none !important;
   }
+  .mobile-chat-bar {
+    display: none !important;
+  }
 }
 
 @media (max-width: 768px) {
@@ -103,5 +106,18 @@ pre, code {
   }
   .desktop-nav {
     display: none !important;
+  }
+  .giga-chat-sidebar {
+    display: none !important;
+  }
+  .giga-chat-sidebar.is-mobile-open {
+    display: flex !important;
+    position: fixed;
+    top: 56px;
+    left: 0;
+    bottom: 0;
+    width: 280px;
+    z-index: 50;
+    box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
   }
 }

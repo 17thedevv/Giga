@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useRouter } from '../../app/router.js';
 import { useApiMode } from '../../app/context/ApiModeContext.js';
-import type { Conversation, Message } from '../../lib/api/types.js';
+import type { Conversation, Message, ModelMetadata, ReasoningEffort } from '../../lib/api/types.js';
 import { realApiClient, ApiException } from '../../lib/api/client.js';
 import { mockDataAdapter } from '../../lib/api/mock-adapter.js';
 import { ConversationSidebar } from './ConversationSidebar.js';
@@ -10,6 +10,10 @@ import { Composer } from './Composer.js';
 import { Alert } from '../../components/Alert.js';
 import { Button } from '../../components/Button.js';
 import { GigaLogo } from '../../components/GigaLogo.js';
+import {
+  normalizeModelMetadata,
+  getEffectiveReasoningEffort,
+} from './model-capabilities.js';
 
 const MAX_POLL_ATTEMPTS = 5;
 const POLL_INTERVAL_MS = 150;
@@ -34,11 +38,17 @@ export const ChatView: React.FC = () => {
 
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [models, setModels] = useState<ModelMetadata[]>([]);
+  const [selectedModelId, setSelectedModelId] = useState<string>('');
+  const [selectedReasoningEffort, setSelectedReasoningEffort] = useState<ReasoningEffort | undefined>(
+    undefined
+  );
   const [isLoading, setIsLoading] = useState(false);
   const [isMessagesLoading, setIsMessagesLoading] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamingText, setStreamingText] = useState('');
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
+  const [showMobileSidebar, setShowMobileSidebar] = useState(false);
 
   const abortControllerRef = useRef<AbortController | null>(null);
   const accumulatedTextRef = useRef('');
@@ -49,6 +59,7 @@ export const ChatView: React.FC = () => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messageLoadRequestIdRef = useRef(0);
   const conversationsLoadRequestIdRef = useRef(0);
+  const modelsLoadRequestIdRef = useRef(0);
 
   // Auto-scroll helper
   const scrollToBottom = () => {
@@ -85,6 +96,9 @@ export const ChatView: React.FC = () => {
     activeGenerationIdRef.current = null;
     isStoppingRef.current = false;
     setErrorBanner(null);
+    setModels([]);
+    setSelectedModelId('');
+    setSelectedReasoningEffort(undefined);
   }, [mode]);
 
   // Load conversations list
@@ -136,6 +150,82 @@ export const ChatView: React.FC = () => {
   useEffect(() => {
     loadConversations();
   }, [loadConversations]);
+
+  // Load available models and their capabilities
+  const loadModels = useCallback(async () => {
+    const reqId = ++modelsLoadRequestIdRef.current;
+    try {
+      const res =
+        mode === 'real'
+          ? await realApiClient.listModels()
+          : await mockDataAdapter.listModels();
+      if (modelsLoadRequestIdRef.current !== reqId) return;
+      const normalized = (res.models || []).map(normalizeModelMetadata);
+      setModels(normalized);
+      if (normalized.length > 0) {
+        setSelectedModelId((prev) => {
+          if (prev && normalized.some((m) => m.id === prev)) return prev;
+          if (typeof window !== 'undefined' && window.location) {
+            const urlModel = new URLSearchParams(window.location.search).get('model');
+            if (urlModel && normalized.some((m) => m.id === urlModel)) return urlModel;
+          }
+          return normalized[0].id;
+        });
+
+        if (typeof window !== 'undefined' && window.location) {
+          const urlEffort = new URLSearchParams(window.location.search).get('effort');
+          if (urlEffort === 'low' || urlEffort === 'medium' || urlEffort === 'high') {
+            setSelectedReasoningEffort(urlEffort);
+          }
+        }
+      } else {
+        setModels([]);
+        setSelectedModelId('');
+        setSelectedReasoningEffort(undefined);
+      }
+    } catch {
+      if (modelsLoadRequestIdRef.current !== reqId) return;
+      setModels([]);
+      setSelectedModelId('');
+      setSelectedReasoningEffort(undefined);
+    }
+  }, [mode]);
+
+  useEffect(() => {
+    loadModels();
+  }, [loadModels]);
+
+  // Model selection handler that enforces capability fencing:
+  // When switching models, existing reasoning selection MUST be cleared if not supported by the new model.
+  const handleSelectModel = useCallback(
+    (modelId: string) => {
+      setSelectedModelId(modelId);
+      const targetModel = models.find((m) => m.id === modelId);
+      if (
+        !targetModel ||
+        !targetModel.reasoning?.supported ||
+        !selectedReasoningEffort ||
+        !targetModel.reasoning.efforts.includes(selectedReasoningEffort)
+      ) {
+        setSelectedReasoningEffort(undefined);
+      }
+    },
+    [models, selectedReasoningEffort]
+  );
+
+  // Synchronize reasoning selection if models list changes
+  useEffect(() => {
+    if (selectedReasoningEffort) {
+      const activeModel = models.find((m) => m.id === selectedModelId);
+      if (
+        !activeModel ||
+        !activeModel.reasoning?.supported ||
+        !activeModel.reasoning.efforts.includes(selectedReasoningEffort)
+      ) {
+        setSelectedReasoningEffort(undefined);
+      }
+    }
+  }, [models, selectedModelId, selectedReasoningEffort]);
 
   // Authoritative reconciliation via GET generation
   const reconcileAuthoritativeGeneration = useCallback(
@@ -482,6 +572,12 @@ export const ChatView: React.FC = () => {
     isStoppingRef.current = false;
     abortControllerRef.current = new AbortController();
 
+    const activeModel = models.find((m) => m.id === selectedModelId);
+    const effectiveReasoningEffort = getEffectiveReasoningEffort(
+      activeModel,
+      selectedReasoningEffort
+    );
+
     if (mode === 'real') {
       try {
         await realApiClient.streamMessage(
@@ -679,7 +775,11 @@ export const ChatView: React.FC = () => {
               }
             }
           },
-          { signal: abortControllerRef.current.signal }
+          {
+            signal: abortControllerRef.current.signal,
+            modelId: activeModel ? activeModel.id : undefined,
+            reasoningEffort: effectiveReasoningEffort,
+          }
         );
       } catch (err: unknown) {
         if (stopTimeoutRef.current) {
@@ -755,6 +855,336 @@ export const ChatView: React.FC = () => {
         setStreamingText('');
         accumulatedTextRef.current = '';
         setErrorBanner(err instanceof Error ? err.message : 'Stream error');
+      }
+    }
+  };
+
+  const handleRegenerateMessage = async (targetMessage: Message) => {
+    if (isStreaming) return;
+    const targetConvId = conversationIdRef.current;
+    if (!targetConvId) return;
+
+    // Locate the preceding user message to obtain userMessageId
+    const targetIdx = messages.findIndex((m) => m.id === targetMessage.id);
+    let userMessage: Message | undefined;
+    const searchFrom = targetIdx >= 0 ? targetIdx - 1 : messages.length - 1;
+    for (let i = searchFrom; i >= 0; i--) {
+      if (messages[i].role === 'user') {
+        userMessage = messages[i];
+        break;
+      }
+    }
+
+    if (!userMessage) {
+      setErrorBanner('No preceding user message found to regenerate');
+      return;
+    }
+
+    const userMessageId = userMessage.id;
+    const action: 'retry' | 'regenerate' =
+      targetMessage.status === 'failed' || targetMessage.status === 'stopped'
+        ? 'retry'
+        : 'regenerate';
+
+    // Recalculate effective reasoning effort dynamically at action invocation time
+    const activeModel = models.find((m) => m.id === selectedModelId);
+    const effectiveReasoningEffort = getEffectiveReasoningEffort(
+      activeModel,
+      selectedReasoningEffort
+    );
+
+    if (stopTimeoutRef.current) {
+      clearTimeout(stopTimeoutRef.current);
+      stopTimeoutRef.current = null;
+    }
+
+    setIsStreaming(true);
+    setStreamingText('');
+    accumulatedTextRef.current = '';
+    activeGenerationIdRef.current = null;
+    isStoppingRef.current = false;
+    abortControllerRef.current = new AbortController();
+
+    if (mode === 'real') {
+      try {
+        await realApiClient.streamVariant(
+          targetConvId,
+          userMessageId,
+          action,
+          async (event) => {
+            if (event.event === 'message.started') {
+              activeGenerationIdRef.current = event.data.generationId;
+            } else if (event.event === 'message.delta') {
+              const deltaGenId = event.data.generationId;
+              const isCurrentConv =
+                conversationIdRef.current === targetConvId ||
+                createdConversationIdRef.current === targetConvId;
+              if (
+                !isCurrentConv ||
+                (activeGenerationIdRef.current && deltaGenId && activeGenerationIdRef.current !== deltaGenId)
+              ) {
+                return;
+              }
+              accumulatedTextRef.current += event.data.text;
+              setStreamingText(accumulatedTextRef.current);
+            } else if (event.event === 'message.completed') {
+              const completedGenId = event.data.generationId;
+              const isCurrentConv =
+                conversationIdRef.current === targetConvId ||
+                createdConversationIdRef.current === targetConvId;
+              if (
+                !isCurrentConv ||
+                (activeGenerationIdRef.current && completedGenId && activeGenerationIdRef.current !== completedGenId)
+              ) {
+                return;
+              }
+
+              if (stopTimeoutRef.current) {
+                clearTimeout(stopTimeoutRef.current);
+                stopTimeoutRef.current = null;
+              }
+              const fullText = accumulatedTextRef.current;
+              setIsStreaming(false);
+              setStreamingText('');
+              accumulatedTextRef.current = '';
+
+              // Immediately commit regenerated assistant turn locally
+              setMessages((prev) => {
+                const updatedMsg: Message = {
+                  id: event.data.messageId,
+                  conversationId: targetConvId,
+                  role: 'assistant',
+                  content: fullText,
+                  createdAt: event.data.createdAt || new Date().toISOString(),
+                  status: 'completed',
+                };
+                const exists = prev.some((m) => m.id === targetMessage.id);
+                if (exists) {
+                  return prev.map((m) => (m.id === targetMessage.id ? updatedMsg : m));
+                }
+                return [...prev, updatedMsg];
+              });
+
+              // Reconcile messages from backend asynchronously
+              realApiClient
+                .getConversation(targetConvId)
+                .then((convRes) => {
+                  const isStillCurrent =
+                    conversationIdRef.current === targetConvId ||
+                    createdConversationIdRef.current === targetConvId;
+                  if (
+                    !isStillCurrent ||
+                    activeGenerationIdRef.current !== completedGenId
+                  ) {
+                    return;
+                  }
+                  if (
+                    convRes.messages.length > 0 &&
+                    convRes.messages.some((m) => m.role === 'assistant')
+                  ) {
+                    setMessages(convRes.messages);
+                  }
+                })
+                .catch(() => {})
+                .finally(() => {
+                  if (activeGenerationIdRef.current === completedGenId) {
+                    activeGenerationIdRef.current = null;
+                    isStoppingRef.current = false;
+                  }
+                });
+            } else if (event.event === 'message.failed') {
+              const failedGenId = event.data?.generationId || activeGenerationIdRef.current;
+              const isCurrentConv =
+                conversationIdRef.current === targetConvId ||
+                createdConversationIdRef.current === targetConvId;
+              if (
+                !isCurrentConv ||
+                (activeGenerationIdRef.current && failedGenId && activeGenerationIdRef.current !== failedGenId)
+              ) {
+                return;
+              }
+              if (stopTimeoutRef.current) {
+                clearTimeout(stopTimeoutRef.current);
+                stopTimeoutRef.current = null;
+              }
+              setIsStreaming(false);
+              const partial = accumulatedTextRef.current;
+              setStreamingText('');
+              accumulatedTextRef.current = '';
+              const errMsg = event.data?.error?.message || 'Variant generation failed';
+              setErrorBanner(errMsg);
+              if (partial) {
+                setMessages((prev) => {
+                  const failMsg: Message = {
+                    id: event.data?.messageId || `fail_${Date.now()}`,
+                    conversationId: targetConvId,
+                    role: 'assistant',
+                    content: partial,
+                    createdAt: new Date().toISOString(),
+                    status: 'failed',
+                  };
+                  const exists = prev.some((m) => m.id === targetMessage.id);
+                  if (exists) {
+                    return prev.map((m) => (m.id === targetMessage.id ? failMsg : m));
+                  }
+                  return [...prev, failMsg];
+                });
+              }
+              if (activeGenerationIdRef.current === failedGenId) {
+                activeGenerationIdRef.current = null;
+                isStoppingRef.current = false;
+              }
+            } else if (event.event === 'stream.error') {
+              const failedGenId = event.data?.generationId || activeGenerationIdRef.current;
+              const isCurrentConv =
+                conversationIdRef.current === targetConvId ||
+                createdConversationIdRef.current === targetConvId;
+              if (
+                !isCurrentConv ||
+                (activeGenerationIdRef.current && failedGenId && activeGenerationIdRef.current !== failedGenId)
+              ) {
+                return;
+              }
+              if (stopTimeoutRef.current) {
+                clearTimeout(stopTimeoutRef.current);
+                stopTimeoutRef.current = null;
+              }
+              setIsStreaming(false);
+              const partial = accumulatedTextRef.current;
+              setStreamingText('');
+              accumulatedTextRef.current = '';
+              const genId = activeGenerationIdRef.current;
+              const errMsg = event.data?.error?.message || 'Variant generation failed';
+
+              if (genId && targetConvId) {
+                await reconcileAuthoritativeGeneration(
+                  targetConvId,
+                  genId,
+                  errMsg,
+                  partial
+                );
+              } else {
+                setErrorBanner(errMsg);
+              }
+            } else if (event.event === 'message.stopped') {
+              const stoppedGenId = event.data?.generationId || activeGenerationIdRef.current;
+              const isCurrentConv =
+                conversationIdRef.current === targetConvId ||
+                createdConversationIdRef.current === targetConvId;
+              if (
+                !isCurrentConv ||
+                (activeGenerationIdRef.current && stoppedGenId && activeGenerationIdRef.current !== stoppedGenId)
+              ) {
+                return;
+              }
+              if (stopTimeoutRef.current) {
+                clearTimeout(stopTimeoutRef.current);
+                stopTimeoutRef.current = null;
+              }
+              const partial = accumulatedTextRef.current;
+              setIsStreaming(false);
+              setStreamingText('');
+              accumulatedTextRef.current = '';
+              const genId = activeGenerationIdRef.current;
+              if (genId && targetConvId) {
+                await reconcileAuthoritativeGeneration(targetConvId, genId, undefined, partial);
+              }
+            }
+          },
+          {
+            signal: abortControllerRef.current.signal,
+            modelId: activeModel ? activeModel.id : undefined,
+            reasoningEffort: effectiveReasoningEffort,
+          }
+        );
+      } catch (err: unknown) {
+        if (stopTimeoutRef.current) {
+          clearTimeout(stopTimeoutRef.current);
+          stopTimeoutRef.current = null;
+        }
+        const partial = accumulatedTextRef.current;
+        setIsStreaming(false);
+        setStreamingText('');
+        accumulatedTextRef.current = '';
+
+        const isAbort =
+          (err instanceof Error &&
+            (err.name === 'AbortError' || err.message.toLowerCase().includes('abort'))) ||
+          abortControllerRef.current?.signal.aborted;
+
+        const genId = activeGenerationIdRef.current;
+        const errMsg =
+          err instanceof ApiException
+            ? err.message
+            : err instanceof Error
+              ? err.message
+              : 'Variant stream error';
+
+        if (genId && targetConvId) {
+          await reconcileAuthoritativeGeneration(
+            targetConvId,
+            genId,
+            isAbort ? undefined : errMsg,
+            partial
+          );
+        } else {
+          if (!isAbort && !isStoppingRef.current) {
+            setErrorBanner(errMsg);
+          }
+        }
+      }
+    } else {
+      // Mock mode
+      try {
+        await mockDataAdapter.streamVariant(
+          targetConvId,
+          userMessageId,
+          action,
+          async (event) => {
+            if (event.event === 'message.started') {
+              activeGenerationIdRef.current = event.data.generationId;
+            } else if (event.event === 'message.delta') {
+              accumulatedTextRef.current += event.data.text;
+              setStreamingText(accumulatedTextRef.current);
+            } else if (event.event === 'message.completed') {
+              const fullText = accumulatedTextRef.current;
+              setIsStreaming(false);
+              setStreamingText('');
+              accumulatedTextRef.current = '';
+              const variantMsg: Message = {
+                id: event.data.messageId,
+                conversationId: targetConvId,
+                role: 'assistant',
+                content: fullText,
+                createdAt: event.data.createdAt || new Date().toISOString(),
+                status: 'completed',
+              };
+              setMessages((prev) => {
+                const exists = prev.some((m) => m.id === targetMessage.id);
+                if (exists) {
+                  return prev.map((m) => (m.id === targetMessage.id ? variantMsg : m));
+                }
+                return [...prev, variantMsg];
+              });
+              activeGenerationIdRef.current = null;
+            } else if (event.event === 'message.stopped') {
+              setIsStreaming(false);
+              setStreamingText('');
+              accumulatedTextRef.current = '';
+              activeGenerationIdRef.current = null;
+            }
+          },
+          {
+            signal: abortControllerRef.current.signal,
+            modelId: activeModel ? activeModel.id : undefined,
+            reasoningEffort: effectiveReasoningEffort,
+          }
+        );
+      } catch (err) {
+        setIsStreaming(false);
+        setStreamingText('');
+        accumulatedTextRef.current = '';
+        setErrorBanner(err instanceof Error ? err.message : 'Variant stream error');
       }
     }
   };
@@ -856,10 +1286,17 @@ export const ChatView: React.FC = () => {
       <ConversationSidebar
         conversations={conversations}
         activeId={conversationId}
-        onSelect={(id) => navigate(`/chat/${id}`)}
-        onCreate={handleCreateConversation}
+        onSelect={(id) => {
+          navigate(`/chat/${id}`);
+          setShowMobileSidebar(false);
+        }}
+        onCreate={() => {
+          handleCreateConversation();
+          setShowMobileSidebar(false);
+        }}
         onDelete={handleDeleteConversation}
         isLoading={isLoading}
+        isOpenOnMobile={showMobileSidebar}
       />
 
       {/* Main Chat Workspace */}
@@ -873,6 +1310,29 @@ export const ChatView: React.FC = () => {
           minWidth: 0,
         }}
       >
+        {/* Mobile Header Bar for discussions toggle (< 768px) */}
+        <div
+          className="mobile-chat-bar"
+          style={{
+            padding: '8px 16px',
+            borderBottom: '1px solid var(--giga-border, #1E293B)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            backgroundColor: 'var(--giga-surface, #111C2D)',
+          }}
+        >
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => setShowMobileSidebar(!showMobileSidebar)}
+          >
+            {showMobileSidebar ? '✕ Close Discussions' : '☰ Discussions'}
+          </Button>
+          <span style={{ fontSize: '12px', color: 'var(--giga-text-secondary, #94A3B8)' }}>
+            {models.find((m) => m.id === selectedModelId)?.id || 'GigaChat'}
+          </span>
+        </div>
         {/* Banner notification for Mock Mode */}
         {mode === 'mock' && (
           <div
@@ -975,9 +1435,18 @@ export const ChatView: React.FC = () => {
             </div>
           )}
 
-          {messages.map((msg) => (
-            <MessageBubble key={msg.id} message={msg} />
-          ))}
+          {messages.map((msg) => {
+            const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant');
+            const isLatestAssistant = msg.role === 'assistant' && msg.id === lastAssistant?.id;
+            return (
+              <MessageBubble
+                key={msg.id}
+                message={msg}
+                onRegenerate={isLatestAssistant ? handleRegenerateMessage : undefined}
+                canRegenerate={!isStreaming && isLatestAssistant}
+              />
+            );
+          })}
 
           {/* Active streaming bubble */}
           {isStreaming && streamingText && (
@@ -1002,6 +1471,11 @@ export const ChatView: React.FC = () => {
           onStop={handleStopStreaming}
           isStreaming={isStreaming}
           disabled={false}
+          models={models}
+          selectedModelId={selectedModelId}
+          onSelectModel={handleSelectModel}
+          reasoningEffort={selectedReasoningEffort}
+          onSelectReasoningEffort={setSelectedReasoningEffort}
         />
       </div>
     </div>

@@ -11,6 +11,7 @@ interface ConversationSidebarProps {
   onCreate: () => void;
   onDelete: (id: string) => void;
   isLoading?: boolean;
+  isOpenOnMobile?: boolean;
 }
 
 export const ConversationSidebar: React.FC<ConversationSidebarProps> = ({
@@ -20,11 +21,13 @@ export const ConversationSidebar: React.FC<ConversationSidebarProps> = ({
   onCreate,
   onDelete,
   isLoading = false,
+  isOpenOnMobile = false,
 }) => {
   const [deleteCandidate, setDeleteCandidate] = useState<Conversation | null>(null);
 
   return (
     <aside
+      className={`giga-chat-sidebar ${isOpenOnMobile ? 'is-mobile-open' : ''}`.trim()}
       style={{
         width: '280px',
         backgroundColor: 'var(--giga-surface, #111C2D)',
