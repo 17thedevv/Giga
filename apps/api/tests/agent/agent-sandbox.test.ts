@@ -11,7 +11,7 @@ import {
   SimulatedCloudSandboxProviderClient,
 } from '../../src/modules/agent/sandbox-adapter.js';
 import { createDefaultToolRegistry, isSafeRelativePath } from '../../src/modules/agent/tool-registry.js';
-import type { AgentMode, ToolRisk } from '../../src/modules/agent/types.js';
+import type { ToolRisk } from '../../src/modules/agent/types.js';
 
 describe('GigaAgent Isolated Sandbox Adapter & Cloud Security Gate (17T-47)', () => {
   const dummyOwnerId = randomUUID();
@@ -545,7 +545,6 @@ describe('GigaAgent Isolated Sandbox Adapter & Cloud Security Gate (17T-47)', ()
   describe('7. Fail-Closed Behavior & Unavailable Runtimes', () => {
     it('UnavailableExecutionRuntime cleanly returns RUNTIME_UNAVAILABLE without crashing', async () => {
       const runtime = new UnavailableExecutionRuntime();
-      const ac = new AbortController();
 
       const prep = await runtime.prepare();
       assert.equal(prep.available, false);
