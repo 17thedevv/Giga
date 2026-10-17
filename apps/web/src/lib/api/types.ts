@@ -104,6 +104,23 @@ export interface StreamChatRequest {
   readonly reasoningEffort?: ReasoningEffort;
 }
 
+// Mirrors the implemented latest-turn inspection DTO (API remains DRAFT).
+export interface ChatTurnVariants {
+  readonly userMessageId: string;
+  readonly selectedGenerationId: string | null;
+  readonly items: readonly {
+    readonly id: string;
+    readonly action: 'new_prompt' | 'retry' | 'regenerate';
+    readonly modelId: string;
+    readonly status: GenerationStatus;
+    readonly assistantMessageId?: string;
+    readonly content?: string;
+    readonly createdAt: string;
+    readonly finishedAt?: string;
+    readonly reasoningEffort?: ReasoningEffort;
+  }[];
+}
+
 export interface MessageStartedEventData {
   readonly messageId: string;
   readonly generationId: string;
