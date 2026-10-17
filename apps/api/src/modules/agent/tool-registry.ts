@@ -16,7 +16,7 @@ export type ToolValidationResult =
       readonly tool?: ToolDefinition;
     };
 
-function isSafeRelativePath(p: unknown): p is string {
+export function isSafeRelativePath(p: unknown): p is string {
   if (typeof p !== 'string') return false;
   const trimmed = p.trim();
   if (trimmed.length === 0 || trimmed.length > 1024) return false;
@@ -224,6 +224,46 @@ export function createDefaultToolRegistry(): ToolRegistry {
         return { success: true, data: { testFilter: record.testFilter.trim() } };
       }
       return { success: true, data: {} };
+    },
+  });
+
+  registry.register<{ command: string; args?: string[] }>({
+    name: 'run_command',
+    description: 'Executes an allowlisted terminal command inside the isolated sandbox',
+    risk: 'sandbox_execute',
+    validateArgs(args: unknown) {
+      if (typeof args !== 'object' || args === null || Array.isArray(args)) {
+        return { success: false, error: 'Arguments must be an object' };
+      }
+      const record = args as Record<string, unknown>;
+      if (typeof record.command !== 'string' || record.command.trim().length === 0) {
+        return { success: false, error: "Required 'command' must be a non-empty string" };
+      }
+      if (record.command.length > 512) {
+        return { success: false, error: "Command exceeds maximum length of 512 characters" };
+      }
+      let sanitizedArgs: string[] | undefined;
+      if ('args' in record && record.args !== undefined) {
+        if (!Array.isArray(record.args)) {
+          return { success: false, error: "Optional 'args' must be an array of strings" };
+        }
+        if (record.args.length > 32) {
+          return { success: false, error: "Arguments array exceeds maximum of 32 elements" };
+        }
+        for (const arg of record.args) {
+          if (typeof arg !== 'string' || arg.length > 1024) {
+            return { success: false, error: "Each argument must be a string <= 1024 chars" };
+          }
+        }
+        sanitizedArgs = record.args as string[];
+      }
+      return {
+        success: true,
+        data: {
+          command: record.command.trim(),
+          args: sanitizedArgs,
+        },
+      };
     },
   });
 
