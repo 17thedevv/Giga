@@ -29,7 +29,7 @@ export interface PrepareRuntimeRequest {
 }
 
 export type PrepareRuntimeResult =
-  | { readonly available: false; readonly code: 'RUNTIME_UNAVAILABLE'; readonly reason?: string }
+  | { readonly available: false; readonly code: 'RUNTIME_UNAVAILABLE' | 'TENANT_MISMATCH'; readonly reason?: string }
   | { readonly available: true; readonly sessionId: string };
 
 /** Future execution-plane port. No host command, filesystem, credential or provider transport belongs here. */
@@ -136,6 +136,28 @@ export class DeterministicFakeExecutionRuntime implements ExecutionRuntime {
     }
 
     const sessionId = `fake-session-${request.runId}`;
+
+    const existing = this.sessions.get(sessionId);
+    if (existing) {
+      if (existing.ownerId !== request.ownerId || existing.workspaceId !== request.workspaceId) {
+        return {
+          available: false,
+          code: 'TENANT_MISMATCH',
+          reason: `Session for run '${request.runId}' belongs to another owner or workspace`,
+        };
+      }
+      if (existing.active) {
+        if (existing.mode !== request.mode) {
+          return {
+            available: false,
+            code: 'TENANT_MISMATCH',
+            reason: `Active session for run '${request.runId}' was prepared in '${existing.mode}' mode, cannot reuse in '${request.mode}' mode`,
+          };
+        }
+        return { available: true, sessionId };
+      }
+    }
+
     const files = new Map<string, string>();
     if (this.options.initialFiles) {
       for (const [p, content] of Object.entries(this.options.initialFiles)) {
@@ -409,6 +431,10 @@ export class DeterministicFakeExecutionRuntime implements ExecutionRuntime {
       }
 
       case 'run_command': {
+        // Verification freshness: Any command execution can alter workspace filesystem state,
+        // so existing verification evidence (run_build / run_tests) must be invalidated.
+        session.verifiedChecks.clear();
+
         const command = (toolCall.args.command as string | undefined)?.trim() ?? '';
         const args = Array.isArray(toolCall.args.args) ? (toolCall.args.args as string[]) : undefined;
 

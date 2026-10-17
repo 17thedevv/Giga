@@ -6,7 +6,7 @@
 **PR Title:** `feat(agent): prepare isolated sandbox runtime`<br>
 **Owner:** Trà (Agent / Backend)<br>
 **Reviewer:** Tráng A Thư (Frontend / UX)<br>
-**Review Status:** Addressed Peer Review (Review ID: 5559301292). Ready for Re-Review (Draft PR, unmerged)
+**Review Status:** Addressed Peer Review (Review ID: 5559539993). Ready for Re-Review (Draft PR, unmerged)
 
 ---
 
@@ -14,26 +14,29 @@
 
 This task prepares the **isolated execution plane** for GigaAgent without making the API host a runtime for AI-generated code. It implements the security preflight gates outlined in [ADR-003](../decisions/ADR-003-agentic-workspace-and-isolated-runtime.md), [GIGA_AGENT_RUNTIME_SECURITY_V0.2](../architecture/GIGA_AGENT_RUNTIME_SECURITY_V0.2.md), and locked architecture invariant **INV-07** (*no model-generated shell execution on the Hono/API host*).
 
-### Resolutions to Peer Review (Review ID: 5559301292):
+### Resolutions to Peer Review (Review ID: 5559539993):
 
-1. **P1 — Verification Freshness Across Runs (`sandbox-adapter.ts` & `execution-runtime.ts`):**
-   - **Problem:** Prior implementations allowed stale verification checks (`run_build: passed`) to persist across subsequent file edits (`write_file`, `edit_file`) or subsequent build timeouts/errors, potentially bypassing the completion gate.
-   - **Resolution:** Any mutating file modification (`write_file`, `edit_file`) immediately purges all verification evidence (`session.verifiedChecks.clear()`). In addition, invoking a new verification attempt (`run_build`, `run_tests`) immediately deletes prior checks of that type (`session.verifiedChecks.delete('run_build')`), and if the invocation times out or errors, that check is deleted in the catch block to guarantee stale passes cannot survive.
-   - **Verification:** Covered by test `verification freshness: file edit invalidates PASS and subsequent build timeout denies completion`.
+1. **P1 — Verification Freshness with `run_command` (`sandbox-adapter.ts` & `execution-runtime.ts`):**
+   - **Problem:** Prior implementations only invalidated `verifiedChecks` on `write_file` or `edit_file`. However, arbitrary shell commands executed via `run_command` can mutate workspace files (scripts, code generators, build artifacts, installs), allowing a previous `run_build: passed` check to falsely satisfy the completion gate on stale/broken files.
+   - **Resolution:** `session.verifiedChecks.clear()` is now executed immediately upon `run_command` in both `DeterministicFakeExecutionRuntime` and `IsolatedCloudSandboxAdapter`.
+   - **Verification:** Covered by test `verification freshness: run_command invalidates prior PASS and prevents completion on stale build` (verifies in-memory mutated files with `customCommandRunner` and cloud adapter).
 
-2. **P1 — Immediate Cancellation Responsiveness (`sandbox-adapter.ts`):**
-   - **Problem:** Passing `signal` to remote provider RPC was insufficient if the remote provider client deadlock, hanged, or uncooperatively ignored the abort signal, causing the caller to wait up to the full 60s timeout.
-   - **Resolution:** Added an immediate abort listener promise (`abortPromise`) to `Promise.race([executionPromise, timeoutPromise, abortPromise])`. When the caller signal aborts, the adapter immediately rejects within milliseconds (<100ms) with `TIMEOUT`, while scheduling background disposal of the unresponsive remote session.
-   - **Verification:** Covered by test `cancellation responsiveness: user abort returns immediately without waiting for uncooperative provider or timeout`.
+2. **P1 — Immediate Termination on `stop()` with Uncooperative Provider (`sandbox-adapter.ts`):**
+   - **Problem:** `abortPromise` was previously only listening to caller's `AbortSignal`. When `adapter.stop(sessionId)` was called directly on an active session with an uncooperative provider (a provider that hung or ignored cancellation signals), `invoke()` waited up to the 60s timeout.
+   - **Resolution:** Connected `timeoutController.signal` directly to an internal stop listener in `abortPromise`. Calling `stop(sessionId)` immediately terminates `invoke()` within milliseconds (<100ms) with `errorCode: 'SESSION_NOT_FOUND'`, while maintaining late-result fencing so any eventual provider RPC response never mutates `verifiedChecks`.
+   - **Verification:** Covered by test `stop(sessionId) responsiveness: invoke terminates immediately when stop() is called with uncooperative provider`.
 
-3. **P1 — Duplicate Sandbox Allocation Prevention (`sandbox-adapter.ts`):**
-   - **Problem:** Multiple concurrent or sequential calls to `prepare()` with the same `runId` could overwrite in-memory sessions or leak orphaned remote sandboxes.
-   - **Resolution:** Added `inFlightPrepares` map tracking active allocation promises per `runId`. Concurrent requests join the exact same in-flight promise. Sequential calls detect existing active sessions and return them idempotently. If a prior session is in a failed or inactive state, it is safely cleaned up before allocating a new sandbox.
-   - **Verification:** Covered by test `duplicate allocation prevention: handles concurrent and sequential prepare calls without leaking sandboxes`.
+3. **P1 — Tenant and Mode Boundary Enforcement on Duplicate `runId` (`sandbox-adapter.ts` & `execution-runtime.ts`):**
+   - **Problem:** Idempotent session reuse in `prepare()` previously returned active sessions without verifying `ownerId`, `workspaceId`, and `mode`. Similarly, concurrent in-flight allocations did not check tenant/mode matching, allowing potential cross-tenant or cross-mode session hijacking.
+   - **Resolution:**
+     - Sequential prepare explicitly checks `existing.ownerId === request.ownerId`, `existing.workspaceId === request.workspaceId`, and `existing.mode === request.mode`. Any mismatch fails closed with `{ available: false, code: 'TENANT_MISMATCH' }`.
+     - Concurrent prepare tracks `{ ownerId, workspaceId, mode, promise }` in `inFlightPrepares`. Mismatched requests fail closed immediately with `code: 'TENANT_MISMATCH'`.
+     - Enforced across both `DeterministicFakeExecutionRuntime` and `IsolatedCloudSandboxAdapter`.
+   - **Verification:** Covered by test `duplicate allocation security: rejects mismatched tenant or mode on existing active session and in-flight prepare`.
 
 4. **P2 — Accurate CI Environment & Total Test Count:**
    - CI environment: **PostgreSQL 16.15 on Alpine Linux** container with Node.js 22.
-   - Test suite: **464 total tests, 32 sandbox tests (32/32 PASS, 0 failures)**.
+   - Test suite: **467 total tests, 35 sandbox tests (35/35 PASS, 0 failures)**.
 
 ---
 
@@ -202,34 +205,37 @@ This task prepares the **isolated execution plane** for GigaAgent without making
     ✔ strict byte budgeting: sanitizeSandboxOutput never exceeds maxBytes regardless of truncation marker or unicode (0.7981ms)
     ✔ late allocation + destroy failure: retains failed sandbox destruction in pending destructions and allows retry (43.2704ms)
     ✔ late RPC completion fencing: late provider execution after timeout or session stop does not mutate verification evidence (123.2011ms)
-    ✔ provider error message sanitization: redacts sensitive credentials from allocation reasons and RPC error messages (0.7385ms)
-    ✔ verification freshness: file edit invalidates PASS and subsequent build timeout denies completion (0.422ms)
-    ✔ cancellation responsiveness: user abort returns immediately without waiting for uncooperative provider or timeout (29.6191ms)
-    ✔ duplicate allocation prevention: handles concurrent and sequential prepare calls without leaking sandboxes (30.6519ms)
-  ✔ 8. Isolated Cloud Sandbox Adapter with Simulated Remote MicroVM (306.3248ms)
-✔ GigaAgent Isolated Sandbox Adapter & Cloud Security Gate (17T-47) (348.4565ms)
-ℹ tests 32
+    ✔ provider error message sanitization: redacts sensitive credentials from allocation reasons and RPC error messages (0.6456ms)
+    ✔ verification freshness: file edit invalidates PASS and subsequent build timeout denies completion (0.4057ms)
+    ✔ cancellation responsiveness: user abort returns immediately without waiting for uncooperative provider or timeout (29.4949ms)
+    ✔ duplicate allocation prevention: handles concurrent and sequential prepare calls without leaking sandboxes (30.7715ms)
+    ✔ verification freshness: run_command invalidates prior PASS and prevents completion on stale build (0.7337ms)
+    ✔ stop(sessionId) responsiveness: invoke terminates immediately when stop() is called with uncooperative provider (91.9063ms)
+    ✔ duplicate allocation security: rejects mismatched tenant or mode on existing active session and in-flight prepare (47.1897ms)
+  ✔ 8. Isolated Cloud Sandbox Adapter with Simulated Remote MicroVM (450.096ms)
+✔ GigaAgent Isolated Sandbox Adapter & Cloud Security Gate (17T-47) (490.5923ms)
+ℹ tests 35
 ℹ suites 9
-ℹ pass 32
+ℹ pass 35
 ℹ fail 0
 ℹ cancelled 0
 ℹ skipped 0
 ℹ todo 0
-ℹ duration_ms 3503.0897
+ℹ duration_ms 3532.9267
 ```
 
 ### B. Full Backend CI Test Evidence (GitHub Actions & Real PostgreSQL 16.15)
 
 ```text
-ℹ tests 464
+ℹ tests 467
 ℹ suites 64
-ℹ pass 464
+ℹ pass 467
 ℹ fail 0
 ℹ cancelled 0
 ℹ skipped 0
 ℹ todo 0
 ```
-- Total tests: 464 / 464 PASS
+- Total tests: 467 / 467 PASS
 - Zero failures, zero skipped in GitHub Actions CI container with PostgreSQL 16-alpine service.
 - Environment: PostgreSQL 16.15 on Alpine Linux (`image: postgres:16-alpine`), Node.js 22.
 
@@ -250,13 +256,13 @@ This task prepares the **isolated execution plane** for GigaAgent without making
 - [x] Canonical secret redaction: extracted to `redaction.ts` and verified with regression tests.
 - [x] Post-allocation abort fencing & reconciliation: failed destructions recorded in `this.sessions` with `destroyStatus: 'destroy_failed'` and recoverable via `retryDestroy()`.
 - [x] Independent adapter-level wall-clock timeout & late RPC fencing: late provider completions after timeout or stop are fenced from mutating `session.verifiedChecks`.
-- [x] Verification freshness across runs: mutating file edits purge stale passes; failed/timed out verification attempts cannot preserve prior passes.
-- [x] Immediate cancellation responsiveness: user abort returns immediately without hanging on uncooperative provider RPC.
-- [x] Duplicate allocation prevention: concurrent and sequential `prepare()` calls deduplicated without leaking remote sandboxes.
+- [x] Verification freshness across runs: mutating file edits and command execution purge stale passes; failed/timed out verification attempts cannot preserve prior passes.
+- [x] Immediate cancellation responsiveness: caller abort and adapter `stop()` return immediately without hanging on uncooperative provider RPC.
+- [x] Duplicate allocation security: concurrent and sequential `prepare()` calls strictly validate tenant and mode identity and reject mismatches (`TENANT_MISMATCH`).
 - [x] Provider error sanitization: all allocation reasons and command error messages are sanitized and bounded.
 - [x] Strict byte budget: `sanitizeSandboxOutput` guarantees `byteLength <= maxBytes` accounting for truncation marker.
 - [x] Network egress policy enforced fail-closed at adapter boundary and honestly labeled as pending live cloud validation.
-- [x] 32/32 sandbox tests passing; 464/464 total backend tests passing.
+- [x] 35/35 sandbox tests passing; 467/467 total backend tests passing.
 - [x] Zero billable cloud resources provisioned during development or testing.
 - [x] Evidence document updated at `docs/evidence/17T-47-sandbox-preflight.md`.
 - [x] Ready to push updated commit to Draft PR #33 for Thư's re-review.

@@ -109,7 +109,15 @@ export function sanitizeSandboxOutput(text: string, maxBytes: number): string {
 export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
   readonly kind = 'cloud' as const;
   private readonly sessions = new Map<string, CloudSessionState>();
-  private readonly inFlightPrepares = new Map<string, Promise<PrepareRuntimeResult>>();
+  private readonly inFlightPrepares = new Map<
+    string,
+    {
+      readonly ownerId: string;
+      readonly workspaceId: string;
+      readonly mode: AgentMode;
+      readonly promise: Promise<PrepareRuntimeResult>;
+    }
+  >();
   private readonly providerClient?: CloudSandboxProviderClient;
   private readonly defaultTimeoutMs: number;
   private readonly maxOutputBytes: number;
@@ -152,14 +160,29 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
     const timeoutMs = request.timeoutMs ?? this.defaultTimeoutMs;
     const sessionId = `cloud-session-${request.runId}`;
 
-    // 1. Sequential idempotency check:
+    // 1. Sequential idempotency check with tenant and mode boundary validation:
     const existing = this.sessions.get(sessionId);
     if (existing) {
+      if (existing.ownerId !== request.ownerId || existing.workspaceId !== request.workspaceId) {
+        return {
+          available: false,
+          code: 'TENANT_MISMATCH',
+          reason: `Session for run '${request.runId}' belongs to another owner or workspace`,
+        };
+      }
+
       if (existing.active) {
-        // Active session already allocated and ready for this runId.
-        // Return existing sessionId without duplicate cloud allocation!
+        if (existing.mode !== request.mode) {
+          return {
+            available: false,
+            code: 'TENANT_MISMATCH',
+            reason: `Active session for run '${request.runId}' was prepared in '${existing.mode}' mode, cannot reuse in '${request.mode}' mode`,
+          };
+        }
+        // Active session already allocated and ready for this runId with matching tenant and mode.
         return { available: true, sessionId };
       }
+
       // Previous session exists but is inactive / destroyed / failed.
       if (existing.destroyStatus !== 'destroyed') {
         try {
@@ -174,10 +197,21 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
       }
     }
 
-    // 2. Concurrent prepare deduplication:
+    // 2. Concurrent prepare deduplication with tenant and mode boundary validation:
     const inFlight = this.inFlightPrepares.get(request.runId);
     if (inFlight) {
-      return await inFlight;
+      if (
+        inFlight.ownerId !== request.ownerId ||
+        inFlight.workspaceId !== request.workspaceId ||
+        inFlight.mode !== request.mode
+      ) {
+        return {
+          available: false,
+          code: 'TENANT_MISMATCH',
+          reason: `Concurrent prepare for run '${request.runId}' has conflicting tenant or mode identity`,
+        };
+      }
+      return await inFlight.promise;
     }
 
     const preparePromise = (async (): Promise<PrepareRuntimeResult> => {
@@ -268,7 +302,12 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
       }
     })();
 
-    this.inFlightPrepares.set(request.runId, preparePromise);
+    this.inFlightPrepares.set(request.runId, {
+      ownerId: request.ownerId,
+      workspaceId: request.workspaceId,
+      mode: request.mode,
+      promise: preparePromise,
+    });
     try {
       return await preparePromise;
     } finally {
@@ -346,10 +385,14 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
     session.activeControllers?.add(timeoutController);
     let timeoutTimer: NodeJS.Timeout | undefined;
     let abortHandler: (() => void) | undefined;
+    let internalStopHandler: (() => void) | undefined;
     let isCompletedOrTimedOut = false;
+    let didTimeout = false;
 
     const timeoutPromise = new Promise<never>((_, reject) => {
       timeoutTimer = setTimeout(() => {
+        didTimeout = true;
+        isCompletedOrTimedOut = true;
         timeoutController.abort();
         reject(new Error(`Sandbox execution timed out after ${effectiveTimeoutMs}ms`));
       }, effectiveTimeoutMs);
@@ -361,11 +404,24 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
         reject(new Error('Execution was aborted'));
         return;
       }
+      if (!session.active || timeoutController.signal.aborted) {
+        reject(new Error('Execution was stopped: session is not active'));
+        return;
+      }
+
       abortHandler = () => {
         timeoutController.abort();
         reject(new Error('Execution was aborted'));
       };
       signal.addEventListener('abort', abortHandler, { once: true });
+
+      internalStopHandler = () => {
+        // Triggered when adapter.stop() aborts session.activeControllers
+        if (!didTimeout && !signal.aborted && !isCompletedOrTimedOut) {
+          reject(new Error('Execution was stopped: session terminated'));
+        }
+      };
+      timeoutController.signal.addEventListener('abort', internalStopHandler, { once: true });
     });
 
     // Fencing helper: Discards results if invocation timed out, was cancelled, or session stopped
@@ -581,6 +637,10 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
         }
 
         case 'run_command': {
+          // Verification freshness: Any command execution can alter workspace filesystem state,
+          // so existing verification evidence (run_build / run_tests) must be invalidated.
+          session.verifiedChecks.clear();
+
           const command = (toolCall.args.command as string | undefined)?.trim() ?? '';
           const args = Array.isArray(toolCall.args.args) ? (toolCall.args.args as string[]) : undefined;
 
@@ -651,6 +711,16 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
         };
       }
 
+      if (!session.active || rawMessage.includes('session terminated') || rawMessage.includes('session is not active')) {
+        return {
+          success: false,
+          output: {},
+          durationMs,
+          errorCode: 'SESSION_NOT_FOUND',
+          errorMessage: 'Execution was stopped: session is no longer active',
+        };
+      }
+
       return {
         success: false,
         output: {},
@@ -663,6 +733,7 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
       session.activeControllers?.delete(timeoutController);
       if (timeoutTimer) clearTimeout(timeoutTimer);
       if (abortHandler) signal.removeEventListener('abort', abortHandler);
+      if (internalStopHandler) timeoutController.signal.removeEventListener('abort', internalStopHandler);
     }
   }
 

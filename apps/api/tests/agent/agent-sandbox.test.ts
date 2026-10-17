@@ -1268,5 +1268,285 @@ describe('GigaAgent Isolated Sandbox Adapter & Cloud Security Gate (17T-47)', ()
       await adapter.cleanup(prep1.sessionId!);
       assert.equal(providerClient.getSandboxCount(), 0);
     });
+
+    it('verification freshness: run_command invalidates prior PASS and prevents completion on stale build', async () => {
+      // A. Verify in DeterministicFakeExecutionRuntime with customCommandRunner modifying workspace files
+      const fakeRuntime = new DeterministicFakeExecutionRuntime({
+        initialFiles: { 'src/index.ts': 'export const initial = true;' },
+        customCommandRunner: (cmd, args, files) => {
+          if (cmd === 'bash' && args?.[1]?.includes('mutate')) {
+            files?.set('src/index.ts', 'export const mutated = true; // SYNTAX_ERROR');
+            return { exitCode: 0, stdout: 'File mutated', stderr: '' };
+          }
+          return { exitCode: 0, stdout: 'ok', stderr: '' };
+        },
+      });
+
+      const ac = new AbortController();
+      const prepFake = await fakeRuntime.prepare({
+        runId: randomUUID(),
+        workspaceId: dummyWorkspaceId,
+        ownerId: dummyOwnerId,
+        mode: 'execute',
+        task: 'Fake verification freshness test',
+        modelId: 'giga-agent-default',
+        signal: ac.signal,
+      });
+      assert.equal(prepFake.available, true);
+      if (!prepFake.available) return;
+
+      // 1. Initial build PASS
+      const build1 = await fakeRuntime.invoke(
+        prepFake.sessionId,
+        makeToolCall('run_build', 'sandbox_execute', {}),
+        ac.signal
+      );
+      assert.equal(build1.success, true);
+      let fakeEvidence = await fakeRuntime.getVerificationEvidence(prepFake.sessionId);
+      assert.equal(fakeEvidence.length, 1);
+      assert.equal(fakeEvidence[0]?.name, 'run_build');
+      assert.equal(fakeEvidence[0]?.outcome, 'passed');
+
+      // 2. Agent runs run_command that modifies file
+      const cmdRes = await fakeRuntime.invoke(
+        prepFake.sessionId,
+        makeToolCall('run_command', 'sandbox_execute', {
+          command: 'bash',
+          args: ['-c', 'mutate src/index.ts'],
+        }),
+        ac.signal
+      );
+      assert.equal(cmdRes.success, true);
+
+      // 3. Stale PASS must be PURGED - completion must not be allowed to use old PASS!
+      fakeEvidence = await fakeRuntime.getVerificationEvidence(prepFake.sessionId);
+      assert.equal(fakeEvidence.length, 0);
+
+      // 4. Now if build is run again on mutated files, it detects the syntax error and fails
+      const build2 = await fakeRuntime.invoke(
+        prepFake.sessionId,
+        makeToolCall('run_build', 'sandbox_execute', {}),
+        ac.signal
+      );
+      assert.equal(build2.success, false);
+      fakeEvidence = await fakeRuntime.getVerificationEvidence(prepFake.sessionId);
+      assert.equal(fakeEvidence.length, 1);
+      assert.equal(fakeEvidence[0]?.outcome, 'failed');
+
+      // B. Verify identical behavior in IsolatedCloudSandboxAdapter
+      const providerClient = new SimulatedCloudSandboxProviderClient();
+      const adapter = new IsolatedCloudSandboxAdapter({ providerClient });
+
+      const prepCloud = await adapter.prepare({
+        runId: randomUUID(),
+        workspaceId: dummyWorkspaceId,
+        ownerId: dummyOwnerId,
+        mode: 'execute',
+        task: 'Cloud verification freshness test',
+        modelId: 'giga-agent-default',
+        signal: ac.signal,
+      });
+      assert.equal(prepCloud.available, true);
+      if (!prepCloud.available) return;
+
+      // 1. Cloud build PASS
+      const cloudBuild1 = await adapter.invoke(
+        prepCloud.sessionId,
+        makeToolCall('run_build', 'sandbox_execute', {}),
+        ac.signal
+      );
+      assert.equal(cloudBuild1.success, true);
+      let cloudEvidence = await adapter.getVerificationEvidence(prepCloud.sessionId);
+      assert.equal(cloudEvidence.length, 1);
+      assert.equal(cloudEvidence[0]?.outcome, 'passed');
+
+      // 2. Cloud run_command executes
+      const cloudCmd = await adapter.invoke(
+        prepCloud.sessionId,
+        makeToolCall('run_command', 'sandbox_execute', { command: 'node generate.js' }),
+        ac.signal
+      );
+      assert.equal(cloudCmd.success, true);
+
+      // 3. Cloud adapter must also purge prior verification evidence
+      cloudEvidence = await adapter.getVerificationEvidence(prepCloud.sessionId);
+      assert.equal(cloudEvidence.length, 0);
+    });
+
+    it('stop(sessionId) responsiveness: invoke terminates immediately when stop() is called with uncooperative provider', async () => {
+      const providerClient = new SimulatedCloudSandboxProviderClient();
+      // Provider ignores abort signal and hangs for 3000ms
+      providerClient.simulateIgnoreAbortSignalAndCompleteLateMs = 3000;
+
+      const adapter = new IsolatedCloudSandboxAdapter({
+        providerClient,
+        defaultTimeoutMs: 10_000,
+      });
+      const ac = new AbortController();
+
+      const prep = await adapter.prepare({
+        runId: randomUUID(),
+        workspaceId: dummyWorkspaceId,
+        ownerId: dummyOwnerId,
+        mode: 'execute',
+        task: 'Stop responsiveness test',
+        modelId: 'giga-agent-default',
+        signal: ac.signal,
+      });
+      assert.equal(prep.available, true);
+      if (!prep.available) return;
+
+      const start = Date.now();
+
+      // Trigger stop(sessionId) after 15ms
+      setTimeout(async () => {
+        try {
+          await adapter.stop(prep.sessionId);
+        } catch {
+          // ignore
+        }
+      }, 15);
+
+      // Invoke should terminate quickly (<400ms) upon stop(), not wait for 3000ms provider or 10s timeout!
+      const res = await adapter.invoke(
+        prep.sessionId,
+        makeToolCall('run_command', 'sandbox_execute', { command: 'hanging-job' }),
+        ac.signal
+      );
+
+      const elapsed = Date.now() - start;
+      assert.equal(res.success, false);
+      assert.equal(res.errorCode, 'SESSION_NOT_FOUND');
+      assert.ok(elapsed < 400, `Expected prompt response (<400ms), got ${elapsed}ms`);
+
+      // Late RPC fencing check: Wait for simulated uncooperative RPC to finish
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const evidence = await adapter.getVerificationEvidence(prep.sessionId);
+      assert.equal(evidence.length, 0);
+    });
+
+    it('duplicate allocation security: rejects mismatched tenant or mode on existing active session and in-flight prepare', async () => {
+      const providerClient = new SimulatedCloudSandboxProviderClient();
+      providerClient.simulateLateAllocationMs = 40; // Allocation takes 40ms
+      const adapter = new IsolatedCloudSandboxAdapter({ providerClient });
+      const ac = new AbortController();
+
+      const targetRunId = randomUUID();
+      const ownerA = randomUUID();
+      const ownerB = randomUUID();
+      const wsA = randomUUID();
+      const wsB = randomUUID();
+
+      // 1. Concurrent in-flight prepare with mismatched tenant or mode:
+      const [prepInit, prepMismatchOwner, prepMismatchWs, prepMismatchMode] = await Promise.all([
+        adapter.prepare({
+          runId: targetRunId,
+          workspaceId: wsA,
+          ownerId: ownerA,
+          mode: 'execute',
+          task: 'Initial prepare',
+          modelId: 'giga-agent-default',
+          signal: ac.signal,
+        }),
+        adapter.prepare({
+          runId: targetRunId,
+          workspaceId: wsA,
+          ownerId: ownerB, // Different owner
+          mode: 'execute',
+          task: 'Cross-tenant prepare',
+          modelId: 'giga-agent-default',
+          signal: ac.signal,
+        }),
+        adapter.prepare({
+          runId: targetRunId,
+          workspaceId: wsB, // Different workspace
+          ownerId: ownerA,
+          mode: 'execute',
+          task: 'Cross-workspace prepare',
+          modelId: 'giga-agent-default',
+          signal: ac.signal,
+        }),
+        adapter.prepare({
+          runId: targetRunId,
+          workspaceId: wsA,
+          ownerId: ownerA,
+          mode: 'plan', // Different mode
+          task: 'Mismatched mode prepare',
+          modelId: 'giga-agent-default',
+          signal: ac.signal,
+        }),
+      ]);
+
+      assert.equal(prepInit.available, true);
+      assert.equal(prepMismatchOwner.available, false);
+      assert.equal(prepMismatchOwner.code, 'TENANT_MISMATCH');
+      assert.equal(prepMismatchWs.available, false);
+      assert.equal(prepMismatchWs.code, 'TENANT_MISMATCH');
+      assert.equal(prepMismatchMode.available, false);
+      assert.equal(prepMismatchMode.code, 'TENANT_MISMATCH');
+
+      // 2. Sequential prepare against active session with mismatched tenant or mode:
+      const seqMismatchOwner = await adapter.prepare({
+        runId: targetRunId,
+        workspaceId: wsA,
+        ownerId: ownerB,
+        mode: 'execute',
+        task: 'Seq mismatch owner',
+        modelId: 'giga-agent-default',
+        signal: ac.signal,
+      });
+      assert.equal(seqMismatchOwner.available, false);
+      assert.equal(seqMismatchOwner.code, 'TENANT_MISMATCH');
+
+      const seqMismatchMode = await adapter.prepare({
+        runId: targetRunId,
+        workspaceId: wsA,
+        ownerId: ownerA,
+        mode: 'ask',
+        task: 'Seq mismatch mode',
+        modelId: 'giga-agent-default',
+        signal: ac.signal,
+      });
+      assert.equal(seqMismatchMode.available, false);
+      assert.equal(seqMismatchMode.code, 'TENANT_MISMATCH');
+
+      // Matching sequential call succeeds idempotently
+      const seqMatch = await adapter.prepare({
+        runId: targetRunId,
+        workspaceId: wsA,
+        ownerId: ownerA,
+        mode: 'execute',
+        task: 'Seq match',
+        modelId: 'giga-agent-default',
+        signal: ac.signal,
+      });
+      assert.equal(seqMatch.available, true);
+      assert.equal(seqMatch.sessionId, prepInit.sessionId);
+
+      // 3. Test matching boundary behavior in DeterministicFakeExecutionRuntime:
+      const fakeRuntime = new DeterministicFakeExecutionRuntime();
+      const fakePrep1 = await fakeRuntime.prepare({
+        runId: targetRunId,
+        workspaceId: wsA,
+        ownerId: ownerA,
+        mode: 'execute',
+        task: 'Fake prep',
+        modelId: 'giga-agent-default',
+        signal: ac.signal,
+      });
+      assert.equal(fakePrep1.available, true);
+
+      const fakeMismatch = await fakeRuntime.prepare({
+        runId: targetRunId,
+        workspaceId: wsA,
+        ownerId: ownerB,
+        mode: 'execute',
+        task: 'Fake mismatch',
+        modelId: 'giga-agent-default',
+        signal: ac.signal,
+      });
+      assert.equal(fakeMismatch.available, false);
+      assert.equal(fakeMismatch.code, 'TENANT_MISMATCH');
+    });
   });
 });
