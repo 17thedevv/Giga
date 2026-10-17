@@ -63,10 +63,10 @@ This implementation adds **durable server-side GigaAgent conversation messages**
    - Stored chained promise reference in `runLocks` and verified exact reference on cleanup.
    - Added `getActiveLockCount()` and regression test 22 ensuring map is cleaned up after both success and failure.
 
-9. **Security, UTF-8 Bounding & JSON Redaction:**
+9. **Security, UTF-8 Bounding & Unified Sensitive-Key Redaction:**
    - DTOs never contain `leaseToken`, `workerId`, `leaseExpiresAt`, provider API keys, or raw reasoning traces.
    - Prompt injection resistance: user follow-up text cannot escalate run mode (`ask` -> `execute`), modify tool policies, or alter worker/lease state.
-   - **Structured JSON & Pattern-Based Content Redaction (`redactSensitiveContent`, `redactJsonValue`, `redactStringPatterns`):** Recursively traverses parsed JSON objects and applies strict pattern replacement covering quoted JSON keys (`"apiKey": "..."`, `"leaseToken": "..."`, `"password": "..."`, `"client_secret": "..."`), Basic & Bearer authorization headers (`Authorization: Basic ...`), PEM private keys, URL userinfo credentials (`postgres://user:pass@host`), and URL query parameters across assistant messages, tool summaries, run step arguments/outputs, run summaries, and events before database persistence.
+   - **Unified Sensitive-Key Policy (`isSensitiveKey`, `SENSITIVE_KEY_NAMES`, `redactJsonValue`, `redactStringPatterns`):** Shared canonical key policy across structured JSON traversal and regex fallback. Recognizes generic opaque tokens (`token`, `id_token`, `session_token`), custom headers (`X-API-Key`, `x-api-key`, `x-auth-token`), auth schemes (Basic, Bearer), cookies, and credentials without requiring known key prefixes. Double-checks stringified JSON with regex passes before database persistence across assistant messages, tool summaries, run step arguments/outputs, run summaries, and events.
    - **Unicode-Aware Code-Point Bounding (`boundUtf8`):** Assistant and tool summaries strictly bounded by scanning back past continuation bytes, ensuring multi-byte characters (e.g. 4-byte emojis like `'🙂'`) are never split in the middle, preventing replacement character expansion and ensuring PostgreSQL `octet_length <= 16384` is never breached.
 
 ---
@@ -110,15 +110,16 @@ Run against **Real PostgreSQL 18.4** (`postgres://postgres@127.0.0.1:56446/giga_
   ✔ 29. workspace with > 200 historical messages never drops current run follow-ups or enters completion loops (477.5502ms)
   ✔ 30. redactSensitiveContent sanitizes secrets in assistant and tool summaries before database persistence (355.0411ms)
   ✔ 31. JSON credential leakage prevention in DB rows, run steps, events, and public GET APIs (385.2415ms)
-✔ GigaAgent Durable Messages and Follow-up Threads (17T-46) (10782.3371ms)
-ℹ tests 31
+  ✔ 32. generic opaque tokens and custom header keys in nested structured JSON and raw logs (392.1154ms)
+✔ GigaAgent Durable Messages and Follow-up Threads (17T-46) (11174.4525ms)
+ℹ tests 32
 ℹ suites 1
-ℹ pass 31
+ℹ pass 32
 ℹ fail 0
 ℹ cancelled 0
 ℹ skipped 0
 ℹ todo 0
-ℹ duration_ms 11347.6171
+ℹ duration_ms 11759.8325
 ``````
 
 ### B. Migration Upgrade Tests (`apps/api/tests/agent/agent-migration.test.ts` & `apps/api/tests/db-migrations.test.ts`)

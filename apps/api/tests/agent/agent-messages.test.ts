@@ -1068,4 +1068,128 @@ describe('GigaAgent Durable Messages and Follow-up Threads (17T-46)', { timeout:
       assert.ok(!runBody.includes(sentinel), `GET /runs/:id response must not contain ${sentinel}`);
     }
   });
+
+  // 32. Generic opaque tokens and custom header keys in nested structured JSON and raw logs
+  it('32. generic opaque tokens and custom header keys in nested structured JSON and raw logs', async () => {
+    const genericSentinels = [
+      'OpaqueSecret123456789',
+      'AnotherOpaqueSecret987654321',
+      'NestedSecretCookieValue555',
+      'XAuthTokenVal999',
+    ];
+
+    const run = await createActiveRun('execute', 'Generic opaque token test');
+
+    // 1. Assistant message with exact review structure:
+    // { "headers": { "X-API-Key": "OpaqueSecret123456789" }, "token": "AnotherOpaqueSecret987654321" }
+    const assistantPayload = JSON.stringify({
+      headers: {
+        'X-API-Key': 'OpaqueSecret123456789',
+        Cookie: 'NestedSecretCookieValue555',
+      },
+      token: 'AnotherOpaqueSecret987654321',
+      x_auth_token: 'XAuthTokenVal999',
+    }, null, 2);
+
+    const assistantMsg = await repo.appendAssistantMessage(owner, run.id, assistantPayload);
+    for (const sentinel of genericSentinels) {
+      assert.ok(!assistantMsg.content.includes(sentinel), `assistantMsg must not contain ${sentinel}`);
+    }
+    assert.ok(assistantMsg.content.includes('"X-API-Key": "[REDACTED]"'));
+    assert.ok(assistantMsg.content.includes('"token": "[REDACTED]"'));
+    assert.ok(assistantMsg.content.includes('"Cookie": "[REDACTED]"'));
+
+    // 2. Tool summary message with nested JSON and CLI string
+    const toolPayload =
+      'Tool finished:\n' +
+      JSON.stringify({
+        auth: { token: 'AnotherOpaqueSecret987654321' },
+        credentials: { 'x-api-key': 'OpaqueSecret123456789' },
+      }) +
+      '\nLog: x-api-key=OpaqueSecret123456789 token=AnotherOpaqueSecret987654321';
+
+    const toolMsg = await repo.appendToolSummaryMessage(owner, run.id, toolPayload);
+    for (const sentinel of genericSentinels) {
+      assert.ok(!toolMsg.content.includes(sentinel), `toolMsg must not contain ${sentinel}`);
+    }
+
+    // 3. Step execution: recordStepStarted with generic token arguments
+    const claim = await repo.claimRun(owner, run.id, 'worker-generic-redaction');
+    assert.ok(claim);
+
+    await repo.recordStepStarted(owner, run.id, claim.leaseToken, {
+      toolName: 'http_request',
+      toolCallId: 'call-2',
+      risk: 'read',
+      arguments: {
+        headers: { 'X-API-Key': 'OpaqueSecret123456789' },
+        token: 'AnotherOpaqueSecret987654321',
+      },
+    });
+
+    await repo.recordStepCompleted(owner, run.id, claim.leaseToken, 1, {
+      durationMs: 40,
+      output: {
+        responseHeaders: { 'X-API-Key': 'OpaqueSecret123456789' },
+        token: 'AnotherOpaqueSecret987654321',
+      },
+      summary: 'Done with token: AnotherOpaqueSecret987654321',
+    });
+
+    // 4. Finalize run
+    await repo.finalizeRun(owner, run.id, claim.leaseToken, {
+      status: 'completed',
+      summary: 'Result: {"token": "AnotherOpaqueSecret987654321", "X-API-Key": "OpaqueSecret123456789"}',
+      verifiedChecks: [{ name: 'api-call', outcome: 'passed', summary: 'Check token=AnotherOpaqueSecret987654321' }],
+    });
+
+    // 5. Database assertions
+    const dbMessages = await db.pool.query<{ content: string }>(
+      'SELECT content FROM agent_messages WHERE run_id = $1',
+      [run.id]
+    );
+    for (const row of dbMessages.rows) {
+      for (const sentinel of genericSentinels) {
+        assert.ok(!row.content.includes(sentinel), `agent_messages must not contain ${sentinel}`);
+      }
+    }
+
+    const dbRun = await db.pool.query<{ result_summary: string; verified_checks: unknown }>(
+      'SELECT result_summary, verified_checks FROM agent_runs WHERE id = $1',
+      [run.id]
+    );
+    const checksStr = JSON.stringify(dbRun.rows[0]?.verified_checks ?? '');
+    for (const sentinel of genericSentinels) {
+      assert.ok(!dbRun.rows[0]?.result_summary.includes(sentinel), `agent_runs.result_summary must not contain ${sentinel}`);
+      assert.ok(!checksStr.includes(sentinel), `agent_runs.verified_checks must not contain ${sentinel}`);
+    }
+
+    const dbSteps = await db.pool.query<{ arguments_json: unknown; result_json: unknown }>(
+      'SELECT arguments_json, result_json FROM agent_run_steps WHERE run_id = $1',
+      [run.id]
+    );
+    for (const row of dbSteps.rows) {
+      const argsStr = JSON.stringify(row.arguments_json ?? '');
+      const resStr = JSON.stringify(row.result_json ?? '');
+      for (const sentinel of genericSentinels) {
+        assert.ok(!argsStr.includes(sentinel), `agent_run_steps.arguments_json must not contain ${sentinel}`);
+        assert.ok(!resStr.includes(sentinel), `agent_run_steps.result_json must not contain ${sentinel}`);
+      }
+    }
+
+    // 6. Public GET API assertions
+    const getMessagesRes = await request(`/runs/${run.id}/messages`);
+    assert.equal(getMessagesRes.status, 200);
+    const messagesBody = await getMessagesRes.text();
+    for (const sentinel of genericSentinels) {
+      assert.ok(!messagesBody.includes(sentinel), `GET /runs/:id/messages must not contain ${sentinel}`);
+    }
+
+    const getRunRes = await request(`/runs/${run.id}`);
+    assert.equal(getRunRes.status, 200);
+    const runBody = await getRunRes.text();
+    for (const sentinel of genericSentinels) {
+      assert.ok(!runBody.includes(sentinel), `GET /runs/:id response must not contain ${sentinel}`);
+    }
+  });
 });

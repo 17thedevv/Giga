@@ -1055,6 +1055,17 @@ export class AgentRepository {
     });
   }
 
+  static isSensitiveKey(key: string): boolean {
+    if (!key || typeof key !== 'string') return false;
+    const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, '');
+    return /^(?:x)?(?:api)?key$|^(?:x)?(?:auth|access|refresh|lease|worker|session|id|bearer|security|csrf)?token$|^(?:client|shared)?secret(?:key)?$|^(?:pass|passwd|password)$|^(?:privatekey|privkey)$|^(?:authorization|proxyauthorization)$|^(?:credential|credentials)$|^(?:cookie|setcookie)$/i.test(
+      normalized
+    );
+  }
+
+  static readonly SENSITIVE_KEY_NAMES =
+    '(?:x[_-]?)?api[_-]?key|(?:x[_-]?)?(?:auth[_-]?|access[_-]?|refresh[_-]?|lease[_-]?|worker[_-]?|session[_-]?|id[_-]?|bearer[_-]?)?token|password|passwd|pass|(?:client[_-]?|shared[_-]?)?secret(?:[_-]?key)?|private[_-]?key|privkey|authorization|proxy[_-]?authorization|credentials?|cookies?';
+
   static redactJsonValue(value: unknown): unknown {
     if (value === null || value === undefined) return value;
     if (typeof value === 'string') {
@@ -1064,10 +1075,9 @@ export class AgentRepository {
       return value.map((item) => AgentRepository.redactJsonValue(item));
     }
     if (typeof value === 'object') {
-      const sensitiveKeyPattern = /^(?:api[_-]?key|lease[_-]?token|worker[_-]?token|password|passwd|pass|client[_-]?secret|secret(?:[_-]?key)?|auth[_-]?token|access[_-]?token|refresh[_-]?token|private[_-]?key|authorization|credential|credentials|cookie|session[_-]?token)$/i;
       const result: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-        if (sensitiveKeyPattern.test(k)) {
+        if (AgentRepository.isSensitiveKey(k)) {
           result[k] = '[REDACTED]';
         } else {
           result[k] = AgentRepository.redactJsonValue(v);
@@ -1103,22 +1113,26 @@ export class AgentRepository {
     sanitized = sanitized.replace(/\b(?:sk|ghp|gho|ghu|ghs|ghr|pat|xoxb|xoxp|xapp|glpat|npm|live|test)[-_][A-Za-z0-9_\-]{8,}\b/gi, '[REDACTED_KEY]');
 
     // 7. Quoted JSON / object key-value pairs:
-    // Matches "apiKey": "...", 'apiKey': "...", "leaseToken": 12345, etc.
-    sanitized = sanitized.replace(
-      /(["'])(api[_-]?key|lease[_-]?token|worker[_-]?token|password|passwd|pass|client[_-]?secret|secret(?:[_-]?key)?|auth[_-]?token|access[_-]?token|refresh[_-]?token|private[_-]?key|authorization|credential|credentials|cookie|token)\1(\s*:\s*)(["'])(?:\\.|(?!\4)[^\\])*\4/gi,
-      '$1$2$1$3$4[REDACTED]$4'
+    // Matches "apiKey": "...", 'apiKey': "...", "X-API-Key": "...", "token": "...", etc.
+    const quotedRegex = new RegExp(
+      '(["\'])(' + AgentRepository.SENSITIVE_KEY_NAMES + ')\\1(\\s*:\\s*)(["\'])(?:\\\\.|(?!\\4)[^\\\\])*\\4',
+      'gi'
     );
+    sanitized = sanitized.replace(quotedRegex, '$1$2$1$3$4[REDACTED]$4');
+
     // Also handle quoted key with unquoted value (e.g. number, boolean, null in JSON)
-    sanitized = sanitized.replace(
-      /(["'])(api[_-]?key|lease[_-]?token|worker[_-]?token|password|passwd|pass|client[_-]?secret|secret(?:[_-]?key)?|auth[_-]?token|access[_-]?token|refresh[_-]?token|private[_-]?key|authorization|credential|credentials|cookie|token)\1(\s*:\s*)(?!(?:\[REDACTED\]|"[REDACTED]"))([^\s"',;}\]]+)/gi,
-      '$1$2$1$3"[REDACTED]"'
+    const quotedUnquotedValRegex = new RegExp(
+      '(["\'])(' + AgentRepository.SENSITIVE_KEY_NAMES + ')\\1(\\s*:\\s*)(?!(?:\\[REDACTED\\]|"\\[REDACTED\\]"))([^\\s"\',;}\\]]+)',
+      'gi'
     );
+    sanitized = sanitized.replace(quotedUnquotedValRegex, '$1$2$1$3"[REDACTED]"');
 
     // 8. Unquoted key assignments (e.g. CLI output, env lines, key=value, key: value)
-    sanitized = sanitized.replace(
-      /\b(api[_-]?key|lease[_-]?token|worker[_-]?token|password|passwd|pass|client[_-]?secret|secret(?:[_-]?key)?|auth[_-]?token|access[_-]?token|refresh[_-]?token|private[_-]?key|credential|credentials)(\s*[:=]\s*)(?!(?:\[REDACTED(?:_KEY)?\]|"[REDACTED]"))(?:["']([^"'\r\n]+)["']|([^\s"',;}\]]+))/gi,
-      '$1$2[REDACTED]'
+    const unquotedRegex = new RegExp(
+      '\\b(' + AgentRepository.SENSITIVE_KEY_NAMES + ')(\\s*[:=]\\s*)(?!(?:\\[REDACTED(?:_KEY)?\\]|"\\[REDACTED\\]"|[a-zA-Z0-9_\\-]+[:=]|(?:Bearer|Basic|Token)\\s+\\[REDACTED\\]))(?:["\']([^"\'\\r\\n]+)["\']|([^\\s"\',;}\\]]+))',
+      'gi'
     );
+    sanitized = sanitized.replace(unquotedRegex, '$1$2[REDACTED]');
 
     return sanitized;
   }
@@ -1133,7 +1147,8 @@ export class AgentRepository {
         const parsed = JSON.parse(trimmed);
         const redactedObj = AgentRepository.redactJsonValue(parsed);
         const isFormatted = content.includes('\n');
-        return JSON.stringify(redactedObj, null, isFormatted ? 2 : undefined);
+        const jsonStr = JSON.stringify(redactedObj, null, isFormatted ? 2 : undefined);
+        return AgentRepository.redactStringPatterns(jsonStr);
       } catch {
         // Fallback to pattern-based string redaction
       }
