@@ -1,15 +1,20 @@
 import type pg from 'pg';
 import { ConflictError, NotFoundError } from '../auth/auth-validation.js';
-import { encodeAgentCursor } from './validation.js';
+import { encodeAgentCursor, encodeMessageCursor } from './validation.js';
 import {
   RUNTIME_UNAVAILABLE,
   type AgentEvent,
   type AgentEventType,
+  type AgentMessage,
+  type AgentMessageRole,
   type AgentRun,
   type AgentStep,
   type AgentStatus,
   type AgentWorkspace,
+  type BoundedConversationMessage,
   type ClaimedRun,
+  type ConversationContextBoundary,
+  type ListMessagesOptions,
   type ListOptions,
   type Page,
   type RunInput,
@@ -19,6 +24,19 @@ import {
   type WorkerLease,
 } from './types.js';
 import type { AgentPlan } from './decision-provider.js';
+
+interface MessageRow {
+  id: string;
+  owner_id: string;
+  workspace_id: string;
+  run_id: string;
+  sequence: number;
+  role: AgentMessageRole;
+  content: string;
+  idempotency_key: string | null;
+  request_fingerprint: string | null;
+  created_at: Date;
+}
 
 interface WorkspaceRow {
   id: string;
@@ -142,6 +160,16 @@ const step = (row: StepRow): AgentStep => ({
   ...(row.completed_at ? { completedAt: iso(row.completed_at) } : {}),
 });
 
+const message = (row: MessageRow): AgentMessage => ({
+  id: row.id,
+  workspaceId: row.workspace_id,
+  runId: row.run_id,
+  sequence: row.sequence,
+  role: row.role,
+  content: row.content,
+  createdAt: iso(row.created_at),
+});
+
 export type { ClaimedRun, WorkerLease };
 
 export interface StepStartInput {
@@ -170,7 +198,32 @@ export type RunFinalizeInput =
 
 /** All entry points require authenticated owner scope, including internal event reads/writes. */
 export class AgentRepository {
+  private static readonly runLocks = new Map<string, Promise<void>>();
+
   constructor(private readonly pool: pg.Pool) {}
+
+  static getActiveLockCount(): number {
+    return AgentRepository.runLocks.size;
+  }
+
+  private async withRunLock<T>(runId: string, fn: () => Promise<T>): Promise<T> {
+    const prev = AgentRepository.runLocks.get(runId) ?? Promise.resolve();
+    let release: () => void;
+    const next = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const current = prev.then(() => next, () => next);
+    AgentRepository.runLocks.set(runId, current);
+    try {
+      await prev;
+      return await fn();
+    } finally {
+      release!();
+      if (AgentRepository.runLocks.get(runId) === current) {
+        AgentRepository.runLocks.delete(runId);
+      }
+    }
+  }
 
   private async transaction<T>(fn: (client: pg.PoolClient) => Promise<T>): Promise<T> {
     const client = await this.pool.connect();
@@ -268,6 +321,22 @@ export class AgentRepository {
     };
   }
 
+  private hasMessagesTable: boolean | undefined;
+
+  private async canPersistMessages(client: pg.PoolClient | pg.Pool): Promise<boolean> {
+    if (this.hasMessagesTable) return true;
+    try {
+      const res = await client.query('SELECT 1 FROM schema_migrations WHERE version = 13 LIMIT 1');
+      if ((res.rowCount ?? 0) > 0) {
+        this.hasMessagesTable = true;
+        return true;
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
   /**
    * Admission for default control plane without active runner.
    * Atomically commits queued event 1, failed event 2 (RUNTIME_UNAVAILABLE), and the final failed run.
@@ -314,6 +383,13 @@ export class AgentRepository {
       }
 
       const id = inserted.rows[0].id;
+      if (await this.canPersistMessages(client)) {
+        await client.query(
+          `INSERT INTO agent_messages (owner_id, workspace_id, run_id, sequence, role, content)
+          VALUES ($1, $2, $3, 1, 'user', $4)`,
+          [ownerId, input.workspaceId, id, input.task]
+        );
+      }
       await client.query('UPDATE agent_runs SET last_event_id = last_event_id + 1 WHERE owner_id = $1 AND id = $2', [
         ownerId,
         id,
@@ -385,6 +461,13 @@ export class AgentRepository {
       }
 
       const id = inserted.rows[0].id;
+      if (await this.canPersistMessages(client)) {
+        await client.query(
+          `INSERT INTO agent_messages (owner_id, workspace_id, run_id, sequence, role, content)
+          VALUES ($1, $2, $3, 1, 'user', $4)`,
+          [ownerId, input.workspaceId, id, input.task]
+        );
+      }
       await client.query(
         `INSERT INTO agent_run_events (owner_id, run_id, sequence, event_type, status, payload)
         VALUES ($1, $2, 1, 'run.status', 'queued', $3)`,
@@ -548,12 +631,13 @@ export class AgentRepository {
       );
       const stepNumber = seqRes.rows[0]!.next_step;
 
+      const sanitizedArgs = AgentRepository.redactJsonValue(input.arguments);
       const stepInsert = await client.query<StepRow>(
         `INSERT INTO agent_run_steps
         (owner_id, run_id, step_number, status, tool_name, tool_call_id, tool_risk, arguments_json)
         VALUES ($1, $2, $3, 'running', $4, $5, $6, $7)
         RETURNING *`,
-        [ownerId, runId, stepNumber, input.toolName, input.toolCallId, input.risk, JSON.stringify(input.arguments)]
+        [ownerId, runId, stepNumber, input.toolName, input.toolCallId, input.risk, JSON.stringify(sanitizedArgs)]
       );
 
       const nextEventSeq = runCurrent.last_event_id + 1;
@@ -594,12 +678,15 @@ export class AgentRepository {
       this.assertActiveLease(lock.rows[0], leaseToken);
       const runCurrent = lock.rows[0]!;
 
+      const sanitizedOutput = AgentRepository.redactJsonValue(input.output);
+      const sanitizedSummary = input.summary ? AgentRepository.redactSensitiveContent(input.summary) : undefined;
+
       const stepUpdate = await client.query<StepRow>(
         `UPDATE agent_run_steps
         SET status = 'completed', result_json = $1, duration_ms = $2, completed_at = NOW()
         WHERE owner_id = $3 AND run_id = $4 AND step_number = $5 AND status = 'running'
         RETURNING *`,
-        [JSON.stringify(input.output), input.durationMs, ownerId, runId, stepNumber]
+        [JSON.stringify(sanitizedOutput), input.durationMs, ownerId, runId, stepNumber]
       );
       if (!stepUpdate.rows[0]) throw new ConflictError('Step is not in running status');
 
@@ -614,7 +701,7 @@ export class AgentRepository {
         toolCallId: stepUpdate.rows[0].tool_call_id,
         outcome: 'success' as const,
         durationMs: input.durationMs,
-        ...(input.summary ? { summary: input.summary } : {}),
+        ...(sanitizedSummary ? { summary: sanitizedSummary } : {}),
       };
       await client.query(
         `INSERT INTO agent_run_events (owner_id, run_id, sequence, event_type, status, payload)
@@ -647,12 +734,14 @@ export class AgentRepository {
       this.assertActiveLease(lock.rows[0], leaseToken);
       const runCurrent = lock.rows[0]!;
 
+      const sanitizedErrorMessage = AgentRepository.redactSensitiveContent(failure.errorMessage);
+
       const stepUpdate = await client.query<StepRow>(
         `UPDATE agent_run_steps
         SET status = 'failed', error_code = $1, error_message = $2, duration_ms = $3, completed_at = NOW()
         WHERE owner_id = $4 AND run_id = $5 AND step_number = $6 AND status = 'running'
         RETURNING *`,
-        [failure.errorCode, failure.errorMessage, failure.durationMs ?? 0, ownerId, runId, stepNumber]
+        [failure.errorCode, sanitizedErrorMessage, failure.durationMs ?? 0, ownerId, runId, stepNumber]
       );
       if (!stepUpdate.rows[0]) throw new ConflictError('Step is not in running status');
 
@@ -666,7 +755,7 @@ export class AgentRepository {
         runId,
         toolCallId: stepUpdate.rows[0].tool_call_id,
         code: failure.errorCode,
-        summary: failure.errorMessage,
+        summary: sanitizedErrorMessage,
       };
       await client.query(
         `INSERT INTO agent_run_events (owner_id, run_id, sequence, event_type, status, payload)
@@ -683,103 +772,141 @@ export class AgentRepository {
 
   /**
    * Finalizes the run as completed, failed, or cancelled. Fenced by active lease token.
+   * Protects against completion race if a new follow-up message arrived while deciding.
    */
   async finalizeRun(
     ownerId: string,
     runId: string,
     leaseToken: string,
-    outcome: RunFinalizeInput
+    outcome: RunFinalizeInput,
+    options?: { expectedMaxSequence?: number }
   ): Promise<{ run: AgentRun; event: AgentEvent }> {
-    return this.transaction(async (client) => {
-      const lock = await client.query<RunRow>(
-        'SELECT lease_token, status, last_event_id, lease_expires_at FROM agent_runs WHERE owner_id = $1 AND id = $2 FOR UPDATE',
-        [ownerId, runId]
-      );
-      this.assertActiveLease(lock.rows[0], leaseToken);
-      const runCurrent = lock.rows[0]!;
+    return this.withRunLock(runId, async () => {
+      return this.transaction(async (client) => {
+        const lock = await client.query<RunRow>(
+          'SELECT lease_token, status, last_event_id, lease_expires_at FROM agent_runs WHERE owner_id = $1 AND id = $2 FOR UPDATE',
+          [ownerId, runId]
+        );
+        this.assertActiveLease(lock.rows[0], leaseToken);
+        const runCurrent = lock.rows[0]!;
 
-      const nextEventSeq = runCurrent.last_event_id + 1;
+        // Race guard: If finalizing as completed, verify that no new user messages arrived
+        // after the expected sequence snapshot was processed.
+        if (outcome.status === 'completed' && options?.expectedMaxSequence !== undefined) {
+          const maxSeqRes = await client.query<{ max_seq: number }>(
+            'SELECT COALESCE(MAX(sequence), 0) AS max_seq FROM agent_messages WHERE run_id = $1',
+            [runId]
+          );
+          const currentMaxSeq = Number(maxSeqRes.rows[0]?.max_seq ?? 0);
+          if (currentMaxSeq > options.expectedMaxSequence) {
+            throw new ConflictError(
+              `Cannot complete run: follow-up message sequence ${currentMaxSeq} arrived after processed sequence ${options.expectedMaxSequence}`
+            );
+          }
+        }
 
-      if (outcome.status === 'completed') {
+        const nextEventSeq = runCurrent.last_event_id + 1;
+
+        if (outcome.status === 'completed') {
+          const sanitizedSummary = AgentRepository.redactSensitiveContent(outcome.summary);
+          const boundedSummary = AgentRepository.boundUtf8(sanitizedSummary);
+          const sanitizedChecks = outcome.verifiedChecks.map((c) => ({
+            ...c,
+            summary: c.summary ? AgentRepository.boundUtf8(AgentRepository.redactSensitiveContent(c.summary)) : c.summary,
+          }));
+          const update = await client.query<RunRow>(
+            `UPDATE agent_runs
+            SET status = 'completed', finished_at = NOW(), verified_checks = $1, result_summary = $2,
+                last_event_id = $3, updated_at = NOW()
+            WHERE owner_id = $4 AND id = $5 AND status = 'running'
+            RETURNING *`,
+            [JSON.stringify(sanitizedChecks), boundedSummary, nextEventSeq, ownerId, runId]
+          );
+          const updated = update.rows[0]!;
+
+          const payload = {
+            runId,
+            artifactIds: [],
+            verifiedChecks: sanitizedChecks,
+            summary: boundedSummary,
+          };
+          await client.query(
+            `INSERT INTO agent_run_events (owner_id, run_id, sequence, event_type, status, payload)
+            VALUES ($1, $2, $3, 'run.completed', 'completed', $4)`,
+            [ownerId, runId, nextEventSeq, JSON.stringify(payload)]
+          );
+
+          if (boundedSummary && boundedSummary.trim().length > 0 && (await this.canPersistMessages(client))) {
+            const nextMsgSeq = await client.query<{ next_seq: number }>(
+              'SELECT COALESCE(MAX(sequence), 0) + 1 AS next_seq FROM agent_messages WHERE run_id = $1',
+              [runId]
+            );
+            await client.query(
+              `INSERT INTO agent_messages (owner_id, workspace_id, run_id, sequence, role, content)
+              VALUES ($1, $2, $3, $4, 'assistant', $5)`,
+              [ownerId, updated.workspace_id, runId, nextMsgSeq.rows[0]!.next_seq, boundedSummary]
+            );
+          }
+
+          return {
+            run: run(updated),
+            event: { sequence: nextEventSeq, type: 'run.completed', data: payload },
+          };
+        }
+
+        if (outcome.status === 'failed') {
+          const sanitizedErrorMessage = AgentRepository.redactSensitiveContent(outcome.errorMessage);
+          const update = await client.query<RunRow>(
+            `UPDATE agent_runs
+            SET status = 'failed', finished_at = NOW(), error_code = $1, result_summary = $2,
+                last_event_id = $3, updated_at = NOW()
+            WHERE owner_id = $4 AND id = $5 AND status = 'running'
+            RETURNING *`,
+            [outcome.errorCode, sanitizedErrorMessage, nextEventSeq, ownerId, runId]
+          );
+          const updated = update.rows[0]!;
+
+          const payload = { runId, code: outcome.errorCode, message: sanitizedErrorMessage };
+          await client.query(
+            `INSERT INTO agent_run_events (owner_id, run_id, sequence, event_type, status, error_code, payload)
+            VALUES ($1, $2, $3, 'run.failed', 'failed', $4, $5)`,
+            [ownerId, runId, nextEventSeq, outcome.errorCode, JSON.stringify(payload)]
+          );
+
+          return {
+            run: run(updated),
+            event: { sequence: nextEventSeq, type: 'run.failed', data: payload },
+          };
+        }
+
+        // Cancelled
         const update = await client.query<RunRow>(
           `UPDATE agent_runs
-          SET status = 'completed', finished_at = NOW(), verified_checks = $1, result_summary = $2,
-              last_event_id = $3, updated_at = NOW()
-          WHERE owner_id = $4 AND id = $5 AND status = 'running'
+          SET status = 'cancelled', finished_at = NOW(), last_event_id = $1, updated_at = NOW()
+          WHERE owner_id = $2 AND id = $3 AND status = 'running'
           RETURNING *`,
-          [JSON.stringify(outcome.verifiedChecks), outcome.summary, nextEventSeq, ownerId, runId]
+          [nextEventSeq, ownerId, runId]
         );
         const updated = update.rows[0]!;
 
-        const payload = {
-          runId,
-          artifactIds: [],
-          verifiedChecks: outcome.verifiedChecks,
-          summary: outcome.summary,
-        };
+        const payload = { runId, status: 'cancelled' as const };
         await client.query(
           `INSERT INTO agent_run_events (owner_id, run_id, sequence, event_type, status, payload)
-          VALUES ($1, $2, $3, 'run.completed', 'completed', $4)`,
+          VALUES ($1, $2, $3, 'run.status', 'cancelled', $4)`,
           [ownerId, runId, nextEventSeq, JSON.stringify(payload)]
         );
 
         return {
           run: run(updated),
-          event: { sequence: nextEventSeq, type: 'run.completed', data: payload },
+          event: { sequence: nextEventSeq, type: 'run.status', data: payload },
         };
-      }
-
-      if (outcome.status === 'failed') {
-        const update = await client.query<RunRow>(
-          `UPDATE agent_runs
-          SET status = 'failed', finished_at = NOW(), error_code = $1, result_summary = $2,
-              last_event_id = $3, updated_at = NOW()
-          WHERE owner_id = $4 AND id = $5 AND status = 'running'
-          RETURNING *`,
-          [outcome.errorCode, outcome.errorMessage, nextEventSeq, ownerId, runId]
-        );
-        const updated = update.rows[0]!;
-
-        const payload = { runId, code: outcome.errorCode, message: outcome.errorMessage };
-        await client.query(
-          `INSERT INTO agent_run_events (owner_id, run_id, sequence, event_type, status, error_code, payload)
-          VALUES ($1, $2, $3, 'run.failed', 'failed', $4, $5)`,
-          [ownerId, runId, nextEventSeq, outcome.errorCode, JSON.stringify(payload)]
-        );
-
-        return {
-          run: run(updated),
-          event: { sequence: nextEventSeq, type: 'run.failed', data: payload },
-        };
-      }
-
-      // Cancelled
-      const update = await client.query<RunRow>(
-        `UPDATE agent_runs
-        SET status = 'cancelled', finished_at = NOW(), last_event_id = $1, updated_at = NOW()
-        WHERE owner_id = $2 AND id = $3 AND status = 'running'
-        RETURNING *`,
-        [nextEventSeq, ownerId, runId]
-      );
-      const updated = update.rows[0]!;
-
-      const payload = { runId, status: 'cancelled' as const };
-      await client.query(
-        `INSERT INTO agent_run_events (owner_id, run_id, sequence, event_type, status, payload)
-        VALUES ($1, $2, $3, 'run.status', 'cancelled', $4)`,
-        [ownerId, runId, nextEventSeq, JSON.stringify(payload)]
-      );
-
-      return {
-        run: run(updated),
-        event: { sequence: nextEventSeq, type: 'run.status', data: payload },
-      };
+      });
     });
   }
 
   async releaseLease(ownerId: string, runId: string, leaseToken: string): Promise<void> {
     await this.pool.query(
-      `UPDATE agent_runs SET lease_expires_at = NOW()
+      `UPDATE agent_runs SET lease_expires_at = NOW() - INTERVAL '1 second'
       WHERE owner_id = $1 AND id = $2 AND lease_token = $3`,
       [ownerId, runId, leaseToken]
     );
@@ -861,6 +988,419 @@ export class AgentRepository {
           },
         };
       }),
+    };
+  }
+
+  /**
+   * Appends a user follow-up message to a non-terminal run.
+   * Guarantees:
+   * - Only authenticated owner can append
+   * - Replays exact match for duplicate (ownerId, runId, idempotencyKey)
+   * - Rejects changed payload for same idempotencyKey with 409 Conflict
+   * - Rejects new messages to terminal runs (completed, failed, cancelled) with 409 Conflict
+   * - Monotonic sequence allocation serialized via run FOR UPDATE
+   */
+  async appendUserMessage(
+    ownerId: string,
+    runId: string,
+    content: string,
+    key: string,
+    fingerprint: string
+  ): Promise<{ message: AgentMessage; duplicate: boolean }> {
+    return this.withRunLock(runId, async () => {
+      return this.transaction(async (client) => {
+        const runRes = await client.query<RunRow>(
+          'SELECT * FROM agent_runs WHERE owner_id = $1 AND id = $2 FOR UPDATE',
+          [ownerId, runId]
+        );
+        const runCurrent = runRes.rows[0];
+        if (!runCurrent) throw new NotFoundError();
+
+        // Check idempotency replay within this run
+        const existingRes = await client.query<MessageRow>(
+          'SELECT * FROM agent_messages WHERE owner_id = $1 AND run_id = $2 AND idempotency_key = $3',
+          [ownerId, runId, key]
+        );
+        if (existingRes.rows[0]) {
+          const existing = existingRes.rows[0];
+          if (existing.request_fingerprint !== fingerprint) {
+            throw new ConflictError('Idempotency key was used for a different request');
+          }
+          return { message: message(existing), duplicate: true };
+        }
+
+        // Terminal run check (must not admit new messages to terminal runs)
+        if (['completed', 'failed', 'cancelled'].includes(runCurrent.status)) {
+          throw new ConflictError(
+            `Cannot send follow-up message to a ${runCurrent.status} run. Create a new run in the workspace to continue.`
+          );
+        }
+
+        const seqRes = await client.query<{ next_seq: number }>(
+          'SELECT COALESCE(MAX(sequence), 0) + 1 AS next_seq FROM agent_messages WHERE run_id = $1',
+          [runId]
+        );
+        const nextSequence = seqRes.rows[0]!.next_seq;
+
+        const inserted = await client.query<MessageRow>(
+          `INSERT INTO agent_messages
+          (owner_id, workspace_id, run_id, sequence, role, content, idempotency_key, request_fingerprint)
+          VALUES ($1, $2, $3, $4, 'user', $5, $6, $7)
+          RETURNING *`,
+          [ownerId, runCurrent.workspace_id, runId, nextSequence, content, key, fingerprint]
+        );
+
+        return { message: message(inserted.rows[0]!), duplicate: false };
+      });
+    });
+  }
+
+  static isSensitiveKey(key: string): boolean {
+    if (!key || typeof key !== 'string') return false;
+    const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, '');
+    return /^(?:x)?(?:api)?key$|^(?:x)?(?:auth|access|refresh|lease|worker|session|id|bearer|security|csrf)?token$|^(?:client|shared)?secret(?:key)?$|^(?:pass|passwd|password)$|^(?:privatekey|privkey)$|^(?:authorization|proxyauthorization)$|^(?:credential|credentials)$|^(?:cookie|setcookie)$/i.test(
+      normalized
+    );
+  }
+
+  static readonly SENSITIVE_KEY_NAMES =
+    '(?:x[_-]?)?api[_-]?key|(?:x[_-]?)?(?:auth[_-]?|access[_-]?|refresh[_-]?|lease[_-]?|worker[_-]?|session[_-]?|id[_-]?|bearer[_-]?)?token|password|passwd|pass|(?:client[_-]?|shared[_-]?)?secret(?:[_-]?key)?|private[_-]?key|privkey|authorization|proxy[_-]?authorization|credentials?|cookies?';
+
+  static redactJsonValue(value: unknown): unknown {
+    if (value === null || value === undefined) return value;
+    if (typeof value === 'string') {
+      return AgentRepository.redactStringPatterns(value);
+    }
+    if (Array.isArray(value)) {
+      return value.map((item) => AgentRepository.redactJsonValue(item));
+    }
+    if (typeof value === 'object') {
+      const result: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+        if (AgentRepository.isSensitiveKey(k)) {
+          result[k] = '[REDACTED]';
+        } else {
+          result[k] = AgentRepository.redactJsonValue(v);
+        }
+      }
+      return result;
+    }
+    return value;
+  }
+
+  static redactStringPatterns(content: string): string {
+    if (!content || typeof content !== 'string') return '';
+    let sanitized = content;
+
+    // 1. Private keys (PEM format)
+    sanitized = sanitized.replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, '[REDACTED_PRIVATE_KEY]');
+
+    // 2. URL userinfo credentials: https://user:password@host or postgres://user:pass@host:port/db
+    sanitized = sanitized.replace(/([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)([^:\s/@]+):([^@\s/]+)@/gi, '$1$2:[REDACTED]@');
+
+    // 3. URL query parameters: ?api_key=..., &token=..., etc.
+    sanitized = sanitized.replace(/([?&](?:api[_-]?key|key|token|auth(?:[_-]?token)?|access[_-]?token|secret|password)=)(?!\[REDACTED\])[^&\s#]+/gi, '$1[REDACTED]');
+
+    // 4. Authorization headers: Authorization: Bearer ..., Authorization: Basic ..., Authorization: ...
+    sanitized = sanitized.replace(/\b(Authorization\s*:\s*(?:Bearer|Basic|Token)\s+)(?!\[REDACTED\])[^\s,;\r\n]+/gi, '$1[REDACTED]');
+    sanitized = sanitized.replace(/\b(Authorization\s*:\s*)(?!(?:Bearer|Basic|Token)\s+|\[REDACTED\])[^\s,;\r\n]+/gi, '$1[REDACTED]');
+
+    // 5. Standalone Authorization scheme tokens (Bearer ..., Basic ...)
+    sanitized = sanitized.replace(/\bBearer\s+(?!\[REDACTED\])[A-Za-z0-9\-_.~+/=]+/gi, 'Bearer [REDACTED]');
+    sanitized = sanitized.replace(/\bBasic\s+(?!\[REDACTED\])[A-Za-z0-9+/=]{16,}/gi, 'Basic [REDACTED]');
+
+    // 6. Common API key prefixes: sk-..., ghp-..., gho-..., pat-..., live_..., test_...
+    sanitized = sanitized.replace(/\b(?:sk|ghp|gho|ghu|ghs|ghr|pat|xoxb|xoxp|xapp|glpat|npm|live|test)[-_][A-Za-z0-9_\-]{8,}\b/gi, '[REDACTED_KEY]');
+
+    // 7. Quoted JSON / object key-value pairs:
+    // Matches "apiKey": "...", 'apiKey': "...", "X-API-Key": "...", "token": "...", etc.
+    const quotedRegex = new RegExp(
+      '(["\'])(' + AgentRepository.SENSITIVE_KEY_NAMES + ')\\1(\\s*:\\s*)(["\'])(?:\\\\.|(?!\\4)[^\\\\])*\\4',
+      'gi'
+    );
+    sanitized = sanitized.replace(quotedRegex, '$1$2$1$3$4[REDACTED]$4');
+
+    // Also handle quoted key with unquoted value (e.g. number, boolean, null in JSON)
+    const quotedUnquotedValRegex = new RegExp(
+      '(["\'])(' + AgentRepository.SENSITIVE_KEY_NAMES + ')\\1(\\s*:\\s*)(?!(?:\\[REDACTED\\]|"\\[REDACTED\\]"))([^\\s"\',;}\\]]+)',
+      'gi'
+    );
+    sanitized = sanitized.replace(quotedUnquotedValRegex, '$1$2$1$3"[REDACTED]"');
+
+    // 8. Unquoted key assignments (e.g. CLI output, env lines, key=value, key: value)
+    const unquotedRegex = new RegExp(
+      '\\b(' + AgentRepository.SENSITIVE_KEY_NAMES + ')(\\s*[:=]\\s*)(?!(?:\\[REDACTED(?:_KEY)?\\]|"\\[REDACTED\\]"|[a-zA-Z0-9_\\-]+[:=]|(?:Bearer|Basic|Token)\\s+\\[REDACTED\\]))(?:["\']([^"\'\\r\\n]+)["\']|([^\\s"\',;}\\]]+))',
+      'gi'
+    );
+    sanitized = sanitized.replace(unquotedRegex, '$1$2[REDACTED]');
+
+    return sanitized;
+  }
+
+  static redactSensitiveContent(content: string): string {
+    if (!content || typeof content !== 'string') return '';
+    const trimmed = content.trim();
+
+    // If the content is valid JSON, recursively redact structured keys first
+    if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        const redactedObj = AgentRepository.redactJsonValue(parsed);
+        const isFormatted = content.includes('\n');
+        const jsonStr = JSON.stringify(redactedObj, null, isFormatted ? 2 : undefined);
+        return AgentRepository.redactStringPatterns(jsonStr);
+      } catch {
+        // Fallback to pattern-based string redaction
+      }
+    }
+
+    return AgentRepository.redactStringPatterns(content);
+  }
+
+  static boundUtf8(content: string, maxBytes = 16384): string {
+    const buf = Buffer.from(content, 'utf8');
+    if (buf.length <= maxBytes) return content;
+
+    let end = maxBytes;
+    // Scan backwards past any UTF-8 continuation bytes (10xxxxxx)
+    while (end > 0 && (buf[end - 1]! & 0xC0) === 0x80) {
+      end--;
+    }
+
+    if (end > 0) {
+      const lead = buf[end - 1]!;
+      let seqLen = 1;
+      if ((lead & 0x80) === 0x00) seqLen = 1;
+      else if ((lead & 0xE0) === 0xC0) seqLen = 2;
+      else if ((lead & 0xF0) === 0xE0) seqLen = 3;
+      else if ((lead & 0xF8) === 0xF0) seqLen = 4;
+
+      if (end - 1 + seqLen > maxBytes) {
+        // Multi-byte character was cut in the middle; exclude its leading byte
+        end = end - 1;
+      } else {
+        // Multi-byte character fits completely within maxBytes
+        end = end - 1 + seqLen;
+      }
+    }
+
+    let result = buf.subarray(0, end).toString('utf8');
+    // Safety guard: ensure no decoding replacement char ever causes byte length to exceed maxBytes
+    while (Buffer.byteLength(result, 'utf8') > maxBytes) {
+      result = result.slice(0, -1);
+    }
+    return result;
+  }
+
+  async appendAssistantMessage(ownerId: string, runId: string, content: string): Promise<AgentMessage> {
+    return this.withRunLock(runId, async () => {
+      return this.transaction(async (client) => {
+        const runRes = await client.query<RunRow>(
+          'SELECT * FROM agent_runs WHERE owner_id = $1 AND id = $2 FOR UPDATE',
+          [ownerId, runId]
+        );
+        const runCurrent = runRes.rows[0];
+        if (!runCurrent) throw new NotFoundError();
+
+        const seqRes = await client.query<{ next_seq: number }>(
+          'SELECT COALESCE(MAX(sequence), 0) + 1 AS next_seq FROM agent_messages WHERE run_id = $1',
+          [runId]
+        );
+        const nextSequence = seqRes.rows[0]!.next_seq;
+
+        const sanitized = AgentRepository.redactSensitiveContent(content);
+        const boundedContent = AgentRepository.boundUtf8(sanitized);
+
+        const inserted = await client.query<MessageRow>(
+          `INSERT INTO agent_messages
+          (owner_id, workspace_id, run_id, sequence, role, content)
+          VALUES ($1, $2, $3, $4, 'assistant', $5)
+          RETURNING *`,
+          [ownerId, runCurrent.workspace_id, runId, nextSequence, boundedContent]
+        );
+
+        return message(inserted.rows[0]!);
+      });
+    });
+  }
+
+  async appendToolSummaryMessage(ownerId: string, runId: string, content: string): Promise<AgentMessage> {
+    return this.withRunLock(runId, async () => {
+      return this.transaction(async (client) => {
+        const runRes = await client.query<RunRow>(
+          'SELECT * FROM agent_runs WHERE owner_id = $1 AND id = $2 FOR UPDATE',
+          [ownerId, runId]
+        );
+        const runCurrent = runRes.rows[0];
+        if (!runCurrent) throw new NotFoundError();
+
+        const seqRes = await client.query<{ next_seq: number }>(
+          'SELECT COALESCE(MAX(sequence), 0) + 1 AS next_seq FROM agent_messages WHERE run_id = $1',
+          [runId]
+        );
+        const nextSequence = seqRes.rows[0]!.next_seq;
+
+        const sanitized = AgentRepository.redactSensitiveContent(content);
+        const boundedContent = AgentRepository.boundUtf8(sanitized);
+
+        const inserted = await client.query<MessageRow>(
+          `INSERT INTO agent_messages
+          (owner_id, workspace_id, run_id, sequence, role, content)
+          VALUES ($1, $2, $3, $4, 'tool_summary', $5)
+          RETURNING *`,
+          [ownerId, runCurrent.workspace_id, runId, nextSequence, boundedContent]
+        );
+
+        return message(inserted.rows[0]!);
+      });
+    });
+  }
+
+  async listMessages(ownerId: string, runId: string, options: ListMessagesOptions): Promise<Page<AgentMessage>> {
+    const currentRun = await this.getRun(ownerId, runId);
+
+    if (!(await this.canPersistMessages(this.pool))) {
+      const initialMessage: AgentMessage = {
+        id: currentRun.id,
+        workspaceId: currentRun.workspaceId,
+        runId: currentRun.id,
+        sequence: 1,
+        role: 'user',
+        content: currentRun.task,
+        createdAt: currentRun.createdAt,
+      };
+      return {
+        items: [initialMessage],
+        nextCursor: null,
+      };
+    }
+
+    const params: unknown[] = [ownerId, runId];
+    let where = 'owner_id = $1 AND run_id = $2';
+    if (options.cursor) {
+      params.push(options.cursor.sequence);
+      where += ` AND sequence > $${params.length}`;
+    }
+    params.push(options.limit + 1);
+
+    const result = await this.pool.query<MessageRow>(
+      `SELECT * FROM agent_messages WHERE ${where} ORDER BY sequence ASC LIMIT $${params.length}`,
+      params
+    );
+
+    const rows = result.rows.slice(0, options.limit);
+    const last = rows.at(-1);
+
+    return {
+      items: rows.map(message),
+      nextCursor:
+        result.rows.length > options.limit && last
+          ? encodeMessageCursor({
+              kind: 'messages',
+              runId,
+              sequence: last.sequence,
+            })
+          : null,
+    };
+  }
+
+  async getConversationContext(
+    ownerId: string,
+    runId: string,
+    options: { maxMessages?: number; maxBytes?: number; scope?: 'run' | 'workspace' } = {}
+  ): Promise<ConversationContextBoundary> {
+    const currentRun = await this.getRun(ownerId, runId);
+
+    if (!(await this.canPersistMessages(this.pool))) {
+      return {
+        messages: [{ runId: currentRun.id, sequence: 1, role: 'user', content: currentRun.task }],
+        totalBytes: Buffer.byteLength(currentRun.task, 'utf8'),
+        isTruncated: false,
+      };
+    }
+
+    const maxMessages = options.maxMessages ?? 50;
+    const maxBytes = options.maxBytes ?? 65536;
+    const scope = options.scope ?? 'workspace';
+    // 1. ALWAYS query the current run's messages independently.
+    // This guarantees that past runs (even 200+ historical messages) can never push
+    // the current run's task and follow-up instructions out of context.
+    const currentRunResult = await this.pool.query<MessageRow>(
+      `SELECT run_id, sequence, role, content FROM agent_messages
+       WHERE owner_id = $1 AND run_id = $2
+       ORDER BY sequence ASC`,
+      [ownerId, runId]
+    );
+    const currentRunRows = currentRunResult.rows;
+
+    let isTruncated = false;
+    const selectedCurrentRows: MessageRow[] = [];
+    let currentBytes = 0;
+
+    // Prioritize current run messages: if they exceed maxMessages or maxBytes,
+    // take from newest to oldest to guarantee the latest instruction/follow-up is always kept.
+    for (let i = currentRunRows.length - 1; i >= 0; i--) {
+      const row = currentRunRows[i]!;
+      const msgBytes = Buffer.byteLength(row.content, 'utf8');
+      if (selectedCurrentRows.length < maxMessages && currentBytes + msgBytes <= maxBytes) {
+        selectedCurrentRows.unshift(row);
+        currentBytes += msgBytes;
+      } else {
+        isTruncated = true;
+      }
+    }
+
+    // 2. If scope is workspace, query prior completed runs history using the remaining budget.
+    let remainingBytes = Math.max(0, maxBytes - currentBytes);
+    const remainingMessages = Math.max(0, maxMessages - selectedCurrentRows.length);
+    const selectedPriorRows: MessageRow[] = [];
+
+    if (scope === 'workspace' && remainingMessages > 0 && remainingBytes > 0) {
+      const priorSqlLimit = Math.max(200, remainingMessages * 2);
+      const priorResult = await this.pool.query<MessageRow>(
+        `SELECT m.run_id, m.sequence, m.role, m.content
+         FROM agent_messages m
+         JOIN agent_runs r ON m.run_id = r.id AND m.owner_id = r.owner_id
+         WHERE m.owner_id = $1
+           AND m.workspace_id = $2
+           AND r.status = 'completed'
+           AND r.created_at < $3
+           AND r.id != $4
+         ORDER BY r.created_at DESC, r.id DESC, m.sequence DESC
+         LIMIT $5`,
+        [ownerId, currentRun.workspaceId, currentRun.createdAt, currentRun.id, priorSqlLimit]
+      );
+
+      if (priorResult.rows.length >= priorSqlLimit) {
+        isTruncated = true;
+      }
+
+      for (const row of priorResult.rows) {
+        const msgBytes = Buffer.byteLength(row.content, 'utf8');
+        if (selectedPriorRows.length >= remainingMessages || msgBytes > remainingBytes) {
+          isTruncated = true;
+          continue;
+        }
+        selectedPriorRows.unshift(row);
+        remainingBytes -= msgBytes;
+        currentBytes += msgBytes;
+      }
+    }
+
+    // 3. Combine in chronological order: [prior completed runs history..., current run messages...]
+    const finalRows = [...selectedPriorRows, ...selectedCurrentRows];
+
+    const boundedMessages: BoundedConversationMessage[] = finalRows.map((row) => ({
+      runId: row.run_id,
+      sequence: row.sequence,
+      role: row.role,
+      content: row.content,
+    }));
+
+    return {
+      messages: boundedMessages,
+      totalBytes: currentBytes,
+      isTruncated,
     };
   }
 }

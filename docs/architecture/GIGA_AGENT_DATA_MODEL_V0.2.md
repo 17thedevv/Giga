@@ -4,11 +4,11 @@
 
 ## 1. Separation of concerns
 
-**17T-44 candidate migration 011:** implements only `agent_workspaces`, `agent_runs` and
-`agent_run_events` (the concrete name for the proposed events entity). See
-[ADR-008](../decisions/ADR-008-agent-control-plane-foundation.md) for exact invariants and
-[verification](../evidence/17T-44-agent-control-plane.md). Existing tables remain unchanged;
-the inventory below is still a broader proposal, not a list of implemented tables.
+**Implemented migrations:**
+- **Migration 011 (17T-44):** implements `agent_workspaces`, `agent_runs`, and `agent_run_events`.
+- **Migration 012 (17T-45):** implements `agent_run_steps`, orchestrator error codes, and step transitions.
+- **Migration 013 (17T-46):** implements `agent_messages` for durable server-authoritative conversation threads, sequence monotonicity triggers, and immutability guards.
+See [ADR-008](../decisions/ADR-008-agent-control-plane-foundation.md) and [17T-46 evidence](../evidence/17T-46-agent-messages-threads.md). Existing tables remain unchanged.
 
 - **PostgreSQL** is authoritative for workspace/run/job state, messages, tool-call records, approvals, event replay metadata and artifact manifests.
 - **Durable object/artifact storage** holds immutable workspace snapshots, large tool outputs, screenshots and downloadable ZIPs. Never rely on ephemeral runtime volume for persistence.

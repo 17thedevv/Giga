@@ -206,6 +206,12 @@ export class AgentOrchestrator {
             return { status: 'fenced', reason: 'Worker lease expired before decision' };
           }
 
+          const conversationContext = await this.repository.getConversationContext(ownerId, runId);
+          const currentRunMessages = conversationContext.messages.filter((m) => !m.runId || m.runId === runId);
+          const maxProcessedRunSequence = currentRunMessages.length > 0
+            ? Math.max(...currentRunMessages.map((m) => m.sequence))
+            : 0;
+
           const decision = await this.decisionProvider.decide({
             runId,
             workspaceId: currentRun.workspaceId,
@@ -218,6 +224,7 @@ export class AgentOrchestrator {
             lastStepResult,
             attemptCount,
             signal: runAbortController.signal,
+            conversationContext,
           });
 
           // Validate decision structure and field bounds
@@ -250,36 +257,57 @@ export class AgentOrchestrator {
           }
 
           if (decision.kind === 'complete') {
-            if (currentRun.mode === 'execute') {
-              // VERIFIED COMPLETION GATE for execute mode:
-              const evidence = await this.executionRuntime.getVerificationEvidence(sessionId);
-              const hasPassed = evidence.some((c) => c.outcome === 'passed');
-              const hasFailed = evidence.some((c) => c.outcome === 'failed');
+            try {
+              if (currentRun.mode === 'execute') {
+                // VERIFIED COMPLETION GATE for execute mode:
+                const evidence = await this.executionRuntime.getVerificationEvidence(sessionId);
+                const hasPassed = evidence.some((c) => c.outcome === 'passed');
+                const hasFailed = evidence.some((c) => c.outcome === 'failed');
 
-              if (!hasPassed || hasFailed) {
-                const finalized = await this.repository.finalizeRun(ownerId, runId, leaseToken, {
-                  status: 'failed',
-                  errorCode: 'VERIFICATION_FAILED',
-                  errorMessage: 'Run completion denied: required verification checks failed or were not run',
-                });
-                return { status: 'failed', run: finalized.run };
+                if (!hasPassed || hasFailed) {
+                  const finalized = await this.repository.finalizeRun(ownerId, runId, leaseToken, {
+                    status: 'failed',
+                    errorCode: 'VERIFICATION_FAILED',
+                    errorMessage: 'Run completion denied: required verification checks failed or were not run',
+                  });
+                  return { status: 'failed', run: finalized.run };
+                }
+
+                const finalized = await this.repository.finalizeRun(
+                  ownerId,
+                  runId,
+                  leaseToken,
+                  {
+                    status: 'completed',
+                    summary: decision.summary,
+                    verifiedChecks: evidence,
+                  },
+                  { expectedMaxSequence: maxProcessedRunSequence }
+                );
+                return { status: 'completed', run: finalized.run };
+              } else {
+                // Read-only Ask / Plan modes:
+                // They do not run sandbox build/tests, so they complete with decision summary and empty verified checks.
+                const finalized = await this.repository.finalizeRun(
+                  ownerId,
+                  runId,
+                  leaseToken,
+                  {
+                    status: 'completed',
+                    summary: decision.summary,
+                    verifiedChecks: [],
+                  },
+                  { expectedMaxSequence: maxProcessedRunSequence }
+                );
+                return { status: 'completed', run: finalized.run };
               }
-
-              const finalized = await this.repository.finalizeRun(ownerId, runId, leaseToken, {
-                status: 'completed',
-                summary: decision.summary,
-                verifiedChecks: evidence,
-              });
-              return { status: 'completed', run: finalized.run };
-            } else {
-              // Read-only Ask / Plan modes:
-              // They do not run sandbox build/tests, so they complete with decision summary and empty verified checks.
-              const finalized = await this.repository.finalizeRun(ownerId, runId, leaseToken, {
-                status: 'completed',
-                summary: decision.summary,
-                verifiedChecks: [],
-              });
-              return { status: 'completed', run: finalized.run };
+            } catch (err) {
+              if (err instanceof ConflictError && err.message.includes('follow-up message')) {
+                // A new user follow-up message arrived while deciding / verifying!
+                // Continue execution loop to process the new message with fresh context.
+                continue;
+              }
+              throw err;
             }
           }
 
