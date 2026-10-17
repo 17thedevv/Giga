@@ -9,6 +9,7 @@ import {
 import {
   IsolatedCloudSandboxAdapter,
   SimulatedCloudSandboxProviderClient,
+  sanitizeSandboxOutput,
 } from '../../src/modules/agent/sandbox-adapter.js';
 import { createDefaultToolRegistry, isSafeRelativePath } from '../../src/modules/agent/tool-registry.js';
 import type { ToolRisk } from '../../src/modules/agent/types.js';
@@ -790,6 +791,180 @@ describe('GigaAgent Isolated Sandbox Adapter & Cloud Security Gate (17T-47)', ()
       const content = String(readRes.output.content);
       assert.ok(content.includes('[OUTPUT_TRUNCATED]'));
       assert.ok(content.length <= 150);
+    });
+
+    it('sanitizeSandboxOutput redacts unquoted tokens, Bearer auth, and structured JSON without leaking secrets', () => {
+      // 1. Unquoted key assignment: api_key=...
+      const res1 = sanitizeSandboxOutput('api_key=OpaqueSecret12345678', 1000);
+      assert.equal(res1, 'api_key=[REDACTED]');
+      assert.equal(res1.includes('OpaqueSecret12345678'), false);
+
+      // 2. Unquoted key with colon: token: ...
+      const res2 = sanitizeSandboxOutput('token: ReallySecretToken987654', 1000);
+      assert.equal(res2, 'token: [REDACTED]');
+      assert.equal(res2.includes('ReallySecretToken987654'), false);
+
+      // 3. Standalone Bearer auth
+      const res3 = sanitizeSandboxOutput('Bearer abcdefghijklmnop', 1000);
+      assert.equal(res3, 'Bearer [REDACTED]');
+      assert.equal(res3.includes('abcdefghijklmnop'), false);
+
+      // 4. Structured JSON object
+      const jsonInput = JSON.stringify({
+        apiKey: 'super-secret-key-12345',
+        databaseUrl: 'postgres://user:mypassword@localhost:5432/db',
+        headers: { 'X-API-Key': 'HeaderSecretValue999' },
+      });
+      const res4 = sanitizeSandboxOutput(jsonInput, 1000);
+      assert.equal(res4.includes('super-secret-key-12345'), false);
+      assert.equal(res4.includes('mypassword'), false);
+      assert.equal(res4.includes('HeaderSecretValue999'), false);
+      assert.ok(res4.includes('[REDACTED]'));
+
+      // 5. UTF-8 multi-byte emoji boundary truncation
+      const emojiInput = '🙂'.repeat(10); // 40 bytes (each emoji is 4 bytes in UTF-8)
+      const res5 = sanitizeSandboxOutput(emojiInput, 10); // 10 bytes can hold only 2 emojis (8 bytes)
+      assert.equal(Buffer.byteLength(res5.split('\n')[0]!, 'utf8'), 8);
+      assert.equal(res5.split('\n')[0], '🙂🙂');
+    });
+
+    it('post-allocation abort fencing: destroys newly allocated sandbox if signal was aborted mid-flight', async () => {
+      const providerClient = new SimulatedCloudSandboxProviderClient();
+      providerClient.simulateLateAllocationMs = 40; // Allocation takes 40ms
+      const adapter = new IsolatedCloudSandboxAdapter({ providerClient });
+      const ac = new AbortController();
+
+      // Trigger abort while allocation is running
+      const prepPromise = adapter.prepare({
+        runId: dummyRunId,
+        workspaceId: dummyWorkspaceId,
+        ownerId: dummyOwnerId,
+        mode: 'execute',
+        task: 'Abort mid-allocation test',
+        modelId: 'giga-agent-default',
+        signal: ac.signal,
+      });
+
+      // Abort after 10ms (while createSandbox is in flight)
+      setTimeout(() => ac.abort(), 10);
+
+      const prep = await prepPromise;
+      assert.equal(prep.available, false);
+      assert.equal(prep.code, 'RUNTIME_UNAVAILABLE');
+
+      // The allocated sandbox MUST be immediately destroyed to prevent orphaned cloud resources!
+      assert.equal(providerClient.getSandboxCount(), 0);
+    });
+
+    it('independent adapter-level timeout races and terminates hanging provider RPCs', async () => {
+      const providerClient = new SimulatedCloudSandboxProviderClient();
+      providerClient.simulateHangingCommand = true; // RPC hangs forever
+      const adapter = new IsolatedCloudSandboxAdapter({
+        providerClient,
+        defaultTimeoutMs: 30, // 30ms adapter wall-clock deadline
+      });
+      const ac = new AbortController();
+
+      const prep = await adapter.prepare({
+        runId: dummyRunId,
+        workspaceId: dummyWorkspaceId,
+        ownerId: dummyOwnerId,
+        mode: 'execute',
+        task: 'Hanging RPC test',
+        modelId: 'giga-agent-default',
+        signal: ac.signal,
+      });
+      assert.equal(prep.available, true);
+      if (!prep.available) return;
+
+      const start = Date.now();
+      const res = await adapter.invoke(
+        prep.sessionId,
+        makeToolCall('run_command', 'sandbox_execute', { command: 'hanging-job' }),
+        ac.signal
+      );
+
+      const elapsed = Date.now() - start;
+      assert.equal(res.success, false);
+      assert.equal(res.errorCode, 'TIMEOUT');
+      assert.ok(elapsed >= 25 && elapsed < 500, `Expected elapsed to be ~30ms, got ${elapsed}ms`);
+    });
+
+    it('cleanup failure tracking: retains session for reconciliation and supports retryDestroy', async () => {
+      const providerClient = new SimulatedCloudSandboxProviderClient();
+      providerClient.simulateDestroyFailure = true; // Initial destruction fails
+      const adapter = new IsolatedCloudSandboxAdapter({ providerClient });
+      const ac = new AbortController();
+
+      const prep = await adapter.prepare({
+        runId: dummyRunId,
+        workspaceId: dummyWorkspaceId,
+        ownerId: dummyOwnerId,
+        mode: 'execute',
+        task: 'Cleanup failure test',
+        modelId: 'giga-agent-default',
+        signal: ac.signal,
+      });
+      assert.equal(prep.available, true);
+      if (!prep.available) return;
+
+      // Attempt cleanup - should fail because destroySandbox failed
+      await assert.rejects(
+        async () => {
+          await adapter.cleanup(prep.sessionId);
+        },
+        /Failed to destroy sandbox/
+      );
+
+      // Session MUST be retained in pending destructions for ops reconciliation!
+      const pending = adapter.getPendingDestructions();
+      assert.equal(pending.length, 1);
+      assert.equal(pending[0]?.sessionId, prep.sessionId);
+      assert.equal(pending[0]?.destroyStatus, 'destroy_failed');
+      assert.ok(pending[0]?.destroyError);
+
+      // Restore provider client (e.g. network restored) and retry destruction
+      providerClient.simulateDestroyFailure = false;
+      const retrySuccess = await adapter.retryDestroy(prep.sessionId);
+      assert.equal(retrySuccess, true);
+
+      // Verify no pending destructions remain
+      assert.equal(adapter.getPendingDestructions().length, 0);
+
+      // Now cleanup can remove the session cleanly
+      await adapter.cleanup(prep.sessionId);
+      const session = await adapter.getSession(prep.sessionId);
+      assert.equal(session, undefined);
+    });
+
+    it('forwards fail-closed network egress policy to provider during sandbox creation', async () => {
+      const providerClient = new SimulatedCloudSandboxProviderClient();
+      const adapter = new IsolatedCloudSandboxAdapter({
+        providerClient,
+        egressEnabled: false, // Default deny-by-default
+        egressAllowlist: ['registry.npmjs.org', 'cdn.jsdelivr.net'],
+      });
+      const ac = new AbortController();
+
+      const prep = await adapter.prepare({
+        runId: dummyRunId,
+        workspaceId: dummyWorkspaceId,
+        ownerId: dummyOwnerId,
+        mode: 'execute',
+        task: 'Egress policy test',
+        modelId: 'giga-agent-default',
+        signal: ac.signal,
+      });
+      assert.equal(prep.available, true);
+      if (!prep.available) return;
+
+      // Verify the provider received the explicit network policy
+      assert.ok(providerClient.lastReceivedNetworkPolicy);
+      assert.equal(providerClient.lastReceivedNetworkPolicy.egressEnabled, false);
+      assert.deepEqual(providerClient.lastReceivedNetworkPolicy.allowlist, [
+        'registry.npmjs.org',
+        'cdn.jsdelivr.net',
+      ]);
     });
   });
 });

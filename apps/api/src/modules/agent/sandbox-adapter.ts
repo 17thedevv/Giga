@@ -1,18 +1,27 @@
 import crypto from 'node:crypto';
 import type { AgentMode, VerifiedCheck, SandboxSnapshot, SandboxFileEntry, SandboxSessionInfo } from './types.js';
 import { isSafeRelativePath } from './tool-registry.js';
+import { redactSensitiveContent, boundUtf8 } from './redaction.js';
 import type { ExecutionRuntime, ValidatedToolCall, BoundedToolResult, PrepareRuntimeRequest, PrepareRuntimeResult } from './execution-runtime.js';
+
+export interface SandboxNetworkPolicy {
+  readonly egressEnabled: boolean;
+  readonly allowlist: readonly string[];
+}
+
+export interface CreateSandboxParams {
+  readonly workspaceId: string;
+  readonly ownerId: string;
+  readonly timeoutMs: number;
+  readonly env?: Record<string, string>;
+  readonly networkPolicy: SandboxNetworkPolicy;
+  readonly signal?: AbortSignal;
+}
 
 export interface CloudSandboxProviderClient {
   readonly providerName: string;
 
-  createSandbox(params: {
-    readonly workspaceId: string;
-    readonly ownerId: string;
-    readonly timeoutMs: number;
-    readonly env?: Record<string, string>;
-    readonly signal?: AbortSignal;
-  }): Promise<{ readonly sandboxId: string; readonly endpoint?: string }>;
+  createSandbox(params: CreateSandboxParams): Promise<{ readonly sandboxId: string; readonly endpoint?: string }>;
 
   executeCommand(sandboxId: string, params: {
     readonly command: string;
@@ -37,7 +46,9 @@ export interface CloudSandboxConfig {
   readonly egressEnabled?: boolean;
 }
 
-interface CloudSessionState {
+export type DestroyStatus = 'active' | 'destroying' | 'destroyed' | 'destroy_failed';
+
+export interface CloudSessionState {
   readonly sessionId: string;
   readonly runId: string;
   readonly workspaceId: string;
@@ -48,19 +59,26 @@ interface CloudSessionState {
   readonly createdAt: string;
   readonly timeoutMs: number;
   active: boolean;
+  destroyStatus: DestroyStatus;
+  destroyError?: string;
+  destroyAttempts: number;
 }
 
 const DEFAULT_SANDBOX_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 64 * 1024; // 64 KiB bound per INV-07 / Security spec Section 4
 
-function sanitizeOutput(text: string, maxBytes: number): string {
-  if (!text) return '';
-  // Simple token redaction for sensitive patterns
-  const redacted = text
-    .replace(/(?:api[_-]?key|secret|token|password|bearer\s+)[:=]\s*['"]?([a-zA-Z0-9_\-.~+]{8,})['"]?/gi, '$1=***REDACTED***');
-  const buf = Buffer.from(redacted, 'utf8');
-  if (buf.byteLength <= maxBytes) return redacted;
-  return buf.subarray(0, maxBytes).toString('utf8') + '\n... [OUTPUT_TRUNCATED]';
+/**
+ * Sanitizes output from remote sandbox commands and files.
+ * Uses shared canonical redactSensitiveContent and boundUtf8 to prevent credential leakage.
+ */
+export function sanitizeSandboxOutput(text: string, maxBytes: number): string {
+  if (!text || typeof text !== 'string') return '';
+  const redacted = redactSensitiveContent(text);
+  const bounded = boundUtf8(redacted, maxBytes);
+  if (Buffer.byteLength(redacted, 'utf8') > maxBytes) {
+    return bounded + '\n... [OUTPUT_TRUNCATED]';
+  }
+  return bounded;
 }
 
 /**
@@ -72,9 +90,10 @@ function sanitizeOutput(text: string, maxBytes: number): string {
  * 2. Host Secret Fencing: Drops all host process.env variables; injects only sanitized workspace context.
  * 3. Server-side Mode Policy: Rejects sandbox writes and command execution in Ask / Plan modes.
  * 4. Path Traversal Fencing: Validates relative paths before contacting remote provider.
- * 5. Resource Ceilings: Wall-clock timeouts and max output byte limits (64 KiB) enforced.
- * 6. Tenant Isolation: Validates session ownership against caller.
- * 7. Fail-Closed: Unconfigured or failing providers cleanly return RUNTIME_UNAVAILABLE or failure results.
+ * 5. Network Egress Policy: Default deny-by-default with explicit allowlist forwarding.
+ * 6. Post-Allocation Abort Fencing: Cleanly tears down sandbox if caller aborted during allocation.
+ * 7. Independent Adapter-Level Wall-Clock Timeout: Never hangs even if remote RPC freezes.
+ * 8. Cleanup Failure Tracking & Reconciliation: Sessions with failed destruction are tracked for retry.
  */
 export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
   readonly kind = 'cloud' as const;
@@ -82,11 +101,15 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
   private readonly providerClient?: CloudSandboxProviderClient;
   private readonly defaultTimeoutMs: number;
   private readonly maxOutputBytes: number;
+  private readonly egressEnabled: boolean;
+  private readonly egressAllowlist: readonly string[];
 
   constructor(config: CloudSandboxConfig = {}) {
     this.providerClient = config.providerClient;
     this.defaultTimeoutMs = config.defaultTimeoutMs ?? DEFAULT_SANDBOX_TIMEOUT_MS;
     this.maxOutputBytes = config.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
+    this.egressEnabled = config.egressEnabled ?? false; // Deny-by-default
+    this.egressAllowlist = config.egressAllowlist ?? [];
   }
 
   get isConfigured(): boolean {
@@ -119,7 +142,6 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
 
     try {
       // Secret Fencing: Host process.env is NEVER forwarded to the remote sandbox.
-      // We pass only safe, strictly scoped workspace and run identifiers.
       const safeEnv: Record<string, string> = {
         GIGA_SANDBOX: '1',
         GIGA_WORKSPACE_ID: request.workspaceId,
@@ -127,13 +149,30 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
         NODE_ENV: 'production',
       };
 
+      const networkPolicy: SandboxNetworkPolicy = {
+        egressEnabled: this.egressEnabled,
+        allowlist: this.egressAllowlist,
+      };
+
       const { sandboxId } = await this.providerClient.createSandbox({
         workspaceId: request.workspaceId,
         ownerId: request.ownerId,
         timeoutMs,
         env: safeEnv,
+        networkPolicy,
         signal: request.signal,
       });
+
+      // Post-Allocation Abort Fencing:
+      // If the caller aborted while sandbox allocation was in flight, destroy it immediately!
+      if (request.signal.aborted) {
+        await this.providerClient.destroySandbox(sandboxId).catch(() => {});
+        return {
+          available: false,
+          code: 'RUNTIME_UNAVAILABLE',
+          reason: 'Execution was aborted during sandbox allocation',
+        };
+      }
 
       this.sessions.set(sessionId, {
         sessionId,
@@ -146,6 +185,8 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
         createdAt: new Date().toISOString(),
         timeoutMs,
         active: true,
+        destroyStatus: 'active',
+        destroyAttempts: 0,
       });
 
       return { available: true, sessionId };
@@ -223,11 +264,26 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
       };
     }
 
-    try {
+    // 3. Independent Adapter-Level Wall-Clock Timeout
+    const effectiveTimeoutMs = Math.min(session.timeoutMs, this.defaultTimeoutMs);
+    const timeoutController = new AbortController();
+    let timeoutTimer: NodeJS.Timeout | undefined;
+
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutTimer = setTimeout(() => {
+        timeoutController.abort();
+        reject(new Error(`Sandbox execution timed out after ${effectiveTimeoutMs}ms`));
+      }, effectiveTimeoutMs);
+    });
+
+    const abortHandler = () => timeoutController.abort();
+    signal.addEventListener('abort', abortHandler, { once: true });
+
+    const executionPromise = (async (): Promise<BoundedToolResult> => {
       switch (toolCall.toolName) {
         case 'list_files': {
           const pathPrefix = (toolCall.args.path as string | undefined)?.trim() ?? '';
-          const files = await this.providerClient.listFiles(session.sandboxId, pathPrefix);
+          const files = await this.providerClient!.listFiles(session.sandboxId, pathPrefix);
           return {
             success: true,
             output: { files, count: files.length },
@@ -237,8 +293,8 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
 
         case 'read_file': {
           const filePath = toolCall.args.path as string;
-          const { content, bytes } = await this.providerClient.readFile(session.sandboxId, filePath);
-          const sanitizedContent = sanitizeOutput(content, this.maxOutputBytes);
+          const { content, bytes } = await this.providerClient!.readFile(session.sandboxId, filePath);
+          const sanitizedContent = sanitizeSandboxOutput(content, this.maxOutputBytes);
           return {
             success: true,
             output: { path: filePath, content: sanitizedContent, bytes },
@@ -249,7 +305,7 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
         case 'write_file': {
           const filePath = toolCall.args.path as string;
           const content = toolCall.args.content as string;
-          const { bytesWritten } = await this.providerClient.writeFile(session.sandboxId, filePath, content);
+          const { bytesWritten } = await this.providerClient!.writeFile(session.sandboxId, filePath, content);
           return {
             success: true,
             output: { path: filePath, bytesWritten },
@@ -261,7 +317,7 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
           const filePath = toolCall.args.path as string;
           const find = toolCall.args.find as string;
           const replace = toolCall.args.replace as string;
-          const { content } = await this.providerClient.readFile(session.sandboxId, filePath);
+          const { content } = await this.providerClient!.readFile(session.sandboxId, filePath);
           if (!content.includes(find)) {
             return {
               success: false,
@@ -272,7 +328,7 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
             };
           }
           const updated = content.replace(find, replace);
-          await this.providerClient.writeFile(session.sandboxId, filePath, updated);
+          await this.providerClient!.writeFile(session.sandboxId, filePath, updated);
           return {
             success: true,
             output: { path: filePath, replacements: 1 },
@@ -282,14 +338,14 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
 
         case 'run_build': {
           const buildCmd = (toolCall.args.command as string | undefined)?.trim() || 'npm run build';
-          const res = await this.providerClient.executeCommand(session.sandboxId, {
+          const res = await this.providerClient!.executeCommand(session.sandboxId, {
             command: buildCmd,
-            timeoutMs: session.timeoutMs,
-            signal,
+            timeoutMs: effectiveTimeoutMs,
+            signal: timeoutController.signal,
           });
 
-          const stdout = sanitizeOutput(res.stdout, this.maxOutputBytes);
-          const stderr = sanitizeOutput(res.stderr, this.maxOutputBytes);
+          const stdout = sanitizeSandboxOutput(res.stdout, this.maxOutputBytes);
+          const stderr = sanitizeSandboxOutput(res.stderr, this.maxOutputBytes);
 
           if (res.exitCode === 0) {
             session.verifiedChecks.set('run_build', {
@@ -321,14 +377,14 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
         case 'run_tests': {
           const filter = (toolCall.args.testFilter as string | undefined)?.trim();
           const testCmd = filter ? `npm test -- -t "${filter}"` : 'npm test';
-          const res = await this.providerClient.executeCommand(session.sandboxId, {
+          const res = await this.providerClient!.executeCommand(session.sandboxId, {
             command: testCmd,
-            timeoutMs: session.timeoutMs,
-            signal,
+            timeoutMs: effectiveTimeoutMs,
+            signal: timeoutController.signal,
           });
 
-          const stdout = sanitizeOutput(res.stdout, this.maxOutputBytes);
-          const stderr = sanitizeOutput(res.stderr, this.maxOutputBytes);
+          const stdout = sanitizeSandboxOutput(res.stdout, this.maxOutputBytes);
+          const stderr = sanitizeSandboxOutput(res.stderr, this.maxOutputBytes);
 
           if (res.exitCode === 0) {
             session.verifiedChecks.set('run_tests', {
@@ -361,15 +417,15 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
           const command = (toolCall.args.command as string | undefined)?.trim() ?? '';
           const args = Array.isArray(toolCall.args.args) ? (toolCall.args.args as string[]) : undefined;
 
-          const res = await this.providerClient.executeCommand(session.sandboxId, {
+          const res = await this.providerClient!.executeCommand(session.sandboxId, {
             command,
             args,
-            timeoutMs: session.timeoutMs,
-            signal,
+            timeoutMs: effectiveTimeoutMs,
+            signal: timeoutController.signal,
           });
 
-          const stdout = sanitizeOutput(res.stdout, this.maxOutputBytes);
-          const stderr = sanitizeOutput(res.stderr, this.maxOutputBytes);
+          const stdout = sanitizeSandboxOutput(res.stdout, this.maxOutputBytes);
+          const stderr = sanitizeSandboxOutput(res.stderr, this.maxOutputBytes);
 
           return {
             success: res.exitCode === 0,
@@ -389,6 +445,10 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
             errorMessage: `Sandbox does not support tool '${toolCall.toolName}'`,
           };
       }
+    })();
+
+    try {
+      return await Promise.race([executionPromise, timeoutPromise]);
     } catch (err: unknown) {
       const durationMs = Date.now() - start;
       if (signal.aborted) {
@@ -402,7 +462,7 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
       }
       const message = err instanceof Error ? err.message : 'Cloud sandbox execution failed';
       const lower = message.toLowerCase();
-      const isTimeout = lower.includes('timeout') || lower.includes('timed out') || durationMs >= session.timeoutMs;
+      const isTimeout = lower.includes('timeout') || lower.includes('timed out') || durationMs >= effectiveTimeoutMs;
       return {
         success: false,
         output: {},
@@ -410,6 +470,9 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
         errorCode: isTimeout ? 'TIMEOUT' : 'EXECUTION_FAILED',
         errorMessage: message,
       };
+    } finally {
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      signal.removeEventListener('abort', abortHandler);
     }
   }
 
@@ -454,17 +517,42 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
 
   async stop(sessionId: string): Promise<void> {
     const session = this.sessions.get(sessionId);
-    if (session) {
-      session.active = false;
-      if (this.providerClient) {
-        await this.providerClient.destroySandbox(session.sandboxId).catch(() => {});
+    if (!session) return;
+    session.active = false;
+
+    if (this.providerClient && session.destroyStatus !== 'destroyed') {
+      session.destroyStatus = 'destroying';
+      session.destroyAttempts++;
+      try {
+        await this.providerClient.destroySandbox(session.sandboxId);
+        session.destroyStatus = 'destroyed';
+        session.destroyError = undefined;
+      } catch (err) {
+        session.destroyStatus = 'destroy_failed';
+        session.destroyError = err instanceof Error ? err.message : String(err);
+        throw err;
       }
     }
   }
 
-  async cleanup(sessionId: string): Promise<void> {
-    await this.stop(sessionId);
-    this.sessions.delete(sessionId);
+  async cleanup(sessionId: string, options: { force?: boolean } = {}): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+
+    try {
+      await this.stop(sessionId);
+    } catch (err) {
+      if (!options.force) {
+        // Keep session recorded in this.sessions so reconciliation worker can retry!
+        throw new Error(
+          `Failed to destroy sandbox '${session.sandboxId}': ${err instanceof Error ? err.message : String(err)}. Session retained for reconciliation.`
+        );
+      }
+    }
+
+    if (session.destroyStatus === 'destroyed' || options.force) {
+      this.sessions.delete(sessionId);
+    }
   }
 
   async getSession(sessionId: string): Promise<SandboxSessionInfo | undefined> {
@@ -481,6 +569,26 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
       timeoutMs: session.timeoutMs,
     };
   }
+
+  getPendingDestructions(): readonly CloudSessionState[] {
+    return Array.from(this.sessions.values()).filter((s) => s.destroyStatus === 'destroy_failed');
+  }
+
+  async retryDestroy(sessionId: string): Promise<boolean> {
+    const session = this.sessions.get(sessionId);
+    if (!session || !this.providerClient) return false;
+    session.destroyAttempts++;
+    try {
+      await this.providerClient.destroySandbox(session.sandboxId);
+      session.destroyStatus = 'destroyed';
+      session.destroyError = undefined;
+      return true;
+    } catch (err) {
+      session.destroyStatus = 'destroy_failed';
+      session.destroyError = err instanceof Error ? err.message : String(err);
+      return false;
+    }
+  }
 }
 
 /**
@@ -495,34 +603,39 @@ export class SimulatedCloudSandboxProviderClient implements CloudSandboxProvider
     readonly workspaceId: string;
     readonly ownerId: string;
     readonly env: Record<string, string>;
+    readonly networkPolicy: SandboxNetworkPolicy;
     readonly files: Map<string, string>;
     destroyed: boolean;
   }>();
 
   public simulateTimeout = false;
+  public simulateHangingCommand = false;
   public simulateNetworkCrash = false;
   public simulateBuildFailure = false;
   public simulateTestFailure = false;
+  public simulateDestroyFailure = false;
+  public simulateLateAllocationMs = 0;
   public lastReceivedEnv?: Record<string, string>;
+  public lastReceivedNetworkPolicy?: SandboxNetworkPolicy;
 
-  async createSandbox(params: {
-    workspaceId: string;
-    ownerId: string;
-    timeoutMs: number;
-    env?: Record<string, string>;
-  }): Promise<{ sandboxId: string }> {
+  async createSandbox(params: CreateSandboxParams): Promise<{ sandboxId: string }> {
     if (this.simulateNetworkCrash) {
       throw new Error('Simulated network crash during sandbox creation');
+    }
+    if (this.simulateLateAllocationMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, this.simulateLateAllocationMs));
     }
     const sandboxId = `sbx-${crypto.randomUUID()}`;
     const files = new Map<string, string>();
     this.lastReceivedEnv = params.env;
+    this.lastReceivedNetworkPolicy = params.networkPolicy;
 
     this.sandboxes.set(sandboxId, {
       sandboxId,
       workspaceId: params.workspaceId,
       ownerId: params.ownerId,
       env: params.env ?? {},
+      networkPolicy: params.networkPolicy,
       files,
       destroyed: false,
     });
@@ -538,6 +651,15 @@ export class SimulatedCloudSandboxProviderClient implements CloudSandboxProvider
     const sbx = this.sandboxes.get(sandboxId);
     if (!sbx || sbx.destroyed) {
       throw new Error(`Sandbox '${sandboxId}' not found or destroyed`);
+    }
+
+    if (this.simulateHangingCommand) {
+      // Simulate hanging RPC that never resolves unless signal is aborted
+      return new Promise((_, reject) => {
+        params.signal?.addEventListener('abort', () => {
+          reject(new Error('Command aborted during hanging execution'));
+        }, { once: true });
+      });
     }
 
     if (this.simulateTimeout) {
@@ -604,12 +726,18 @@ export class SimulatedCloudSandboxProviderClient implements CloudSandboxProvider
 
   async destroySandbox(sandboxId: string): Promise<void> {
     const sbx = this.sandboxes.get(sandboxId);
-    if (sbx) {
-      sbx.destroyed = true;
+    if (!sbx) throw new Error(`Sandbox '${sandboxId}' not found`);
+    if (this.simulateDestroyFailure) {
+      throw new Error(`Simulated failure destroying sandbox '${sandboxId}' (network timeout or provider 500)`);
     }
+    sbx.destroyed = true;
   }
 
   getSandboxCount(): number {
     return Array.from(this.sandboxes.values()).filter((s) => !s.destroyed).length;
+  }
+
+  getRawSandbox(sandboxId: string) {
+    return this.sandboxes.get(sandboxId);
   }
 }

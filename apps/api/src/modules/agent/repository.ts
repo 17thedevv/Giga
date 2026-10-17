@@ -23,6 +23,14 @@ import {
   type VerifiedCheck,
   type WorkerLease,
 } from './types.js';
+import {
+  SENSITIVE_KEY_NAMES,
+  isSensitiveKey,
+  redactJsonValue,
+  redactStringPatterns,
+  redactSensitiveContent,
+  boundUtf8,
+} from './redaction.js';
 import type { AgentPlan } from './decision-provider.js';
 
 interface MessageRow {
@@ -1055,142 +1063,12 @@ export class AgentRepository {
     });
   }
 
-  static isSensitiveKey(key: string): boolean {
-    if (!key || typeof key !== 'string') return false;
-    const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, '');
-    return /^(?:x)?(?:api)?key$|^(?:x)?(?:auth|access|refresh|lease|worker|session|id|bearer|security|csrf)?token$|^(?:client|shared)?secret(?:key)?$|^(?:pass|passwd|password)$|^(?:privatekey|privkey)$|^(?:authorization|proxyauthorization)$|^(?:credential|credentials)$|^(?:cookie|setcookie)$/i.test(
-      normalized
-    );
-  }
-
-  static readonly SENSITIVE_KEY_NAMES =
-    '(?:x[_-]?)?api[_-]?key|(?:x[_-]?)?(?:auth[_-]?|access[_-]?|refresh[_-]?|lease[_-]?|worker[_-]?|session[_-]?|id[_-]?|bearer[_-]?)?token|password|passwd|pass|(?:client[_-]?|shared[_-]?)?secret(?:[_-]?key)?|private[_-]?key|privkey|authorization|proxy[_-]?authorization|credentials?|cookies?';
-
-  static redactJsonValue(value: unknown): unknown {
-    if (value === null || value === undefined) return value;
-    if (typeof value === 'string') {
-      return AgentRepository.redactStringPatterns(value);
-    }
-    if (Array.isArray(value)) {
-      return value.map((item) => AgentRepository.redactJsonValue(item));
-    }
-    if (typeof value === 'object') {
-      const result: Record<string, unknown> = {};
-      for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-        if (AgentRepository.isSensitiveKey(k)) {
-          result[k] = '[REDACTED]';
-        } else {
-          result[k] = AgentRepository.redactJsonValue(v);
-        }
-      }
-      return result;
-    }
-    return value;
-  }
-
-  static redactStringPatterns(content: string): string {
-    if (!content || typeof content !== 'string') return '';
-    let sanitized = content;
-
-    // 1. Private keys (PEM format)
-    sanitized = sanitized.replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, '[REDACTED_PRIVATE_KEY]');
-
-    // 2. URL userinfo credentials: https://user:password@host or postgres://user:pass@host:port/db
-    sanitized = sanitized.replace(/([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)([^:\s/@]+):([^@\s/]+)@/gi, '$1$2:[REDACTED]@');
-
-    // 3. URL query parameters: ?api_key=..., &token=..., etc.
-    sanitized = sanitized.replace(/([?&](?:api[_-]?key|key|token|auth(?:[_-]?token)?|access[_-]?token|secret|password)=)(?!\[REDACTED\])[^&\s#]+/gi, '$1[REDACTED]');
-
-    // 4. Authorization headers: Authorization: Bearer ..., Authorization: Basic ..., Authorization: ...
-    sanitized = sanitized.replace(/\b(Authorization\s*:\s*(?:Bearer|Basic|Token)\s+)(?!\[REDACTED\])[^\s,;\r\n]+/gi, '$1[REDACTED]');
-    sanitized = sanitized.replace(/\b(Authorization\s*:\s*)(?!(?:Bearer|Basic|Token)\s+|\[REDACTED\])[^\s,;\r\n]+/gi, '$1[REDACTED]');
-
-    // 5. Standalone Authorization scheme tokens (Bearer ..., Basic ...)
-    sanitized = sanitized.replace(/\bBearer\s+(?!\[REDACTED\])[A-Za-z0-9\-_.~+/=]+/gi, 'Bearer [REDACTED]');
-    sanitized = sanitized.replace(/\bBasic\s+(?!\[REDACTED\])[A-Za-z0-9+/=]{16,}/gi, 'Basic [REDACTED]');
-
-    // 6. Common API key prefixes: sk-..., ghp-..., gho-..., pat-..., live_..., test_...
-    sanitized = sanitized.replace(/\b(?:sk|ghp|gho|ghu|ghs|ghr|pat|xoxb|xoxp|xapp|glpat|npm|live|test)[-_][A-Za-z0-9_\-]{8,}\b/gi, '[REDACTED_KEY]');
-
-    // 7. Quoted JSON / object key-value pairs:
-    // Matches "apiKey": "...", 'apiKey': "...", "X-API-Key": "...", "token": "...", etc.
-    const quotedRegex = new RegExp(
-      '(["\'])(' + AgentRepository.SENSITIVE_KEY_NAMES + ')\\1(\\s*:\\s*)(["\'])(?:\\\\.|(?!\\4)[^\\\\])*\\4',
-      'gi'
-    );
-    sanitized = sanitized.replace(quotedRegex, '$1$2$1$3$4[REDACTED]$4');
-
-    // Also handle quoted key with unquoted value (e.g. number, boolean, null in JSON)
-    const quotedUnquotedValRegex = new RegExp(
-      '(["\'])(' + AgentRepository.SENSITIVE_KEY_NAMES + ')\\1(\\s*:\\s*)(?!(?:\\[REDACTED\\]|"\\[REDACTED\\]"))([^\\s"\',;}\\]]+)',
-      'gi'
-    );
-    sanitized = sanitized.replace(quotedUnquotedValRegex, '$1$2$1$3"[REDACTED]"');
-
-    // 8. Unquoted key assignments (e.g. CLI output, env lines, key=value, key: value)
-    const unquotedRegex = new RegExp(
-      '\\b(' + AgentRepository.SENSITIVE_KEY_NAMES + ')(\\s*[:=]\\s*)(?!(?:\\[REDACTED(?:_KEY)?\\]|"\\[REDACTED\\]"|[a-zA-Z0-9_\\-]+[:=]|(?:Bearer|Basic|Token)\\s+\\[REDACTED\\]))(?:["\']([^"\'\\r\\n]+)["\']|([^\\s"\',;}\\]]+))',
-      'gi'
-    );
-    sanitized = sanitized.replace(unquotedRegex, '$1$2[REDACTED]');
-
-    return sanitized;
-  }
-
-  static redactSensitiveContent(content: string): string {
-    if (!content || typeof content !== 'string') return '';
-    const trimmed = content.trim();
-
-    // If the content is valid JSON, recursively redact structured keys first
-    if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
-      try {
-        const parsed = JSON.parse(trimmed);
-        const redactedObj = AgentRepository.redactJsonValue(parsed);
-        const isFormatted = content.includes('\n');
-        const jsonStr = JSON.stringify(redactedObj, null, isFormatted ? 2 : undefined);
-        return AgentRepository.redactStringPatterns(jsonStr);
-      } catch {
-        // Fallback to pattern-based string redaction
-      }
-    }
-
-    return AgentRepository.redactStringPatterns(content);
-  }
-
-  static boundUtf8(content: string, maxBytes = 16384): string {
-    const buf = Buffer.from(content, 'utf8');
-    if (buf.length <= maxBytes) return content;
-
-    let end = maxBytes;
-    // Scan backwards past any UTF-8 continuation bytes (10xxxxxx)
-    while (end > 0 && (buf[end - 1]! & 0xC0) === 0x80) {
-      end--;
-    }
-
-    if (end > 0) {
-      const lead = buf[end - 1]!;
-      let seqLen = 1;
-      if ((lead & 0x80) === 0x00) seqLen = 1;
-      else if ((lead & 0xE0) === 0xC0) seqLen = 2;
-      else if ((lead & 0xF0) === 0xE0) seqLen = 3;
-      else if ((lead & 0xF8) === 0xF0) seqLen = 4;
-
-      if (end - 1 + seqLen > maxBytes) {
-        // Multi-byte character was cut in the middle; exclude its leading byte
-        end = end - 1;
-      } else {
-        // Multi-byte character fits completely within maxBytes
-        end = end - 1 + seqLen;
-      }
-    }
-
-    let result = buf.subarray(0, end).toString('utf8');
-    // Safety guard: ensure no decoding replacement char ever causes byte length to exceed maxBytes
-    while (Buffer.byteLength(result, 'utf8') > maxBytes) {
-      result = result.slice(0, -1);
-    }
-    return result;
-  }
+  static readonly SENSITIVE_KEY_NAMES = SENSITIVE_KEY_NAMES;
+  static isSensitiveKey = isSensitiveKey;
+  static redactJsonValue = redactJsonValue;
+  static redactStringPatterns = redactStringPatterns;
+  static redactSensitiveContent = redactSensitiveContent;
+  static boundUtf8 = boundUtf8;
 
   async appendAssistantMessage(ownerId: string, runId: string, content: string): Promise<AgentMessage> {
     return this.withRunLock(runId, async () => {
