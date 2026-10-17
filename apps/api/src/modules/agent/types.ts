@@ -20,8 +20,36 @@ export const AGENT_ERROR_CODES = [
   'INTERNAL_ERROR',
   'ABORTED',
   'PERMANENT_ERROR',
+  'TIMEOUT',
+  'SECURITY_VIOLATION',
 ] as const;
 export type AgentErrorCode = typeof AGENT_ERROR_CODES[number];
+
+export interface SandboxFileEntry {
+  readonly path: string;
+  readonly size: number;
+  readonly sha256?: string;
+}
+
+export interface SandboxSnapshot {
+  readonly sessionId: string;
+  readonly workspaceId: string;
+  readonly capturedAt: string;
+  readonly files: readonly SandboxFileEntry[];
+  readonly totalBytes: number;
+  readonly fileCount: number;
+}
+
+export interface SandboxSessionInfo {
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly workspaceId: string;
+  readonly ownerId: string;
+  readonly mode: AgentMode;
+  readonly active: boolean;
+  readonly createdAt: string;
+  readonly timeoutMs?: number;
+}
 
 export interface VerifiedCheck {
   readonly name: string;

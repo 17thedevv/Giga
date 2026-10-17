@@ -1,4 +1,6 @@
-import type { AgentMode, ToolRisk, VerifiedCheck } from './types.js';
+import crypto from 'node:crypto';
+import type { AgentMode, ToolRisk, VerifiedCheck, SandboxSnapshot, SandboxFileEntry, SandboxSessionInfo } from './types.js';
+import { isSafeRelativePath } from './tool-registry.js';
 
 export interface ValidatedToolCall {
   readonly toolCallId: string;
@@ -23,10 +25,11 @@ export interface PrepareRuntimeRequest {
   readonly task: string;
   readonly modelId: string;
   readonly signal: AbortSignal;
+  readonly timeoutMs?: number;
 }
 
 export type PrepareRuntimeResult =
-  | { readonly available: false; readonly code: 'RUNTIME_UNAVAILABLE' }
+  | { readonly available: false; readonly code: 'RUNTIME_UNAVAILABLE' | 'TENANT_MISMATCH'; readonly reason?: string }
   | { readonly available: true; readonly sessionId: string };
 
 /** Future execution-plane port. No host command, filesystem, credential or provider transport belongs here. */
@@ -35,15 +38,20 @@ export interface ExecutionRuntime {
   prepare(request: PrepareRuntimeRequest): Promise<PrepareRuntimeResult>;
   invoke(sessionId: string, toolCall: ValidatedToolCall, signal: AbortSignal): Promise<BoundedToolResult>;
   getVerificationEvidence(sessionId: string): Promise<readonly VerifiedCheck[]>;
+  createSnapshot(sessionId: string): Promise<SandboxSnapshot>;
   stop(sessionId: string): Promise<void>;
+  cleanup(sessionId: string): Promise<void>;
+  getSession?(sessionId: string): Promise<SandboxSessionInfo | undefined>;
 }
 
 /** The default shipped runtime implementation. It allocates nothing and executes nothing. */
 export class UnavailableExecutionRuntime implements ExecutionRuntime {
   readonly kind = 'cloud';
+
   async prepare(): Promise<PrepareRuntimeResult> {
     return { available: false, code: 'RUNTIME_UNAVAILABLE' };
   }
+
   async invoke(): Promise<BoundedToolResult> {
     return {
       success: false,
@@ -53,10 +61,29 @@ export class UnavailableExecutionRuntime implements ExecutionRuntime {
       errorMessage: 'Agent execution runtime is not available',
     };
   }
+
   async getVerificationEvidence(): Promise<readonly VerifiedCheck[]> {
     return [];
   }
+
+  async createSnapshot(sessionId: string): Promise<SandboxSnapshot> {
+    return {
+      sessionId,
+      workspaceId: '',
+      capturedAt: new Date().toISOString(),
+      files: [],
+      totalBytes: 0,
+      fileCount: 0,
+    };
+  }
+
   async stop(): Promise<void> {}
+
+  async cleanup(): Promise<void> {}
+
+  async getSession(): Promise<SandboxSessionInfo | undefined> {
+    return undefined;
+  }
 }
 
 export interface FakeRuntimeOptions {
@@ -64,6 +91,12 @@ export interface FakeRuntimeOptions {
   readonly shouldFailBuild?: (files: ReadonlyMap<string, string>) => boolean;
   readonly shouldFailTests?: (files: ReadonlyMap<string, string>) => boolean;
   readonly simulatedLatencyMs?: number;
+  readonly defaultTimeoutMs?: number;
+  readonly customCommandRunner?: (
+    command: string,
+    args?: readonly string[],
+    files?: Map<string, string>
+  ) => { exitCode: number; stdout: string; stderr: string };
 }
 
 interface FakeSessionState {
@@ -74,6 +107,9 @@ interface FakeSessionState {
   readonly mode: AgentMode;
   readonly files: Map<string, string>;
   readonly verifiedChecks: Map<string, VerifiedCheck>;
+  readonly env: ReadonlyMap<string, string>;
+  readonly createdAt: string;
+  readonly timeoutMs?: number;
   active: boolean;
 }
 
@@ -84,6 +120,9 @@ interface FakeSessionState {
  * - No host shell
  * - No host filesystem access (node:fs)
  * - Pure in-memory Map storage
+ * - Server-side mode policy gate (ask/plan denies writes and execution)
+ * - Path traversal fencing
+ * - Secret fencing (no host process.env exposed)
  */
 export class DeterministicFakeExecutionRuntime implements ExecutionRuntime {
   readonly kind = 'fake';
@@ -93,16 +132,47 @@ export class DeterministicFakeExecutionRuntime implements ExecutionRuntime {
 
   async prepare(request: PrepareRuntimeRequest): Promise<PrepareRuntimeResult> {
     if (request.signal.aborted) {
-      return { available: false, code: 'RUNTIME_UNAVAILABLE' };
+      return { available: false, code: 'RUNTIME_UNAVAILABLE', reason: 'Preparation aborted' };
     }
 
     const sessionId = `fake-session-${request.runId}`;
+
+    const existing = this.sessions.get(sessionId);
+    if (existing) {
+      if (existing.ownerId !== request.ownerId || existing.workspaceId !== request.workspaceId) {
+        return {
+          available: false,
+          code: 'TENANT_MISMATCH',
+          reason: `Session for run '${request.runId}' belongs to another owner or workspace`,
+        };
+      }
+      if (existing.active) {
+        if (existing.mode !== request.mode) {
+          return {
+            available: false,
+            code: 'TENANT_MISMATCH',
+            reason: `Active session for run '${request.runId}' was prepared in '${existing.mode}' mode, cannot reuse in '${request.mode}' mode`,
+          };
+        }
+        return { available: true, sessionId };
+      }
+    }
+
     const files = new Map<string, string>();
     if (this.options.initialFiles) {
       for (const [p, content] of Object.entries(this.options.initialFiles)) {
         files.set(p, content);
       }
     }
+
+    // Secret Fencing: The sandbox session receives ONLY isolated, safe workspace identifiers.
+    // Host process environment variables (such as DATABASE_URL, JWT_SECRET, etc.) are strictly excluded.
+    const isolatedEnv = new Map<string, string>([
+      ['GIGA_SANDBOX', '1'],
+      ['GIGA_WORKSPACE_ID', request.workspaceId],
+      ['GIGA_RUN_ID', request.runId],
+      ['NODE_ENV', 'test'],
+    ]);
 
     this.sessions.set(sessionId, {
       sessionId,
@@ -112,6 +182,9 @@ export class DeterministicFakeExecutionRuntime implements ExecutionRuntime {
       mode: request.mode,
       files,
       verifiedChecks: new Map<string, VerifiedCheck>(),
+      env: isolatedEnv,
+      createdAt: new Date().toISOString(),
+      timeoutMs: request.timeoutMs ?? this.options.defaultTimeoutMs,
       active: true,
     });
 
@@ -141,9 +214,54 @@ export class DeterministicFakeExecutionRuntime implements ExecutionRuntime {
       };
     }
 
+    // Server-side Mode Policy Enforcement (Defense-in-depth gate)
+    if (session.mode === 'ask' || session.mode === 'plan') {
+      if (
+        toolCall.risk !== 'read' ||
+        ['write_file', 'edit_file', 'run_build', 'run_tests', 'run_command'].includes(toolCall.toolName)
+      ) {
+        return {
+          success: false,
+          output: {},
+          durationMs: Date.now() - start,
+          errorCode: 'POLICY_VIOLATION',
+          errorMessage: `Tool '${toolCall.toolName}' with risk '${toolCall.risk}' is not permitted in '${session.mode}' mode`,
+        };
+      }
+    }
+
+    // Path Traversal and Host Escape Fencing
+    if (typeof toolCall.args?.path === 'string') {
+      const targetPath = toolCall.args.path;
+      if (!isSafeRelativePath(targetPath)) {
+        return {
+          success: false,
+          output: {},
+          durationMs: Date.now() - start,
+          errorCode: 'SECURITY_VIOLATION',
+          errorMessage: `Path traversal or invalid path detected: '${targetPath}'`,
+        };
+      }
+    }
+
+    const effectiveTimeoutMs = session.timeoutMs ?? this.options.defaultTimeoutMs;
+
     if (this.options.simulatedLatencyMs && this.options.simulatedLatencyMs > 0) {
+      const latency = this.options.simulatedLatencyMs;
+      if (effectiveTimeoutMs && latency > effectiveTimeoutMs) {
+        // Latency exceeds allowed timeout
+        await new Promise((resolve) => setTimeout(resolve, Math.min(effectiveTimeoutMs, 20)));
+        return {
+          success: false,
+          output: {},
+          durationMs: effectiveTimeoutMs,
+          errorCode: 'TIMEOUT',
+          errorMessage: `Execution timed out after ${effectiveTimeoutMs}ms`,
+        };
+      }
+
       await new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(resolve, this.options.simulatedLatencyMs);
+        const timer = setTimeout(resolve, latency);
         signal.addEventListener('abort', () => {
           clearTimeout(timer);
           reject(new Error('Aborted during execution'));
@@ -157,6 +275,7 @@ export class DeterministicFakeExecutionRuntime implements ExecutionRuntime {
           errorMessage: 'Execution was aborted',
         };
       });
+
       if (signal.aborted) {
         return {
           success: false,
@@ -208,6 +327,7 @@ export class DeterministicFakeExecutionRuntime implements ExecutionRuntime {
         const filePath = toolCall.args.path as string;
         const content = toolCall.args.content as string;
         session.files.set(filePath, content);
+        session.verifiedChecks.clear();
         return {
           success: true,
           output: { path: filePath, bytesWritten: Buffer.byteLength(content, 'utf8') },
@@ -240,6 +360,7 @@ export class DeterministicFakeExecutionRuntime implements ExecutionRuntime {
         }
         const updated = content.replace(find, replace);
         session.files.set(filePath, updated);
+        session.verifiedChecks.clear();
         return {
           success: true,
           output: { path: filePath, replacements: 1 },
@@ -248,6 +369,7 @@ export class DeterministicFakeExecutionRuntime implements ExecutionRuntime {
       }
 
       case 'run_build': {
+        session.verifiedChecks.delete('run_build');
         const fail =
           this.options.shouldFailBuild?.(session.files) ??
           Array.from(session.files.values()).some((c) => c.includes('SYNTAX_ERROR'));
@@ -278,6 +400,7 @@ export class DeterministicFakeExecutionRuntime implements ExecutionRuntime {
       }
 
       case 'run_tests': {
+        session.verifiedChecks.delete('run_tests');
         const fail =
           this.options.shouldFailTests?.(session.files) ??
           Array.from(session.files.values()).some((c) => c.includes('TEST_FAILURE'));
@@ -307,6 +430,36 @@ export class DeterministicFakeExecutionRuntime implements ExecutionRuntime {
         };
       }
 
+      case 'run_command': {
+        // Verification freshness: Any command execution can alter workspace filesystem state,
+        // so existing verification evidence (run_build / run_tests) must be invalidated.
+        session.verifiedChecks.clear();
+
+        const command = (toolCall.args.command as string | undefined)?.trim() ?? '';
+        const args = Array.isArray(toolCall.args.args) ? (toolCall.args.args as string[]) : undefined;
+
+        if (this.options.customCommandRunner) {
+          const res = this.options.customCommandRunner(command, args, session.files);
+          return {
+            success: res.exitCode === 0,
+            output: { exitCode: res.exitCode, stdout: res.stdout, stderr: res.stderr },
+            durationMs: Date.now() - start,
+            errorCode: res.exitCode === 0 ? undefined : 'COMMAND_FAILED',
+            errorMessage: res.exitCode === 0 ? undefined : `Command exited with code ${res.exitCode}`,
+          };
+        }
+
+        return {
+          success: true,
+          output: {
+            exitCode: 0,
+            stdout: `Fake command '${command}' executed successfully in isolated sandbox`,
+            stderr: '',
+          },
+          durationMs: Date.now() - start,
+        };
+      }
+
       default:
         return {
           success: false,
@@ -323,6 +476,34 @@ export class DeterministicFakeExecutionRuntime implements ExecutionRuntime {
     return session ? Array.from(session.verifiedChecks.values()) : [];
   }
 
+  async createSnapshot(sessionId: string): Promise<SandboxSnapshot> {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      throw new Error(`Execution session '${sessionId}' not found`);
+    }
+
+    const files: SandboxFileEntry[] = [];
+    let totalBytes = 0;
+
+    for (const [p, content] of session.files.entries()) {
+      const size = Buffer.byteLength(content, 'utf8');
+      const sha256 = crypto.createHash('sha256').update(content, 'utf8').digest('hex');
+      files.push({ path: p, size, sha256 });
+      totalBytes += size;
+    }
+
+    files.sort((a, b) => a.path.localeCompare(b.path));
+
+    return {
+      sessionId,
+      workspaceId: session.workspaceId,
+      capturedAt: new Date().toISOString(),
+      files,
+      totalBytes,
+      fileCount: files.length,
+    };
+  }
+
   async stop(sessionId: string): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (session) {
@@ -330,8 +511,37 @@ export class DeterministicFakeExecutionRuntime implements ExecutionRuntime {
     }
   }
 
-  // Test inspection helper (in-memory only)
+  async cleanup(sessionId: string): Promise<void> {
+    await this.stop(sessionId);
+  }
+
+  async getSession(sessionId: string): Promise<SandboxSessionInfo | undefined> {
+    const session = this.sessions.get(sessionId);
+    if (!session) return undefined;
+    return {
+      sessionId: session.sessionId,
+      runId: session.runId,
+      workspaceId: session.workspaceId,
+      ownerId: session.ownerId,
+      mode: session.mode,
+      active: session.active,
+      createdAt: session.createdAt,
+      timeoutMs: session.timeoutMs,
+    };
+  }
+
+  // Inspection helpers for testing
   getFile(sessionId: string, path: string): string | undefined {
     return this.sessions.get(sessionId)?.files.get(path);
+  }
+
+  getEnvironment(sessionId: string): ReadonlyMap<string, string> | undefined {
+    return this.sessions.get(sessionId)?.env;
+  }
+
+  assertTenantAccess(sessionId: string, callerOwnerId: string, callerWorkspaceId: string): boolean {
+    const session = this.sessions.get(sessionId);
+    if (!session) return false;
+    return session.ownerId === callerOwnerId && session.workspaceId === callerWorkspaceId;
   }
 }
