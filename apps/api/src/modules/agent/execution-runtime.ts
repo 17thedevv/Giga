@@ -305,6 +305,7 @@ export class DeterministicFakeExecutionRuntime implements ExecutionRuntime {
         const filePath = toolCall.args.path as string;
         const content = toolCall.args.content as string;
         session.files.set(filePath, content);
+        session.verifiedChecks.clear();
         return {
           success: true,
           output: { path: filePath, bytesWritten: Buffer.byteLength(content, 'utf8') },
@@ -337,6 +338,7 @@ export class DeterministicFakeExecutionRuntime implements ExecutionRuntime {
         }
         const updated = content.replace(find, replace);
         session.files.set(filePath, updated);
+        session.verifiedChecks.clear();
         return {
           success: true,
           output: { path: filePath, replacements: 1 },
@@ -345,6 +347,7 @@ export class DeterministicFakeExecutionRuntime implements ExecutionRuntime {
       }
 
       case 'run_build': {
+        session.verifiedChecks.delete('run_build');
         const fail =
           this.options.shouldFailBuild?.(session.files) ??
           Array.from(session.files.values()).some((c) => c.includes('SYNTAX_ERROR'));
@@ -375,6 +378,7 @@ export class DeterministicFakeExecutionRuntime implements ExecutionRuntime {
       }
 
       case 'run_tests': {
+        session.verifiedChecks.delete('run_tests');
         const fail =
           this.options.shouldFailTests?.(session.files) ??
           Array.from(session.files.values()).some((c) => c.includes('TEST_FAILURE'));

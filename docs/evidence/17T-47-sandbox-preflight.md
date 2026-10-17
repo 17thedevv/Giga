@@ -6,7 +6,7 @@
 **PR Title:** `feat(agent): prepare isolated sandbox runtime`<br>
 **Owner:** Trà (Agent / Backend)<br>
 **Reviewer:** Tráng A Thư (Frontend / UX)<br>
-**Review Status:** Addressed Peer Review (Review ID: 5558125416). Ready for Re-Review (Draft PR, unmerged)
+**Review Status:** Addressed Peer Review (Review ID: 5559301292). Ready for Re-Review (Draft PR, unmerged)
 
 ---
 
@@ -14,29 +14,26 @@
 
 This task prepares the **isolated execution plane** for GigaAgent without making the API host a runtime for AI-generated code. It implements the security preflight gates outlined in [ADR-003](../decisions/ADR-003-agentic-workspace-and-isolated-runtime.md), [GIGA_AGENT_RUNTIME_SECURITY_V0.2](../architecture/GIGA_AGENT_RUNTIME_SECURITY_V0.2.md), and locked architecture invariant **INV-07** (*no model-generated shell execution on the Hono/API host*).
 
-### Resolutions to Peer Review (Review ID: 5558125416):
+### Resolutions to Peer Review (Review ID: 5559301292):
 
-1. **P1 — Unified Canonical Secret Redaction (`redaction.ts`):**
-   - Replaced weak regex in sandbox adapter with shared canonical `redactSensitiveContent()` and `boundUtf8()` extracted to [`apps/api/src/modules/agent/redaction.ts`](../../apps/api/src/modules/agent/redaction.ts).
-   - Fixes the `$1` replacement bug where raw credentials were leaked.
-   - Tested and verified against unquoted key assignments (`api_key=...`, `token: ...`), standalone `Bearer` schemes, quoted JSON structures, and UTF-8 multi-byte emojis.
+1. **P1 — Verification Freshness Across Runs (`sandbox-adapter.ts` & `execution-runtime.ts`):**
+   - **Problem:** Prior implementations allowed stale verification checks (`run_build: passed`) to persist across subsequent file edits (`write_file`, `edit_file`) or subsequent build timeouts/errors, potentially bypassing the completion gate.
+   - **Resolution:** Any mutating file modification (`write_file`, `edit_file`) immediately purges all verification evidence (`session.verifiedChecks.clear()`). In addition, invoking a new verification attempt (`run_build`, `run_tests`) immediately deletes prior checks of that type (`session.verifiedChecks.delete('run_build')`), and if the invocation times out or errors, that check is deleted in the catch block to guarantee stale passes cannot survive.
+   - **Verification:** Covered by test `verification freshness: file edit invalidates PASS and subsequent build timeout denies completion`.
 
-2. **P1 — Cancellation, Timeout & Cleanup Failure Fencing (`sandbox-adapter.ts`):**
-   - **Post-Allocation Abort Fencing:** If the caller aborts while sandbox allocation is in-flight, `prepare()` immediately destroys the newly allocated remote sandbox via `destroySandbox()` to eliminate cloud zombie/leak risks and fails closed (`RUNTIME_UNAVAILABLE`).
-   - **Independent Adapter-Level Timeout:** Implemented an independent wall-clock timeout race using `Promise.race()` and `AbortController`. If a remote provider RPC hangs indefinitely, the adapter terminates at `effectiveTimeoutMs` and returns `errorCode: 'TIMEOUT'`.
-   - **Cleanup Failure Tracking & Reconciliation:** `stop()` tracks `destroyStatus` (`'active' | 'destroying' | 'destroyed' | 'destroy_failed'`), `destroyError`, and `destroyAttempts`. `cleanup()` does NOT delete the session from memory if destruction failed, retaining it in `getPendingDestructions()` so ops/reconciliation workers can call `retryDestroy()`.
+2. **P1 — Immediate Cancellation Responsiveness (`sandbox-adapter.ts`):**
+   - **Problem:** Passing `signal` to remote provider RPC was insufficient if the remote provider client deadlock, hanged, or uncooperatively ignored the abort signal, causing the caller to wait up to the full 60s timeout.
+   - **Resolution:** Added an immediate abort listener promise (`abortPromise`) to `Promise.race([executionPromise, timeoutPromise, abortPromise])`. When the caller signal aborts, the adapter immediately rejects within milliseconds (<100ms) with `TIMEOUT`, while scheduling background disposal of the unresponsive remote session.
+   - **Verification:** Covered by test `cancellation responsiveness: user abort returns immediately without waiting for uncooperative provider or timeout`.
 
-3. **P1 — Network Egress Policy & Honest Security Status:**
-   - Adapter enforces a fail-closed default `egressEnabled: false` and forwards explicit `egressAllowlist` to `providerClient.createSandbox`.
-   - **Honest Security Acceptance:** Gate 4 (Network & Egress Boundary) is explicitly classified as **PENDING LIVE CLOUD VALIDATION**. Simulation verifies the adapter contract and policy forwarding, but live cloud network isolation (blocking SSRF `169.254.169.254` and outbound domains) cannot be asserted as verified until live cloud fixtures are run.
+3. **P1 — Duplicate Sandbox Allocation Prevention (`sandbox-adapter.ts`):**
+   - **Problem:** Multiple concurrent or sequential calls to `prepare()` with the same `runId` could overwrite in-memory sessions or leak orphaned remote sandboxes.
+   - **Resolution:** Added `inFlightPrepares` map tracking active allocation promises per `runId`. Concurrent requests join the exact same in-flight promise. Sequential calls detect existing active sessions and return them idempotently. If a prior session is in a failed or inactive state, it is safely cleaned up before allocating a new sandbox.
+   - **Verification:** Covered by test `duplicate allocation prevention: handles concurrent and sequential prepare calls without leaking sandboxes`.
 
-4. **P2 — Accurate E2B Official Pricing & Quota:**
-   - Corrected pricing estimate to official rates: **\$0.000028/sec for 2 vCPU** + **\$0.000009/sec for 2 GiB RAM** = **\$0.000037/sec (~ \$0.1332/hour)**.
-   - Initial \$100 credit on Hobby tier provides ~750 active compute hours.
-
-5. **CI Environment & Test Count Accuracy:**
-   - Accurately reports GitHub Actions CI environment: **PostgreSQL 16.15 on Alpine Linux** container with Node.js 22.
-   - Full CI test suite: **452/452 PASS, 0 failures, 0 skipped**.
+4. **P2 — Accurate CI Environment & Total Test Count:**
+   - CI environment: **PostgreSQL 16.15 on Alpine Linux** container with Node.js 22.
+   - Test suite: **464 total tests, 32 sandbox tests (32/32 PASS, 0 failures)**.
 
 ---
 
@@ -206,31 +203,34 @@ This task prepares the **isolated execution plane** for GigaAgent without making
     ✔ late allocation + destroy failure: retains failed sandbox destruction in pending destructions and allows retry (43.2704ms)
     ✔ late RPC completion fencing: late provider execution after timeout or session stop does not mutate verification evidence (123.2011ms)
     ✔ provider error message sanitization: redacts sensitive credentials from allocation reasons and RPC error messages (0.7385ms)
-  ✔ 8. Isolated Cloud Sandbox Adapter with Simulated Remote MicroVM (270.2459ms)
-✔ GigaAgent Isolated Sandbox Adapter & Cloud Security Gate (17T-47) (309.5246ms)
-ℹ tests 29
+    ✔ verification freshness: file edit invalidates PASS and subsequent build timeout denies completion (0.422ms)
+    ✔ cancellation responsiveness: user abort returns immediately without waiting for uncooperative provider or timeout (29.6191ms)
+    ✔ duplicate allocation prevention: handles concurrent and sequential prepare calls without leaking sandboxes (30.6519ms)
+  ✔ 8. Isolated Cloud Sandbox Adapter with Simulated Remote MicroVM (306.3248ms)
+✔ GigaAgent Isolated Sandbox Adapter & Cloud Security Gate (17T-47) (348.4565ms)
+ℹ tests 32
 ℹ suites 9
-ℹ pass 29
+ℹ pass 32
 ℹ fail 0
 ℹ cancelled 0
 ℹ skipped 0
 ℹ todo 0
-ℹ duration_ms 850.07
+ℹ duration_ms 3503.0897
 ```
 
 ### B. Full Backend CI Test Evidence (GitHub Actions & Real PostgreSQL 16.15)
 
 ```text
-ℹ tests 457
+ℹ tests 464
 ℹ suites 64
-ℹ pass 457
+ℹ pass 464
 ℹ fail 0
 ℹ cancelled 0
 ℹ skipped 0
 ℹ todo 0
 ```
-- Total tests: 457 / 457 PASS
-- Zero failures, zero skipped in GitHub Actions CI container.
+- Total tests: 464 / 464 PASS
+- Zero failures, zero skipped in GitHub Actions CI container with PostgreSQL 16-alpine service.
 - Environment: PostgreSQL 16.15 on Alpine Linux (`image: postgres:16-alpine`), Node.js 22.
 
 ### C. Typecheck & Build Status
@@ -250,10 +250,13 @@ This task prepares the **isolated execution plane** for GigaAgent without making
 - [x] Canonical secret redaction: extracted to `redaction.ts` and verified with regression tests.
 - [x] Post-allocation abort fencing & reconciliation: failed destructions recorded in `this.sessions` with `destroyStatus: 'destroy_failed'` and recoverable via `retryDestroy()`.
 - [x] Independent adapter-level wall-clock timeout & late RPC fencing: late provider completions after timeout or stop are fenced from mutating `session.verifiedChecks`.
+- [x] Verification freshness across runs: mutating file edits purge stale passes; failed/timed out verification attempts cannot preserve prior passes.
+- [x] Immediate cancellation responsiveness: user abort returns immediately without hanging on uncooperative provider RPC.
+- [x] Duplicate allocation prevention: concurrent and sequential `prepare()` calls deduplicated without leaking remote sandboxes.
 - [x] Provider error sanitization: all allocation reasons and command error messages are sanitized and bounded.
 - [x] Strict byte budget: `sanitizeSandboxOutput` guarantees `byteLength <= maxBytes` accounting for truncation marker.
 - [x] Network egress policy enforced fail-closed at adapter boundary and honestly labeled as pending live cloud validation.
-- [x] 29/29 sandbox tests passing; 457/457 total backend tests passing.
+- [x] 32/32 sandbox tests passing; 464/464 total backend tests passing.
 - [x] Zero billable cloud resources provisioned during development or testing.
 - [x] Evidence document updated at `docs/evidence/17T-47-sandbox-preflight.md`.
 - [x] Ready to push updated commit to Draft PR #33 for Thư's re-review.

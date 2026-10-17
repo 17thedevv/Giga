@@ -109,6 +109,7 @@ export function sanitizeSandboxOutput(text: string, maxBytes: number): string {
 export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
   readonly kind = 'cloud' as const;
   private readonly sessions = new Map<string, CloudSessionState>();
+  private readonly inFlightPrepares = new Map<string, Promise<PrepareRuntimeResult>>();
   private readonly providerClient?: CloudSandboxProviderClient;
   private readonly defaultTimeoutMs: number;
   private readonly maxOutputBytes: number;
@@ -151,33 +152,95 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
     const timeoutMs = request.timeoutMs ?? this.defaultTimeoutMs;
     const sessionId = `cloud-session-${request.runId}`;
 
-    try {
-      // Secret Fencing: Host process.env is NEVER forwarded to the remote sandbox.
-      const safeEnv: Record<string, string> = {
-        GIGA_SANDBOX: '1',
-        GIGA_WORKSPACE_ID: request.workspaceId,
-        GIGA_RUN_ID: request.runId,
-        NODE_ENV: 'production',
-      };
+    // 1. Sequential idempotency check:
+    const existing = this.sessions.get(sessionId);
+    if (existing) {
+      if (existing.active) {
+        // Active session already allocated and ready for this runId.
+        // Return existing sessionId without duplicate cloud allocation!
+        return { available: true, sessionId };
+      }
+      // Previous session exists but is inactive / destroyed / failed.
+      if (existing.destroyStatus !== 'destroyed') {
+        try {
+          await this.cleanup(sessionId);
+        } catch {
+          return {
+            available: false,
+            code: 'RUNTIME_UNAVAILABLE',
+            reason: `Previous sandbox session for run '${request.runId}' could not be cleaned up`,
+          };
+        }
+      }
+    }
 
-      const networkPolicy: SandboxNetworkPolicy = {
-        egressEnabled: this.egressEnabled,
-        allowlist: this.egressAllowlist,
-      };
+    // 2. Concurrent prepare deduplication:
+    const inFlight = this.inFlightPrepares.get(request.runId);
+    if (inFlight) {
+      return await inFlight;
+    }
 
-      const { sandboxId } = await this.providerClient.createSandbox({
-        workspaceId: request.workspaceId,
-        ownerId: request.ownerId,
-        timeoutMs,
-        env: safeEnv,
-        networkPolicy,
-        signal: request.signal,
-      });
+    const preparePromise = (async (): Promise<PrepareRuntimeResult> => {
+      try {
+        // Secret Fencing: Host process.env is NEVER forwarded to the remote sandbox.
+        const safeEnv: Record<string, string> = {
+          GIGA_SANDBOX: '1',
+          GIGA_WORKSPACE_ID: request.workspaceId,
+          GIGA_RUN_ID: request.runId,
+          NODE_ENV: 'production',
+        };
 
-      // Post-Allocation Abort Fencing:
-      // If the caller aborted while sandbox allocation was in flight, destroy it or queue for reconciliation!
-      if (request.signal.aborted) {
-        const abortedSession: CloudSessionState = {
+        const networkPolicy: SandboxNetworkPolicy = {
+          egressEnabled: this.egressEnabled,
+          allowlist: this.egressAllowlist,
+        };
+
+        const { sandboxId } = await this.providerClient!.createSandbox({
+          workspaceId: request.workspaceId,
+          ownerId: request.ownerId,
+          timeoutMs,
+          env: safeEnv,
+          networkPolicy,
+          signal: request.signal,
+        });
+
+        // Post-Allocation Abort Fencing:
+        // If the caller aborted while sandbox allocation was in flight, destroy it or queue for reconciliation!
+        if (request.signal.aborted) {
+          const abortedSession: CloudSessionState = {
+            sessionId,
+            runId: request.runId,
+            workspaceId: request.workspaceId,
+            ownerId: request.ownerId,
+            mode: request.mode,
+            sandboxId,
+            verifiedChecks: new Map<string, VerifiedCheck>(),
+            createdAt: new Date().toISOString(),
+            timeoutMs,
+            active: false,
+            destroyStatus: 'destroying',
+            destroyAttempts: 1,
+            activeControllers: new Set(),
+          };
+
+          try {
+            await this.providerClient!.destroySandbox(sandboxId);
+            abortedSession.destroyStatus = 'destroyed';
+          } catch (destroyErr) {
+            abortedSession.destroyStatus = 'destroy_failed';
+            const rawErr = destroyErr instanceof Error ? destroyErr.message : String(destroyErr);
+            abortedSession.destroyError = sanitizeSandboxOutput(rawErr, 1024);
+            this.sessions.set(sessionId, abortedSession);
+          }
+
+          return {
+            available: false,
+            code: 'RUNTIME_UNAVAILABLE',
+            reason: 'Execution was aborted during sandbox allocation',
+          };
+        }
+
+        this.sessions.set(sessionId, {
           sessionId,
           runId: request.runId,
           workspaceId: request.workspaceId,
@@ -187,54 +250,29 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
           verifiedChecks: new Map<string, VerifiedCheck>(),
           createdAt: new Date().toISOString(),
           timeoutMs,
-          active: false,
-          destroyStatus: 'destroying',
-          destroyAttempts: 1,
+          active: true,
+          destroyStatus: 'active',
+          destroyAttempts: 0,
           activeControllers: new Set(),
-        };
+        });
 
-        try {
-          await this.providerClient.destroySandbox(sandboxId);
-          abortedSession.destroyStatus = 'destroyed';
-        } catch (destroyErr) {
-          abortedSession.destroyStatus = 'destroy_failed';
-          const rawErr = destroyErr instanceof Error ? destroyErr.message : String(destroyErr);
-          abortedSession.destroyError = sanitizeSandboxOutput(rawErr, 1024);
-          this.sessions.set(sessionId, abortedSession);
-        }
-
+        return { available: true, sessionId };
+      } catch (err) {
+        const rawReason = err instanceof Error ? err.message : 'Failed to allocate cloud sandbox';
+        const reason = sanitizeSandboxOutput(rawReason, 1024);
         return {
           available: false,
           code: 'RUNTIME_UNAVAILABLE',
-          reason: 'Execution was aborted during sandbox allocation',
+          reason,
         };
       }
+    })();
 
-      this.sessions.set(sessionId, {
-        sessionId,
-        runId: request.runId,
-        workspaceId: request.workspaceId,
-        ownerId: request.ownerId,
-        mode: request.mode,
-        sandboxId,
-        verifiedChecks: new Map<string, VerifiedCheck>(),
-        createdAt: new Date().toISOString(),
-        timeoutMs,
-        active: true,
-        destroyStatus: 'active',
-        destroyAttempts: 0,
-        activeControllers: new Set(),
-      });
-
-      return { available: true, sessionId };
-    } catch (err) {
-      const rawReason = err instanceof Error ? err.message : 'Failed to allocate cloud sandbox';
-      const reason = sanitizeSandboxOutput(rawReason, 1024);
-      return {
-        available: false,
-        code: 'RUNTIME_UNAVAILABLE',
-        reason,
-      };
+    this.inFlightPrepares.set(request.runId, preparePromise);
+    try {
+      return await preparePromise;
+    } finally {
+      this.inFlightPrepares.delete(request.runId);
     }
   }
 
@@ -302,11 +340,12 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
       };
     }
 
-    // 3. Independent Adapter-Level Wall-Clock Timeout & Invocation Fencing
+    // 3. Independent Adapter-Level Wall-Clock Timeout & Immediate Cancellation
     const effectiveTimeoutMs = Math.min(session.timeoutMs, this.defaultTimeoutMs);
     const timeoutController = new AbortController();
     session.activeControllers?.add(timeoutController);
     let timeoutTimer: NodeJS.Timeout | undefined;
+    let abortHandler: (() => void) | undefined;
     let isCompletedOrTimedOut = false;
 
     const timeoutPromise = new Promise<never>((_, reject) => {
@@ -316,8 +355,18 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
       }, effectiveTimeoutMs);
     });
 
-    const abortHandler = () => timeoutController.abort();
-    signal.addEventListener('abort', abortHandler, { once: true });
+    const abortPromise = new Promise<never>((_, reject) => {
+      if (signal.aborted) {
+        timeoutController.abort();
+        reject(new Error('Execution was aborted'));
+        return;
+      }
+      abortHandler = () => {
+        timeoutController.abort();
+        reject(new Error('Execution was aborted'));
+      };
+      signal.addEventListener('abort', abortHandler, { once: true });
+    });
 
     // Fencing helper: Discards results if invocation timed out, was cancelled, or session stopped
     const isFenced = () => !session.active || signal.aborted || timeoutController.signal.aborted || isCompletedOrTimedOut;
@@ -376,6 +425,8 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
               errorMessage: 'Write file completed after deadline or cancellation; result discarded',
             };
           }
+          // File modification invalidates previous verification checks
+          session.verifiedChecks.clear();
           return {
             success: true,
             output: { path: filePath, bytesWritten },
@@ -417,6 +468,8 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
               errorMessage: 'Edit file write completed after deadline or cancellation; result discarded',
             };
           }
+          // File modification invalidates previous verification checks
+          session.verifiedChecks.clear();
           return {
             success: true,
             output: { path: filePath, replacements: 1 },
@@ -425,6 +478,8 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
         }
 
         case 'run_build': {
+          // Delete prior build check at start of new verification attempt
+          session.verifiedChecks.delete('run_build');
           const buildCmd = (toolCall.args.command as string | undefined)?.trim() || 'npm run build';
           const res = await this.providerClient!.executeCommand(session.sandboxId, {
             command: buildCmd,
@@ -474,6 +529,8 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
         }
 
         case 'run_tests': {
+          // Delete prior test check at start of new verification attempt
+          session.verifiedChecks.delete('run_tests');
           const filter = (toolCall.args.testFilter as string | undefined)?.trim();
           const testCmd = filter ? `npm test -- -t "${filter}"` : 'npm test';
           const res = await this.providerClient!.executeCommand(session.sandboxId, {
@@ -569,9 +626,21 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
     })();
 
     try {
-      return await Promise.race([executionPromise, timeoutPromise]);
+      return await Promise.race([executionPromise, timeoutPromise, abortPromise]);
     } catch (err: unknown) {
       const durationMs = Date.now() - start;
+      const rawMessage = err instanceof Error ? err.message : 'Cloud sandbox execution failed';
+      const message = sanitizeSandboxOutput(rawMessage, 2048);
+      const lower = rawMessage.toLowerCase();
+      const isTimeout = lower.includes('timeout') || lower.includes('timed out') || durationMs >= effectiveTimeoutMs;
+
+      // Ensure failed/timed out verification attempt invalidates any prior check
+      if (toolCall.toolName === 'run_build') {
+        session.verifiedChecks.delete('run_build');
+      } else if (toolCall.toolName === 'run_tests') {
+        session.verifiedChecks.delete('run_tests');
+      }
+
       if (signal.aborted) {
         return {
           success: false,
@@ -581,10 +650,7 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
           errorMessage: 'Execution was aborted',
         };
       }
-      const rawMessage = err instanceof Error ? err.message : 'Cloud sandbox execution failed';
-      const message = sanitizeSandboxOutput(rawMessage, 2048);
-      const lower = rawMessage.toLowerCase();
-      const isTimeout = lower.includes('timeout') || lower.includes('timed out') || durationMs >= effectiveTimeoutMs;
+
       return {
         success: false,
         output: {},
@@ -596,7 +662,7 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
       isCompletedOrTimedOut = true;
       session.activeControllers?.delete(timeoutController);
       if (timeoutTimer) clearTimeout(timeoutTimer);
-      signal.removeEventListener('abort', abortHandler);
+      if (abortHandler) signal.removeEventListener('abort', abortHandler);
     }
   }
 

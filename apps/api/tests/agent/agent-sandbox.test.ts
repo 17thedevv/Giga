@@ -1117,5 +1117,156 @@ describe('GigaAgent Isolated Sandbox Adapter & Cloud Security Gate (17T-47)', ()
       assert.equal(cmdRes.errorMessage.includes('SecretOpaque987654321'), false);
       assert.ok(cmdRes.errorMessage.includes('[REDACTED]'));
     });
+
+    it('verification freshness: file edit invalidates PASS and subsequent build timeout denies completion', async () => {
+      const providerClient = new SimulatedCloudSandboxProviderClient();
+      const adapter = new IsolatedCloudSandboxAdapter({
+        providerClient,
+        defaultTimeoutMs: 30,
+      });
+      const ac = new AbortController();
+
+      const prep = await adapter.prepare({
+        runId: dummyRunId,
+        workspaceId: dummyWorkspaceId,
+        ownerId: dummyOwnerId,
+        mode: 'execute',
+        task: 'Verification freshness test',
+        modelId: 'giga-agent-default',
+        signal: ac.signal,
+      });
+      assert.equal(prep.available, true);
+      if (!prep.available) return;
+
+      // 1. First build succeeds
+      const build1 = await adapter.invoke(
+        prep.sessionId,
+        makeToolCall('run_build', 'sandbox_execute', {}),
+        ac.signal
+      );
+      assert.equal(build1.success, true);
+      const ev1 = await adapter.getVerificationEvidence(prep.sessionId);
+      assert.equal(ev1.some((c) => c.name === 'run_build' && c.outcome === 'passed'), true);
+
+      // 2. File edit invalidates previous verification checks
+      const edit = await adapter.invoke(
+        prep.sessionId,
+        makeToolCall('write_file', 'sandbox_write', { path: 'src/main.ts', content: 'export const z = 10;' }),
+        ac.signal
+      );
+      assert.equal(edit.success, true);
+      const ev2 = await adapter.getVerificationEvidence(prep.sessionId);
+      assert.equal(ev2.length, 0, 'File mutation MUST invalidate prior verification evidence');
+
+      // 3. Second build times out
+      providerClient.simulateTimeout = true;
+      const build2 = await adapter.invoke(
+        prep.sessionId,
+        makeToolCall('run_build', 'sandbox_execute', {}),
+        ac.signal
+      );
+      assert.equal(build2.success, false);
+      assert.equal(build2.errorCode, 'TIMEOUT');
+
+      // 4. Stale PASS is NOT retained
+      const ev3 = await adapter.getVerificationEvidence(prep.sessionId);
+      const hasPassed = ev3.some((c) => c.outcome === 'passed');
+      assert.equal(hasPassed, false, 'Stale PASS must not be present after build timeout');
+      assert.equal(ev3.length, 0, 'No verification checks should remain after timeout');
+    });
+
+    it('cancellation responsiveness: user abort returns immediately without waiting for uncooperative provider or timeout', async () => {
+      const providerClient = new SimulatedCloudSandboxProviderClient();
+      // Provider deliberately ignores abort signal and takes 3000ms
+      providerClient.simulateIgnoreAbortSignalAndCompleteLateMs = 3000;
+      const adapter = new IsolatedCloudSandboxAdapter({
+        providerClient,
+        defaultTimeoutMs: 5000, // 5s timeout
+      });
+      const ac = new AbortController();
+
+      const prep = await adapter.prepare({
+        runId: dummyRunId,
+        workspaceId: dummyWorkspaceId,
+        ownerId: dummyOwnerId,
+        mode: 'execute',
+        task: 'Immediate cancellation test',
+        modelId: 'giga-agent-default',
+        signal: ac.signal,
+      });
+      assert.equal(prep.available, true);
+      if (!prep.available) return;
+
+      const start = Date.now();
+      // Trigger abort after 15ms
+      setTimeout(() => ac.abort(), 15);
+
+      const res = await adapter.invoke(
+        prep.sessionId,
+        makeToolCall('run_command', 'sandbox_execute', { command: 'slow-job' }),
+        ac.signal
+      );
+
+      const elapsed = Date.now() - start;
+      assert.equal(res.success, false);
+      assert.equal(res.errorCode, 'ABORTED');
+      // Must respond immediately upon abort (<400ms), NOT wait for 3000ms or 5000ms!
+      assert.ok(elapsed < 400, `Expected prompt response (<400ms), got ${elapsed}ms`);
+    });
+
+    it('duplicate allocation prevention: handles concurrent and sequential prepare calls without leaking sandboxes', async () => {
+      const providerClient = new SimulatedCloudSandboxProviderClient();
+      providerClient.simulateLateAllocationMs = 25; // Allocation has slight delay
+      const adapter = new IsolatedCloudSandboxAdapter({ providerClient });
+      const ac = new AbortController();
+
+      // 1. Concurrent prepare calls with same runId
+      const [prep1, prep2] = await Promise.all([
+        adapter.prepare({
+          runId: dummyRunId,
+          workspaceId: dummyWorkspaceId,
+          ownerId: dummyOwnerId,
+          mode: 'execute',
+          task: 'Concurrent prepare 1',
+          modelId: 'giga-agent-default',
+          signal: ac.signal,
+        }),
+        adapter.prepare({
+          runId: dummyRunId,
+          workspaceId: dummyWorkspaceId,
+          ownerId: dummyOwnerId,
+          mode: 'execute',
+          task: 'Concurrent prepare 2',
+          modelId: 'giga-agent-default',
+          signal: ac.signal,
+        }),
+      ]);
+
+      assert.equal(prep1.available, true);
+      assert.equal(prep2.available, true);
+      assert.equal(prep1.sessionId, prep2.sessionId);
+      // Exactly ONE remote sandbox allocated
+      assert.equal(providerClient.getSandboxCount(), 1);
+
+      // 2. Sequential prepare call with same runId
+      const prep3 = await adapter.prepare({
+        runId: dummyRunId,
+        workspaceId: dummyWorkspaceId,
+        ownerId: dummyOwnerId,
+        mode: 'execute',
+        task: 'Sequential prepare 3',
+        modelId: 'giga-agent-default',
+        signal: ac.signal,
+      });
+
+      assert.equal(prep3.available, true);
+      assert.equal(prep3.sessionId, prep1.sessionId);
+      // Still exactly ONE remote sandbox allocated
+      assert.equal(providerClient.getSandboxCount(), 1);
+
+      // 3. Clean up session and verify sandbox is completely destroyed
+      await adapter.cleanup(prep1.sessionId!);
+      assert.equal(providerClient.getSandboxCount(), 0);
+    });
   });
 });
