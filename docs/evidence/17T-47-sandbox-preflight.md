@@ -163,69 +163,73 @@ This task prepares the **isolated execution plane** for GigaAgent without making
 ```text
 ▶ GigaAgent Isolated Sandbox Adapter & Cloud Security Gate (17T-47)
   ▶ 1. Standardized ExecutionRuntime Interface & Lifecycle
-    ✔ initializes session with active status, metadata, and isolated environment (2.7431ms)
-    ✔ captures immutable snapshot with exact file sizes and SHA-256 digests (13.8229ms)
-    ✔ stop marks session inactive; subsequent invocations fail-closed with SESSION_NOT_FOUND (0.5664ms)
-    ✔ cleanup frees resources safely without throwing (0.379ms)
-  ✔ 1. Standardized ExecutionRuntime Interface & Lifecycle (19.1591ms)
+    ✔ initializes session with active status, metadata, and isolated environment (1.9469ms)
+    ✔ captures immutable snapshot with exact file sizes and SHA-256 digests (9.2011ms)
+    ✔ stop marks session inactive; subsequent invocations fail-closed with SESSION_NOT_FOUND (0.2882ms)
+    ✔ cleanup frees resources safely without throwing (0.1944ms)
+  ✔ 1. Standardized ExecutionRuntime Interface & Lifecycle (12.605ms)
   ▶ 2. Server-side Mode Security Gate (Ask / Plan / Execute)
-    ✔ Ask mode: permits read tools but denies write and execution tools at adapter boundary (0.9956ms)
-    ✔ Plan mode: permits read tools but denies write and execution tools at adapter boundary (0.7735ms)
-    ✔ Execute mode: permits read, write, and sandbox execution tools (2.7481ms)
-  ✔ 2. Server-side Mode Security Gate (Ask / Plan / Execute) (5.8048ms)
+    ✔ Ask mode: permits read tools but denies write and execution tools at adapter boundary (0.4233ms)
+    ✔ Plan mode: permits read tools but denies write and execution tools at adapter boundary (0.3068ms)
+    ✔ Execute mode: permits read, write, and sandbox execution tools (0.2701ms)
+  ✔ 2. Server-side Mode Security Gate (Ask / Plan / Execute) (1.2255ms)
   ▶ 3. Strict Invariant: No Host Shell Execution (INV-07)
-    ✔ run_command in fake runtime executes strictly in-memory without spawning child processes (0.8057ms)
-    ✔ ToolRegistry validates run_command arguments and limits length to 512 chars (0.5642ms)
-  ✔ 3. Strict Invariant: No Host Shell Execution (INV-07) (1.8547ms)
+    ✔ run_command in fake runtime executes strictly in-memory without spawning child processes (0.3998ms)
+    ✔ ToolRegistry validates run_command arguments and limits length to 512 chars (0.3148ms)
+  ✔ 3. Strict Invariant: No Host Shell Execution (INV-07) (0.88ms)
   ▶ 4. Path Traversal & Host Boundary Escape Prevention
-    ✔ isSafeRelativePath rejects traversal, absolute paths, null bytes, and Windows drive letters (0.3553ms)
-    ✔ runtime adapter rejects path traversal attempts with SECURITY_VIOLATION before fs access (0.3926ms)
-  ✔ 4. Path Traversal & Host Boundary Escape Prevention (0.9454ms)
+    ✔ isSafeRelativePath rejects traversal, absolute paths, null bytes, and Windows drive letters (0.1965ms)
+    ✔ runtime adapter rejects path traversal attempts with SECURITY_VIOLATION before fs access (1.0604ms)
+  ✔ 4. Path Traversal & Host Boundary Escape Prevention (1.3638ms)
   ▶ 5. Tenant Isolation & Lease Fencing
-    ✔ assertTenantAccess verifies caller owner and workspace match session (0.3148ms)
-  ✔ 5. Tenant Isolation & Lease Fencing (0.4475ms)
+    ✔ assertTenantAccess verifies caller owner and workspace match session (0.1936ms)
+  ✔ 5. Tenant Isolation & Lease Fencing (0.2601ms)
   ▶ 6. Timeout & Cancellation Handling
-    ✔ aborts execution when signal is already aborted (0.4032ms)
-    ✔ returns TIMEOUT when tool latency exceeds configured timeoutMs (25.854ms)
-  ✔ 6. Timeout & Cancellation Handling (26.8955ms)
+    ✔ aborts execution when signal is already aborted (0.1101ms)
+    ✔ returns TIMEOUT when tool latency exceeds configured timeoutMs (19.8824ms)
+  ✔ 6. Timeout & Cancellation Handling (20.2712ms)
   ▶ 7. Fail-Closed Behavior & Unavailable Runtimes
-    ✔ UnavailableExecutionRuntime cleanly returns RUNTIME_UNAVAILABLE without crashing (1.3873ms)
-    ✔ IsolatedCloudSandboxAdapter without provider client returns RUNTIME_UNAVAILABLE (0.4476ms)
-  ✔ 7. Fail-Closed Behavior & Unavailable Runtimes (2.0327ms)
+    ✔ UnavailableExecutionRuntime cleanly returns RUNTIME_UNAVAILABLE without crashing (1.417ms)
+    ✔ IsolatedCloudSandboxAdapter without provider client returns RUNTIME_UNAVAILABLE (0.2678ms)
+  ✔ 7. Fail-Closed Behavior & Unavailable Runtimes (1.7969ms)
   ▶ 8. Isolated Cloud Sandbox Adapter with Simulated Remote MicroVM
-    ✔ runs end-to-end sandbox lifecycle: create -> write -> read -> build -> test -> snapshot -> destroy (4.1092ms)
-    ✔ cloud build failure records failed check and returns BUILD_FAILED (0.5286ms)
-    ✔ cloud remote timeout cleanly produces TIMEOUT error code (0.439ms)
-    ✔ cloud adapter output truncation caps stdout/stderr at maxOutputBytes (64 KiB) (1.4802ms)
-    ✔ sanitizeSandboxOutput redacts unquoted tokens, Bearer auth, and structured JSON without leaking secrets (1.9992ms)
-    ✔ post-allocation abort fencing: destroys newly allocated sandbox if signal was aborted mid-flight (44.0464ms)
-    ✔ independent adapter-level timeout races and terminates hanging provider RPCs (45.5276ms)
-    ✔ cleanup failure tracking: retains session for reconciliation and supports retryDestroy (2.8594ms)
-    ✔ forwards fail-closed network egress policy to provider during sandbox creation (0.4244ms)
-  ✔ 8. Isolated Cloud Sandbox Adapter with Simulated Remote MicroVM (102.3891ms)
-✔ GigaAgent Isolated Sandbox Adapter & Cloud Security Gate (17T-47) (160.7494ms)
-ℹ tests 25
+    ✔ runs end-to-end sandbox lifecycle: create -> write -> read -> build -> test -> snapshot -> destroy (2.4652ms)
+    ✔ cloud build failure records failed check and returns BUILD_FAILED (0.2591ms)
+    ✔ cloud remote timeout cleanly produces TIMEOUT error code (0.2007ms)
+    ✔ cloud adapter output truncation caps stdout/stderr at maxOutputBytes (64 KiB) (0.4897ms)
+    ✔ sanitizeSandboxOutput redacts unquoted tokens, Bearer auth, and structured JSON without leaking secrets (1.1999ms)
+    ✔ post-allocation abort fencing: destroys newly allocated sandbox if signal was aborted mid-flight (49.777ms)
+    ✔ independent adapter-level timeout races and terminates hanging provider RPCs (45.5622ms)
+    ✔ cleanup failure tracking: retains session for reconciliation and supports retryDestroy (1.1937ms)
+    ✔ forwards fail-closed network egress policy to provider during sandbox creation (0.4624ms)
+    ✔ strict byte budgeting: sanitizeSandboxOutput never exceeds maxBytes regardless of truncation marker or unicode (0.7981ms)
+    ✔ late allocation + destroy failure: retains failed sandbox destruction in pending destructions and allows retry (43.2704ms)
+    ✔ late RPC completion fencing: late provider execution after timeout or session stop does not mutate verification evidence (123.2011ms)
+    ✔ provider error message sanitization: redacts sensitive credentials from allocation reasons and RPC error messages (0.7385ms)
+  ✔ 8. Isolated Cloud Sandbox Adapter with Simulated Remote MicroVM (270.2459ms)
+✔ GigaAgent Isolated Sandbox Adapter & Cloud Security Gate (17T-47) (309.5246ms)
+ℹ tests 29
 ℹ suites 9
-ℹ pass 25
+ℹ pass 29
 ℹ fail 0
 ℹ cancelled 0
 ℹ skipped 0
 ℹ todo 0
-ℹ duration_ms 319.0124
+ℹ duration_ms 850.07
 ```
 
 ### B. Full Backend CI Test Evidence (GitHub Actions & Real PostgreSQL 16.15)
 
 ```text
-ℹ tests 452
+ℹ tests 457
 ℹ suites 64
-ℹ pass 452
+ℹ pass 457
 ℹ fail 0
 ℹ cancelled 0
 ℹ skipped 0
 ℹ todo 0
 ```
-- Total tests: 452 / 452 PASS
+- Total tests: 457 / 457 PASS
 - Zero failures, zero skipped in GitHub Actions CI container.
 - Environment: PostgreSQL 16.15 on Alpine Linux (`image: postgres:16-alpine`), Node.js 22.
 
@@ -244,11 +248,12 @@ This task prepares the **isolated execution plane** for GigaAgent without making
 - [x] Dual-layer mode permission enforcement: Ask and Plan deny write and execution; Execute permits bounded sandbox actions.
 - [x] Enforces strict invariant INV-07: zero host shell executions on API server.
 - [x] Canonical secret redaction: extracted to `redaction.ts` and verified with regression tests.
-- [x] Post-allocation abort fencing: cleanly destroys newly allocated sandboxes if aborted during creation.
-- [x] Independent adapter-level wall-clock timeout: races and terminates hanging provider RPCs.
-- [x] Cleanup failure tracking & reconciliation: un-destroyed sandboxes tracked in `getPendingDestructions()` and reconcilable via `retryDestroy()`.
+- [x] Post-allocation abort fencing & reconciliation: failed destructions recorded in `this.sessions` with `destroyStatus: 'destroy_failed'` and recoverable via `retryDestroy()`.
+- [x] Independent adapter-level wall-clock timeout & late RPC fencing: late provider completions after timeout or stop are fenced from mutating `session.verifiedChecks`.
+- [x] Provider error sanitization: all allocation reasons and command error messages are sanitized and bounded.
+- [x] Strict byte budget: `sanitizeSandboxOutput` guarantees `byteLength <= maxBytes` accounting for truncation marker.
 - [x] Network egress policy enforced fail-closed at adapter boundary and honestly labeled as pending live cloud validation.
-- [x] 25/25 sandbox tests passing; 452/452 total backend tests passing.
+- [x] 29/29 sandbox tests passing; 457/457 total backend tests passing.
 - [x] Zero billable cloud resources provisioned during development or testing.
 - [x] Evidence document updated at `docs/evidence/17T-47-sandbox-preflight.md`.
 - [x] Ready to push updated commit to Draft PR #33 for Thư's re-review.

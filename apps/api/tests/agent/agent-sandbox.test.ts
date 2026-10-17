@@ -966,5 +966,156 @@ describe('GigaAgent Isolated Sandbox Adapter & Cloud Security Gate (17T-47)', ()
         'cdn.jsdelivr.net',
       ]);
     });
+
+    it('strict byte budgeting: sanitizeSandboxOutput never exceeds maxBytes regardless of truncation marker or unicode', () => {
+      const complexText = 'Tiếng Việt có dấu và Emoji 🙂🚀🔥 và key=SecretToken12345678 '.repeat(50);
+      const budgets = [5, 10, 20, 23, 24, 30, 50, 64, 100, 256, 1024];
+
+      for (const budget of budgets) {
+        const sanitized = sanitizeSandboxOutput(complexText, budget);
+        const byteLen = Buffer.byteLength(sanitized, 'utf8');
+        assert.ok(
+          byteLen <= budget,
+          `Expected byteLength (${byteLen}) to be <= maxBytes (${budget}) for output: ${sanitized}`
+        );
+      }
+    });
+
+    it('late allocation + destroy failure: retains failed sandbox destruction in pending destructions and allows retry', async () => {
+      const providerClient = new SimulatedCloudSandboxProviderClient();
+      providerClient.simulateLateAllocationMs = 40; // Allocation takes 40ms
+      providerClient.simulateDestroyFailure = true; // Immediate destroy fails
+      const adapter = new IsolatedCloudSandboxAdapter({ providerClient });
+      const ac = new AbortController();
+
+      const prepPromise = adapter.prepare({
+        runId: dummyRunId,
+        workspaceId: dummyWorkspaceId,
+        ownerId: dummyOwnerId,
+        mode: 'execute',
+        task: 'Late allocation with destroy failure',
+        modelId: 'giga-agent-default',
+        signal: ac.signal,
+      });
+
+      // Abort after 10ms while creation is pending
+      setTimeout(() => ac.abort(), 10);
+
+      const prep = await prepPromise;
+      assert.equal(prep.available, false);
+      assert.equal(prep.code, 'RUNTIME_UNAVAILABLE');
+
+      // Because immediate destroy failed, the sandbox was not cleaned up
+      assert.equal(providerClient.getSandboxCount(), 1);
+
+      // The failed destroy MUST be recorded in pending destructions for ops reconciliation!
+      const pending = adapter.getPendingDestructions();
+      assert.equal(pending.length, 1);
+      assert.equal(pending[0]?.destroyStatus, 'destroy_failed');
+      assert.equal(pending[0]?.destroyAttempts, 1);
+      assert.ok(pending[0]?.destroyError);
+
+      // Now heal the provider (e.g. transient 500 recovered) and retry destroy
+      providerClient.simulateDestroyFailure = false;
+      const retrySuccess = await adapter.retryDestroy(pending[0]!.sessionId);
+      assert.equal(retrySuccess, true);
+
+      // Verify no pending destructions remain and provider sandbox is destroyed
+      assert.equal(adapter.getPendingDestructions().length, 0);
+      assert.equal(providerClient.getSandboxCount(), 0);
+    });
+
+    it('late RPC completion fencing: late provider execution after timeout or session stop does not mutate verification evidence', async () => {
+      const providerClient = new SimulatedCloudSandboxProviderClient();
+      // Provider deliberately ignores abort signal and takes 60ms to resolve successfully
+      providerClient.simulateIgnoreAbortSignalAndCompleteLateMs = 60;
+      const adapter = new IsolatedCloudSandboxAdapter({
+        providerClient,
+        defaultTimeoutMs: 20, // 20ms adapter wall-clock deadline
+      });
+      const ac = new AbortController();
+
+      const prep = await adapter.prepare({
+        runId: dummyRunId,
+        workspaceId: dummyWorkspaceId,
+        ownerId: dummyOwnerId,
+        mode: 'execute',
+        task: 'Late RPC fencing test',
+        modelId: 'giga-agent-default',
+        signal: ac.signal,
+      });
+      assert.equal(prep.available, true);
+      if (!prep.available) return;
+
+      const res = await adapter.invoke(
+        prep.sessionId,
+        makeToolCall('run_build', 'sandbox_execute', {}),
+        ac.signal
+      );
+
+      // Wall-clock timeout must trigger first
+      assert.equal(res.success, false);
+      assert.equal(res.errorCode, 'TIMEOUT');
+
+      // Wait 80ms for the simulated provider RPC to complete late
+      await new Promise((resolve) => setTimeout(resolve, 80));
+
+      // The late completion MUST NOT mutate session.verifiedChecks!
+      const evidence = await adapter.getVerificationEvidence(prep.sessionId);
+      assert.equal(evidence.length, 0);
+    });
+
+    it('provider error message sanitization: redacts sensitive credentials from allocation reasons and RPC error messages', async () => {
+      const providerClient = new SimulatedCloudSandboxProviderClient();
+      providerClient.simulateAllocationErrorWithSecret =
+        'Failed connecting to https://user:SuperSecretPassword123@api.e2b.dev: Authorization: Bearer LeakToken999';
+      const adapter = new IsolatedCloudSandboxAdapter({ providerClient });
+      const ac = new AbortController();
+
+      // 1. Allocation error sanitization
+      const prep = await adapter.prepare({
+        runId: dummyRunId,
+        workspaceId: dummyWorkspaceId,
+        ownerId: dummyOwnerId,
+        mode: 'execute',
+        task: 'Sanitize allocation error',
+        modelId: 'giga-agent-default',
+        signal: ac.signal,
+      });
+
+      assert.equal(prep.available, false);
+      assert.ok(prep.reason);
+      assert.equal(prep.reason.includes('SuperSecretPassword123'), false);
+      assert.equal(prep.reason.includes('LeakToken999'), false);
+      assert.ok(prep.reason.includes('[REDACTED]'));
+
+      // 2. Command execution error sanitization
+      providerClient.simulateAllocationErrorWithSecret = undefined;
+      providerClient.simulateCommandErrorWithSecret =
+        'Remote execution crashed: api_key=SecretOpaque987654321 failed';
+
+      const prep2 = await adapter.prepare({
+        runId: dummyRunId + '-2',
+        workspaceId: dummyWorkspaceId,
+        ownerId: dummyOwnerId,
+        mode: 'execute',
+        task: 'Sanitize command error',
+        modelId: 'giga-agent-default',
+        signal: ac.signal,
+      });
+      assert.equal(prep2.available, true);
+      if (!prep2.available) return;
+
+      const cmdRes = await adapter.invoke(
+        prep2.sessionId,
+        makeToolCall('run_command', 'sandbox_execute', { command: 'crashing-bin' }),
+        ac.signal
+      );
+
+      assert.equal(cmdRes.success, false);
+      assert.ok(cmdRes.errorMessage);
+      assert.equal(cmdRes.errorMessage.includes('SecretOpaque987654321'), false);
+      assert.ok(cmdRes.errorMessage.includes('[REDACTED]'));
+    });
   });
 });

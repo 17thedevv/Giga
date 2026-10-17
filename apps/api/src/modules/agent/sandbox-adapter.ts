@@ -62,23 +62,34 @@ export interface CloudSessionState {
   destroyStatus: DestroyStatus;
   destroyError?: string;
   destroyAttempts: number;
+  readonly activeControllers?: Set<AbortController>;
 }
 
 const DEFAULT_SANDBOX_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 64 * 1024; // 64 KiB bound per INV-07 / Security spec Section 4
+const TRUNCATION_MARKER = '\n... [OUTPUT_TRUNCATED]';
+const TRUNCATION_MARKER_BYTES = Buffer.byteLength(TRUNCATION_MARKER, 'utf8');
 
 /**
  * Sanitizes output from remote sandbox commands and files.
  * Uses shared canonical redactSensitiveContent and boundUtf8 to prevent credential leakage.
+ * Strict byte guarantee: Buffer.byteLength(result, 'utf8') <= maxBytes.
  */
 export function sanitizeSandboxOutput(text: string, maxBytes: number): string {
-  if (!text || typeof text !== 'string') return '';
+  if (!text || typeof text !== 'string' || maxBytes <= 0) return '';
   const redacted = redactSensitiveContent(text);
-  const bounded = boundUtf8(redacted, maxBytes);
-  if (Buffer.byteLength(redacted, 'utf8') > maxBytes) {
-    return bounded + '\n... [OUTPUT_TRUNCATED]';
+  const totalBytes = Buffer.byteLength(redacted, 'utf8');
+  if (totalBytes <= maxBytes) {
+    return redacted;
   }
-  return bounded;
+
+  if (maxBytes <= TRUNCATION_MARKER_BYTES) {
+    return boundUtf8(redacted, maxBytes);
+  }
+
+  const allowedPrefixBytes = maxBytes - TRUNCATION_MARKER_BYTES;
+  const boundedPrefix = boundUtf8(redacted, allowedPrefixBytes);
+  return boundedPrefix + TRUNCATION_MARKER;
 }
 
 /**
@@ -164,9 +175,34 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
       });
 
       // Post-Allocation Abort Fencing:
-      // If the caller aborted while sandbox allocation was in flight, destroy it immediately!
+      // If the caller aborted while sandbox allocation was in flight, destroy it or queue for reconciliation!
       if (request.signal.aborted) {
-        await this.providerClient.destroySandbox(sandboxId).catch(() => {});
+        const abortedSession: CloudSessionState = {
+          sessionId,
+          runId: request.runId,
+          workspaceId: request.workspaceId,
+          ownerId: request.ownerId,
+          mode: request.mode,
+          sandboxId,
+          verifiedChecks: new Map<string, VerifiedCheck>(),
+          createdAt: new Date().toISOString(),
+          timeoutMs,
+          active: false,
+          destroyStatus: 'destroying',
+          destroyAttempts: 1,
+          activeControllers: new Set(),
+        };
+
+        try {
+          await this.providerClient.destroySandbox(sandboxId);
+          abortedSession.destroyStatus = 'destroyed';
+        } catch (destroyErr) {
+          abortedSession.destroyStatus = 'destroy_failed';
+          const rawErr = destroyErr instanceof Error ? destroyErr.message : String(destroyErr);
+          abortedSession.destroyError = sanitizeSandboxOutput(rawErr, 1024);
+          this.sessions.set(sessionId, abortedSession);
+        }
+
         return {
           available: false,
           code: 'RUNTIME_UNAVAILABLE',
@@ -187,11 +223,13 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
         active: true,
         destroyStatus: 'active',
         destroyAttempts: 0,
+        activeControllers: new Set(),
       });
 
       return { available: true, sessionId };
     } catch (err) {
-      const reason = err instanceof Error ? err.message : 'Failed to allocate cloud sandbox';
+      const rawReason = err instanceof Error ? err.message : 'Failed to allocate cloud sandbox';
+      const reason = sanitizeSandboxOutput(rawReason, 1024);
       return {
         available: false,
         code: 'RUNTIME_UNAVAILABLE',
@@ -264,10 +302,12 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
       };
     }
 
-    // 3. Independent Adapter-Level Wall-Clock Timeout
+    // 3. Independent Adapter-Level Wall-Clock Timeout & Invocation Fencing
     const effectiveTimeoutMs = Math.min(session.timeoutMs, this.defaultTimeoutMs);
     const timeoutController = new AbortController();
+    session.activeControllers?.add(timeoutController);
     let timeoutTimer: NodeJS.Timeout | undefined;
+    let isCompletedOrTimedOut = false;
 
     const timeoutPromise = new Promise<never>((_, reject) => {
       timeoutTimer = setTimeout(() => {
@@ -279,11 +319,23 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
     const abortHandler = () => timeoutController.abort();
     signal.addEventListener('abort', abortHandler, { once: true });
 
+    // Fencing helper: Discards results if invocation timed out, was cancelled, or session stopped
+    const isFenced = () => !session.active || signal.aborted || timeoutController.signal.aborted || isCompletedOrTimedOut;
+
     const executionPromise = (async (): Promise<BoundedToolResult> => {
       switch (toolCall.toolName) {
         case 'list_files': {
           const pathPrefix = (toolCall.args.path as string | undefined)?.trim() ?? '';
           const files = await this.providerClient!.listFiles(session.sandboxId, pathPrefix);
+          if (isFenced()) {
+            return {
+              success: false,
+              output: {},
+              durationMs: Date.now() - start,
+              errorCode: signal.aborted ? 'ABORTED' : 'TIMEOUT',
+              errorMessage: 'List files completed after deadline or cancellation; result discarded',
+            };
+          }
           return {
             success: true,
             output: { files, count: files.length },
@@ -294,6 +346,15 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
         case 'read_file': {
           const filePath = toolCall.args.path as string;
           const { content, bytes } = await this.providerClient!.readFile(session.sandboxId, filePath);
+          if (isFenced()) {
+            return {
+              success: false,
+              output: {},
+              durationMs: Date.now() - start,
+              errorCode: signal.aborted ? 'ABORTED' : 'TIMEOUT',
+              errorMessage: 'Read file completed after deadline or cancellation; result discarded',
+            };
+          }
           const sanitizedContent = sanitizeSandboxOutput(content, this.maxOutputBytes);
           return {
             success: true,
@@ -306,6 +367,15 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
           const filePath = toolCall.args.path as string;
           const content = toolCall.args.content as string;
           const { bytesWritten } = await this.providerClient!.writeFile(session.sandboxId, filePath, content);
+          if (isFenced()) {
+            return {
+              success: false,
+              output: {},
+              durationMs: Date.now() - start,
+              errorCode: signal.aborted ? 'ABORTED' : 'TIMEOUT',
+              errorMessage: 'Write file completed after deadline or cancellation; result discarded',
+            };
+          }
           return {
             success: true,
             output: { path: filePath, bytesWritten },
@@ -318,6 +388,15 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
           const find = toolCall.args.find as string;
           const replace = toolCall.args.replace as string;
           const { content } = await this.providerClient!.readFile(session.sandboxId, filePath);
+          if (isFenced()) {
+            return {
+              success: false,
+              output: {},
+              durationMs: Date.now() - start,
+              errorCode: signal.aborted ? 'ABORTED' : 'TIMEOUT',
+              errorMessage: 'Edit file completed after deadline or cancellation; result discarded',
+            };
+          }
           if (!content.includes(find)) {
             return {
               success: false,
@@ -329,6 +408,15 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
           }
           const updated = content.replace(find, replace);
           await this.providerClient!.writeFile(session.sandboxId, filePath, updated);
+          if (isFenced()) {
+            return {
+              success: false,
+              output: {},
+              durationMs: Date.now() - start,
+              errorCode: signal.aborted ? 'ABORTED' : 'TIMEOUT',
+              errorMessage: 'Edit file write completed after deadline or cancellation; result discarded',
+            };
+          }
           return {
             success: true,
             output: { path: filePath, replacements: 1 },
@@ -343,6 +431,17 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
             timeoutMs: effectiveTimeoutMs,
             signal: timeoutController.signal,
           });
+
+          // Late result fencing: If invocation timed out, was aborted, or session stopped, DISCARD!
+          if (isFenced()) {
+            return {
+              success: false,
+              output: {},
+              durationMs: Date.now() - start,
+              errorCode: signal.aborted ? 'ABORTED' : 'TIMEOUT',
+              errorMessage: 'Build completed after deadline or cancellation; late verification discarded',
+            };
+          }
 
           const stdout = sanitizeSandboxOutput(res.stdout, this.maxOutputBytes);
           const stderr = sanitizeSandboxOutput(res.stderr, this.maxOutputBytes);
@@ -382,6 +481,17 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
             timeoutMs: effectiveTimeoutMs,
             signal: timeoutController.signal,
           });
+
+          // Late result fencing: If invocation timed out, was aborted, or session stopped, DISCARD!
+          if (isFenced()) {
+            return {
+              success: false,
+              output: {},
+              durationMs: Date.now() - start,
+              errorCode: signal.aborted ? 'ABORTED' : 'TIMEOUT',
+              errorMessage: 'Tests completed after deadline or cancellation; late verification discarded',
+            };
+          }
 
           const stdout = sanitizeSandboxOutput(res.stdout, this.maxOutputBytes);
           const stderr = sanitizeSandboxOutput(res.stderr, this.maxOutputBytes);
@@ -424,6 +534,17 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
             signal: timeoutController.signal,
           });
 
+          // Late result fencing: If invocation timed out, was aborted, or session stopped, DISCARD!
+          if (isFenced()) {
+            return {
+              success: false,
+              output: {},
+              durationMs: Date.now() - start,
+              errorCode: signal.aborted ? 'ABORTED' : 'TIMEOUT',
+              errorMessage: 'Command completed after deadline or cancellation; result discarded',
+            };
+          }
+
           const stdout = sanitizeSandboxOutput(res.stdout, this.maxOutputBytes);
           const stderr = sanitizeSandboxOutput(res.stderr, this.maxOutputBytes);
 
@@ -460,8 +581,9 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
           errorMessage: 'Execution was aborted',
         };
       }
-      const message = err instanceof Error ? err.message : 'Cloud sandbox execution failed';
-      const lower = message.toLowerCase();
+      const rawMessage = err instanceof Error ? err.message : 'Cloud sandbox execution failed';
+      const message = sanitizeSandboxOutput(rawMessage, 2048);
+      const lower = rawMessage.toLowerCase();
       const isTimeout = lower.includes('timeout') || lower.includes('timed out') || durationMs >= effectiveTimeoutMs;
       return {
         success: false,
@@ -471,6 +593,8 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
         errorMessage: message,
       };
     } finally {
+      isCompletedOrTimedOut = true;
+      session.activeControllers?.delete(timeoutController);
       if (timeoutTimer) clearTimeout(timeoutTimer);
       signal.removeEventListener('abort', abortHandler);
     }
@@ -520,6 +644,17 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
     if (!session) return;
     session.active = false;
 
+    if (session.activeControllers) {
+      for (const ctrl of session.activeControllers) {
+        try {
+          ctrl.abort();
+        } catch {
+          // ignore
+        }
+      }
+      session.activeControllers.clear();
+    }
+
     if (this.providerClient && session.destroyStatus !== 'destroyed') {
       session.destroyStatus = 'destroying';
       session.destroyAttempts++;
@@ -529,7 +664,8 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
         session.destroyError = undefined;
       } catch (err) {
         session.destroyStatus = 'destroy_failed';
-        session.destroyError = err instanceof Error ? err.message : String(err);
+        const rawErr = err instanceof Error ? err.message : String(err);
+        session.destroyError = sanitizeSandboxOutput(rawErr, 1024);
         throw err;
       }
     }
@@ -544,8 +680,10 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
     } catch (err) {
       if (!options.force) {
         // Keep session recorded in this.sessions so reconciliation worker can retry!
+        const rawErr = err instanceof Error ? err.message : String(err);
+        const safeErr = sanitizeSandboxOutput(rawErr, 1024);
         throw new Error(
-          `Failed to destroy sandbox '${session.sandboxId}': ${err instanceof Error ? err.message : String(err)}. Session retained for reconciliation.`
+          `Failed to destroy sandbox '${session.sandboxId}': ${safeErr}. Session retained for reconciliation.`
         );
       }
     }
@@ -585,7 +723,8 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
       return true;
     } catch (err) {
       session.destroyStatus = 'destroy_failed';
-      session.destroyError = err instanceof Error ? err.message : String(err);
+      const rawErr = err instanceof Error ? err.message : String(err);
+      session.destroyError = sanitizeSandboxOutput(rawErr, 1024);
       return false;
     }
   }
@@ -615,10 +754,16 @@ export class SimulatedCloudSandboxProviderClient implements CloudSandboxProvider
   public simulateTestFailure = false;
   public simulateDestroyFailure = false;
   public simulateLateAllocationMs = 0;
+  public simulateIgnoreAbortSignalAndCompleteLateMs = 0;
+  public simulateAllocationErrorWithSecret?: string;
+  public simulateCommandErrorWithSecret?: string;
   public lastReceivedEnv?: Record<string, string>;
   public lastReceivedNetworkPolicy?: SandboxNetworkPolicy;
 
   async createSandbox(params: CreateSandboxParams): Promise<{ sandboxId: string }> {
+    if (this.simulateAllocationErrorWithSecret) {
+      throw new Error(this.simulateAllocationErrorWithSecret);
+    }
     if (this.simulateNetworkCrash) {
       throw new Error('Simulated network crash during sandbox creation');
     }
@@ -651,6 +796,21 @@ export class SimulatedCloudSandboxProviderClient implements CloudSandboxProvider
     const sbx = this.sandboxes.get(sandboxId);
     if (!sbx || sbx.destroyed) {
       throw new Error(`Sandbox '${sandboxId}' not found or destroyed`);
+    }
+
+    if (this.simulateCommandErrorWithSecret) {
+      throw new Error(this.simulateCommandErrorWithSecret);
+    }
+
+    if (this.simulateIgnoreAbortSignalAndCompleteLateMs > 0) {
+      // Deliberately delay resolution and ignore abort signal to simulate late completing RPC
+      await new Promise((resolve) => setTimeout(resolve, this.simulateIgnoreAbortSignalAndCompleteLateMs));
+      return {
+        exitCode: 0,
+        stdout: `Simulated late output for '${params.command}'`,
+        stderr: '',
+        durationMs: this.simulateIgnoreAbortSignalAndCompleteLateMs,
+      };
     }
 
     if (this.simulateHangingCommand) {
