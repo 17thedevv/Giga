@@ -871,16 +871,21 @@ describe('GigaAgent Durable Messages and Follow-up Threads (17T-46)', { timeout:
       'Auth: Bearer secret-token-xyz123456789\n' +
       'Key: sk-proj-1234567890abcdef12345678\n' +
       'Token: leaseToken: "550e8400-e29b-41d4-a716-446655440000"\n' +
-      'Query: https://api.internal/v1?api_key=secret_12345678&flag=true';
+      'Basic: Authorization: Basic dXNlcjpwYXNzd29yZA==\n' +
+      'URL: postgres://user:password123@db.example.com:5432/mydb?api_key=secret_12345678&flag=true';
 
     const redacted = AgentRepository.redactSensitiveContent(rawSecretText);
     assert.ok(!redacted.includes('secret-token-xyz123456789'));
     assert.ok(!redacted.includes('sk-proj-1234567890abcdef12345678'));
     assert.ok(!redacted.includes('550e8400-e29b-41d4-a716-446655440000'));
+    assert.ok(!redacted.includes('dXNlcjpwYXNzd29yZA=='));
+    assert.ok(!redacted.includes('password123'));
     assert.ok(!redacted.includes('secret_12345678'));
     assert.ok(redacted.includes('Bearer [REDACTED]'));
     assert.ok(redacted.includes('[REDACTED_KEY]'));
     assert.ok(redacted.includes('leaseToken: [REDACTED]'));
+    assert.ok(redacted.includes('Basic [REDACTED]'));
+    assert.ok(redacted.includes('user:[REDACTED]@'));
     assert.ok(redacted.includes('api_key=[REDACTED]'));
 
     // 2. Persisting assistant message sanitizes content in PostgreSQL
@@ -926,5 +931,141 @@ describe('GigaAgent Durable Messages and Follow-up Threads (17T-46)', { timeout:
     );
     assert.ok(!finalized.run.result?.summary.includes('sk-proj-1234567890abcdef12345678'));
     assert.ok(finalized.run.result?.summary.includes('[REDACTED_KEY]'));
+  });
+
+  // 31. JSON credential leakage prevention in DB rows, run steps, events, and public GET APIs
+  it('31. JSON credential leakage prevention in DB rows, run steps, events, and public GET APIs', async () => {
+    const sentinels = [
+      'live_ABC123456789nonstandard',
+      'lease-verysecret111111',
+      'pass123long',
+      'client_XyZ123456789',
+      'dXNlcjpwYXNzd29yZA==',
+      'dbpass987654321',
+      'urlsecret_key_abcdef',
+    ];
+
+    const run = await createActiveRun('execute', 'JSON redaction end-to-end test');
+
+    // 1. Assistant message with JSON containing quoted credentials
+    const assistantPayload = JSON.stringify({
+      apiKey: 'live_ABC123456789nonstandard',
+      leaseToken: 'lease-verysecret111111',
+      safeField: 'harmless_assistant_value',
+    }, null, 2);
+    const assistantMsg = await repo.appendAssistantMessage(owner, run.id, assistantPayload);
+    assert.ok(!assistantMsg.content.includes('live_ABC123456789nonstandard'));
+    assert.ok(!assistantMsg.content.includes('lease-verysecret111111'));
+    assert.ok(assistantMsg.content.includes('"apiKey": "[REDACTED]"'));
+    assert.ok(assistantMsg.content.includes('"leaseToken": "[REDACTED]"'));
+    assert.ok(assistantMsg.content.includes('harmless_assistant_value'));
+
+    // 2. Tool summary message with JSON credentials & Basic Auth
+    const toolSummaryPayload =
+      'Step result:\n' +
+      JSON.stringify({ password: 'pass123long', client_secret: 'client_XyZ123456789' }) +
+      '\nAuthorization: Basic dXNlcjpwYXNzd29yZA==\n' +
+      'Connect: postgres://admin:dbpass987654321@host:5432/db?token=urlsecret_key_abcdef';
+    const toolMsg = await repo.appendToolSummaryMessage(owner, run.id, toolSummaryPayload);
+    for (const sentinel of sentinels) {
+      assert.ok(!toolMsg.content.includes(sentinel), `Tool message must not contain ${sentinel}`);
+    }
+
+    // 3. Step execution: recordStepStarted and recordStepCompleted with sensitive args/outputs
+    const claim = await repo.claimRun(owner, run.id, 'worker-json-redaction');
+    assert.ok(claim);
+
+    const stepStart = await repo.recordStepStarted(owner, run.id, claim.leaseToken, {
+      toolName: 'http_request',
+      toolCallId: 'call-1',
+      risk: 'read',
+      arguments: {
+        url: 'https://admin:dbpass987654321@api.internal',
+        apiKey: 'live_ABC123456789nonstandard',
+      },
+    });
+    assert.ok(!JSON.stringify(stepStart).includes('dbpass987654321'));
+    assert.ok(!JSON.stringify(stepStart).includes('live_ABC123456789nonstandard'));
+
+    const stepComplete = await repo.recordStepCompleted(owner, run.id, claim.leaseToken, 1, {
+      durationMs: 50,
+      output: {
+        client_secret: 'client_XyZ123456789',
+        status: 'ok',
+      },
+      summary: 'Completed with apiKey: live_ABC123456789nonstandard',
+    });
+    assert.ok(!JSON.stringify(stepComplete).includes('client_XyZ123456789'));
+    assert.ok(!JSON.stringify(stepComplete).includes('live_ABC123456789nonstandard'));
+
+    // 4. Finalize run with summary containing JSON-shaped secret
+    const finalized = await repo.finalizeRun(owner, run.id, claim.leaseToken, {
+      status: 'completed',
+      summary: 'Finished: {"apiKey": "live_ABC123456789nonstandard", "auth": "Authorization: Basic dXNlcjpwYXNzd29yZA=="}',
+      verifiedChecks: [{ name: 'build', outcome: 'passed', summary: 'Check with leaseToken="lease-verysecret111111"' }],
+    });
+    for (const sentinel of sentinels) {
+      assert.ok(!JSON.stringify(finalized).includes(sentinel), `Finalized result must not contain ${sentinel}`);
+    }
+
+    // 5. Direct database assertions: PostgreSQL rows must NEVER contain any sentinel secret
+    const dbMessages = await db.pool.query<{ content: string }>(
+      'SELECT content FROM agent_messages WHERE run_id = $1',
+      [run.id]
+    );
+    for (const row of dbMessages.rows) {
+      for (const sentinel of sentinels) {
+        assert.ok(!row.content.includes(sentinel), `agent_messages row must not contain ${sentinel}`);
+      }
+    }
+
+    const dbRun = await db.pool.query<{ result_summary: string; verified_checks: unknown }>(
+      'SELECT result_summary, verified_checks FROM agent_runs WHERE id = $1',
+      [run.id]
+    );
+    const checksStr = JSON.stringify(dbRun.rows[0]?.verified_checks ?? '');
+    for (const sentinel of sentinels) {
+      assert.ok(!dbRun.rows[0]?.result_summary.includes(sentinel), `agent_runs.result_summary must not contain ${sentinel}`);
+      assert.ok(!checksStr.includes(sentinel), `agent_runs.verified_checks must not contain ${sentinel}`);
+    }
+
+    const dbSteps = await db.pool.query<{ arguments_json: unknown; result_json: unknown }>(
+      'SELECT arguments_json, result_json FROM agent_run_steps WHERE run_id = $1',
+      [run.id]
+    );
+    for (const row of dbSteps.rows) {
+      const argsStr = JSON.stringify(row.arguments_json ?? '');
+      const resStr = JSON.stringify(row.result_json ?? '');
+      for (const sentinel of sentinels) {
+        assert.ok(!argsStr.includes(sentinel), `agent_run_steps.arguments_json must not contain ${sentinel}`);
+        assert.ok(!resStr.includes(sentinel), `agent_run_steps.result_json must not contain ${sentinel}`);
+      }
+    }
+
+    const dbEvents = await db.pool.query<{ payload: unknown }>(
+      'SELECT payload FROM agent_run_events WHERE run_id = $1',
+      [run.id]
+    );
+    for (const row of dbEvents.rows) {
+      const payloadStr = JSON.stringify(row.payload ?? '');
+      for (const sentinel of sentinels) {
+        assert.ok(!payloadStr.includes(sentinel), `agent_run_events.payload must not contain ${sentinel}`);
+      }
+    }
+
+    // 6. Public GET API assertions: HTTP responses must NEVER leak any sentinel secret
+    const getMessagesRes = await request(`/runs/${run.id}/messages`);
+    assert.equal(getMessagesRes.status, 200);
+    const messagesBody = await getMessagesRes.text();
+    for (const sentinel of sentinels) {
+      assert.ok(!messagesBody.includes(sentinel), `GET /runs/:id/messages response must not contain ${sentinel}`);
+    }
+
+    const getRunRes = await request(`/runs/${run.id}`);
+    assert.equal(getRunRes.status, 200);
+    const runBody = await getRunRes.text();
+    for (const sentinel of sentinels) {
+      assert.ok(!runBody.includes(sentinel), `GET /runs/:id response must not contain ${sentinel}`);
+    }
   });
 });

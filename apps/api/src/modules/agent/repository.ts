@@ -631,12 +631,13 @@ export class AgentRepository {
       );
       const stepNumber = seqRes.rows[0]!.next_step;
 
+      const sanitizedArgs = AgentRepository.redactJsonValue(input.arguments);
       const stepInsert = await client.query<StepRow>(
         `INSERT INTO agent_run_steps
         (owner_id, run_id, step_number, status, tool_name, tool_call_id, tool_risk, arguments_json)
         VALUES ($1, $2, $3, 'running', $4, $5, $6, $7)
         RETURNING *`,
-        [ownerId, runId, stepNumber, input.toolName, input.toolCallId, input.risk, JSON.stringify(input.arguments)]
+        [ownerId, runId, stepNumber, input.toolName, input.toolCallId, input.risk, JSON.stringify(sanitizedArgs)]
       );
 
       const nextEventSeq = runCurrent.last_event_id + 1;
@@ -677,12 +678,15 @@ export class AgentRepository {
       this.assertActiveLease(lock.rows[0], leaseToken);
       const runCurrent = lock.rows[0]!;
 
+      const sanitizedOutput = AgentRepository.redactJsonValue(input.output);
+      const sanitizedSummary = input.summary ? AgentRepository.redactSensitiveContent(input.summary) : undefined;
+
       const stepUpdate = await client.query<StepRow>(
         `UPDATE agent_run_steps
         SET status = 'completed', result_json = $1, duration_ms = $2, completed_at = NOW()
         WHERE owner_id = $3 AND run_id = $4 AND step_number = $5 AND status = 'running'
         RETURNING *`,
-        [JSON.stringify(input.output), input.durationMs, ownerId, runId, stepNumber]
+        [JSON.stringify(sanitizedOutput), input.durationMs, ownerId, runId, stepNumber]
       );
       if (!stepUpdate.rows[0]) throw new ConflictError('Step is not in running status');
 
@@ -697,7 +701,7 @@ export class AgentRepository {
         toolCallId: stepUpdate.rows[0].tool_call_id,
         outcome: 'success' as const,
         durationMs: input.durationMs,
-        ...(input.summary ? { summary: input.summary } : {}),
+        ...(sanitizedSummary ? { summary: sanitizedSummary } : {}),
       };
       await client.query(
         `INSERT INTO agent_run_events (owner_id, run_id, sequence, event_type, status, payload)
@@ -730,12 +734,14 @@ export class AgentRepository {
       this.assertActiveLease(lock.rows[0], leaseToken);
       const runCurrent = lock.rows[0]!;
 
+      const sanitizedErrorMessage = AgentRepository.redactSensitiveContent(failure.errorMessage);
+
       const stepUpdate = await client.query<StepRow>(
         `UPDATE agent_run_steps
         SET status = 'failed', error_code = $1, error_message = $2, duration_ms = $3, completed_at = NOW()
         WHERE owner_id = $4 AND run_id = $5 AND step_number = $6 AND status = 'running'
         RETURNING *`,
-        [failure.errorCode, failure.errorMessage, failure.durationMs ?? 0, ownerId, runId, stepNumber]
+        [failure.errorCode, sanitizedErrorMessage, failure.durationMs ?? 0, ownerId, runId, stepNumber]
       );
       if (!stepUpdate.rows[0]) throw new ConflictError('Step is not in running status');
 
@@ -749,7 +755,7 @@ export class AgentRepository {
         runId,
         toolCallId: stepUpdate.rows[0].tool_call_id,
         code: failure.errorCode,
-        summary: failure.errorMessage,
+        summary: sanitizedErrorMessage,
       };
       await client.query(
         `INSERT INTO agent_run_events (owner_id, run_id, sequence, event_type, status, payload)
@@ -804,20 +810,24 @@ export class AgentRepository {
         if (outcome.status === 'completed') {
           const sanitizedSummary = AgentRepository.redactSensitiveContent(outcome.summary);
           const boundedSummary = AgentRepository.boundUtf8(sanitizedSummary);
+          const sanitizedChecks = outcome.verifiedChecks.map((c) => ({
+            ...c,
+            summary: c.summary ? AgentRepository.boundUtf8(AgentRepository.redactSensitiveContent(c.summary)) : c.summary,
+          }));
           const update = await client.query<RunRow>(
             `UPDATE agent_runs
             SET status = 'completed', finished_at = NOW(), verified_checks = $1, result_summary = $2,
                 last_event_id = $3, updated_at = NOW()
             WHERE owner_id = $4 AND id = $5 AND status = 'running'
             RETURNING *`,
-            [JSON.stringify(outcome.verifiedChecks), boundedSummary, nextEventSeq, ownerId, runId]
+            [JSON.stringify(sanitizedChecks), boundedSummary, nextEventSeq, ownerId, runId]
           );
           const updated = update.rows[0]!;
 
           const payload = {
             runId,
             artifactIds: [],
-            verifiedChecks: outcome.verifiedChecks,
+            verifiedChecks: sanitizedChecks,
             summary: boundedSummary,
           };
           await client.query(
@@ -1045,26 +1055,91 @@ export class AgentRepository {
     });
   }
 
-  static redactSensitiveContent(content: string): string {
+  static redactJsonValue(value: unknown): unknown {
+    if (value === null || value === undefined) return value;
+    if (typeof value === 'string') {
+      return AgentRepository.redactStringPatterns(value);
+    }
+    if (Array.isArray(value)) {
+      return value.map((item) => AgentRepository.redactJsonValue(item));
+    }
+    if (typeof value === 'object') {
+      const sensitiveKeyPattern = /^(?:api[_-]?key|lease[_-]?token|worker[_-]?token|password|passwd|pass|client[_-]?secret|secret(?:[_-]?key)?|auth[_-]?token|access[_-]?token|refresh[_-]?token|private[_-]?key|authorization|credential|credentials|cookie|session[_-]?token)$/i;
+      const result: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+        if (sensitiveKeyPattern.test(k)) {
+          result[k] = '[REDACTED]';
+        } else {
+          result[k] = AgentRepository.redactJsonValue(v);
+        }
+      }
+      return result;
+    }
+    return value;
+  }
+
+  static redactStringPatterns(content: string): string {
     if (!content || typeof content !== 'string') return '';
     let sanitized = content;
 
-    // Bearer / OAuth authorization headers
-    sanitized = sanitized.replace(/Bearer\s+[A-Za-z0-9\-_.~+/=]+/gi, 'Bearer [REDACTED]');
+    // 1. Private keys (PEM format)
+    sanitized = sanitized.replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, '[REDACTED_PRIVATE_KEY]');
 
-    // Common prefix API keys (sk-..., ghp-..., gho-..., pat-..., xoxb-..., etc.)
-    sanitized = sanitized.replace(/\b(?:sk|ghp|gho|pat|xoxb|xoxp)[-_][A-Za-z0-9_\-]{8,}\b/gi, '[REDACTED_KEY]');
+    // 2. URL userinfo credentials: https://user:password@host or postgres://user:pass@host:port/db
+    sanitized = sanitized.replace(/([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)([^:\s/@]+):([^@\s/]+)@/gi, '$1$2:[REDACTED]@');
 
-    // Specific secret / token key assignments: apiKey=..., leaseToken=..., password=..., secret=...
+    // 3. URL query parameters: ?api_key=..., &token=..., etc.
+    sanitized = sanitized.replace(/([?&](?:api[_-]?key|key|token|auth(?:[_-]?token)?|access[_-]?token|secret|password)=)(?!\[REDACTED\])[^&\s#]+/gi, '$1[REDACTED]');
+
+    // 4. Authorization headers: Authorization: Bearer ..., Authorization: Basic ..., Authorization: ...
+    sanitized = sanitized.replace(/\b(Authorization\s*:\s*(?:Bearer|Basic|Token)\s+)(?!\[REDACTED\])[^\s,;\r\n]+/gi, '$1[REDACTED]');
+    sanitized = sanitized.replace(/\b(Authorization\s*:\s*)(?!(?:Bearer|Basic|Token)\s+|\[REDACTED\])[^\s,;\r\n]+/gi, '$1[REDACTED]');
+
+    // 5. Standalone Authorization scheme tokens (Bearer ..., Basic ...)
+    sanitized = sanitized.replace(/\bBearer\s+(?!\[REDACTED\])[A-Za-z0-9\-_.~+/=]+/gi, 'Bearer [REDACTED]');
+    sanitized = sanitized.replace(/\bBasic\s+(?!\[REDACTED\])[A-Za-z0-9+/=]{16,}/gi, 'Basic [REDACTED]');
+
+    // 6. Common API key prefixes: sk-..., ghp-..., gho-..., pat-..., live_..., test_...
+    sanitized = sanitized.replace(/\b(?:sk|ghp|gho|ghu|ghs|ghr|pat|xoxb|xoxp|xapp|glpat|npm|live|test)[-_][A-Za-z0-9_\-]{8,}\b/gi, '[REDACTED_KEY]');
+
+    // 7. Quoted JSON / object key-value pairs:
+    // Matches "apiKey": "...", 'apiKey': "...", "leaseToken": 12345, etc.
     sanitized = sanitized.replace(
-      /\b(api[_-]?key|apiKey|password|client[_-]?secret|auth[_-]?token|secret|authorization|lease[_-]?token|worker[_-]?token)(\s*[:=]\s*)["']?([^\s"',;]+)["']?/gi,
+      /(["'])(api[_-]?key|lease[_-]?token|worker[_-]?token|password|passwd|pass|client[_-]?secret|secret(?:[_-]?key)?|auth[_-]?token|access[_-]?token|refresh[_-]?token|private[_-]?key|authorization|credential|credentials|cookie|token)\1(\s*:\s*)(["'])(?:\\.|(?!\4)[^\\])*\4/gi,
+      '$1$2$1$3$4[REDACTED]$4'
+    );
+    // Also handle quoted key with unquoted value (e.g. number, boolean, null in JSON)
+    sanitized = sanitized.replace(
+      /(["'])(api[_-]?key|lease[_-]?token|worker[_-]?token|password|passwd|pass|client[_-]?secret|secret(?:[_-]?key)?|auth[_-]?token|access[_-]?token|refresh[_-]?token|private[_-]?key|authorization|credential|credentials|cookie|token)\1(\s*:\s*)(?!(?:\[REDACTED\]|"[REDACTED]"))([^\s"',;}\]]+)/gi,
+      '$1$2$1$3"[REDACTED]"'
+    );
+
+    // 8. Unquoted key assignments (e.g. CLI output, env lines, key=value, key: value)
+    sanitized = sanitized.replace(
+      /\b(api[_-]?key|lease[_-]?token|worker[_-]?token|password|passwd|pass|client[_-]?secret|secret(?:[_-]?key)?|auth[_-]?token|access[_-]?token|refresh[_-]?token|private[_-]?key|credential|credentials)(\s*[:=]\s*)(?!(?:\[REDACTED(?:_KEY)?\]|"[REDACTED]"))(?:["']([^"'\r\n]+)["']|([^\s"',;}\]]+))/gi,
       '$1$2[REDACTED]'
     );
 
-    // URL query parameters (?api_key=..., &token=..., etc.)
-    sanitized = sanitized.replace(/([?&](?:api[_-]?key|key|token|auth|secret)=)[^&\s]+/gi, '$1[REDACTED]');
-
     return sanitized;
+  }
+
+  static redactSensitiveContent(content: string): string {
+    if (!content || typeof content !== 'string') return '';
+    const trimmed = content.trim();
+
+    // If the content is valid JSON, recursively redact structured keys first
+    if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        const redactedObj = AgentRepository.redactJsonValue(parsed);
+        const isFormatted = content.includes('\n');
+        return JSON.stringify(redactedObj, null, isFormatted ? 2 : undefined);
+      } catch {
+        // Fallback to pattern-based string redaction
+      }
+    }
+
+    return AgentRepository.redactStringPatterns(content);
   }
 
   static boundUtf8(content: string, maxBytes = 16384): string {

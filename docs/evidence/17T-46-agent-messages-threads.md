@@ -63,10 +63,10 @@ This implementation adds **durable server-side GigaAgent conversation messages**
    - Stored chained promise reference in `runLocks` and verified exact reference on cleanup.
    - Added `getActiveLockCount()` and regression test 22 ensuring map is cleaned up after both success and failure.
 
-9. **Security, UTF-8 Bounding & Redaction:**
+9. **Security, UTF-8 Bounding & JSON Redaction:**
    - DTOs never contain `leaseToken`, `workerId`, `leaseExpiresAt`, provider API keys, or raw reasoning traces.
    - Prompt injection resistance: user follow-up text cannot escalate run mode (`ask` -> `execute`), modify tool policies, or alter worker/lease state.
-   - **Sensitive Content Redaction (`redactSensitiveContent`):** Sanitizes secrets, Bearer tokens, API keys (`sk-...`, `ghp-...`), lease tokens, and worker credentials in assistant messages, tool summaries, and run summaries before database persistence.
+   - **Structured JSON & Pattern-Based Content Redaction (`redactSensitiveContent`, `redactJsonValue`, `redactStringPatterns`):** Recursively traverses parsed JSON objects and applies strict pattern replacement covering quoted JSON keys (`"apiKey": "..."`, `"leaseToken": "..."`, `"password": "..."`, `"client_secret": "..."`), Basic & Bearer authorization headers (`Authorization: Basic ...`), PEM private keys, URL userinfo credentials (`postgres://user:pass@host`), and URL query parameters across assistant messages, tool summaries, run step arguments/outputs, run summaries, and events before database persistence.
    - **Unicode-Aware Code-Point Bounding (`boundUtf8`):** Assistant and tool summaries strictly bounded by scanning back past continuation bytes, ensuring multi-byte characters (e.g. 4-byte emojis like `'🙂'`) are never split in the middle, preventing replacement character expansion and ensuring PostgreSQL `octet_length <= 16384` is never breached.
 
 ---
@@ -109,15 +109,16 @@ Run against **Real PostgreSQL 18.4** (`postgres://postgres@127.0.0.1:56446/giga_
   ✔ 28. non-completed prior runs (failed or cancelled) are excluded from workspace continuation context (345.3008ms)
   ✔ 29. workspace with > 200 historical messages never drops current run follow-ups or enters completion loops (477.5502ms)
   ✔ 30. redactSensitiveContent sanitizes secrets in assistant and tool summaries before database persistence (355.0411ms)
-✔ GigaAgent Durable Messages and Follow-up Threads (17T-46) (10397.0956ms)
-ℹ tests 30
+  ✔ 31. JSON credential leakage prevention in DB rows, run steps, events, and public GET APIs (385.2415ms)
+✔ GigaAgent Durable Messages and Follow-up Threads (17T-46) (10782.3371ms)
+ℹ tests 31
 ℹ suites 1
-ℹ pass 30
+ℹ pass 31
 ℹ fail 0
 ℹ cancelled 0
 ℹ skipped 0
 ℹ todo 0
-ℹ duration_ms 10962.3756
+ℹ duration_ms 11347.6171
 ``````
 
 ### B. Migration Upgrade Tests (`apps/api/tests/agent/agent-migration.test.ts` & `apps/api/tests/db-migrations.test.ts`)
