@@ -28,6 +28,10 @@ const isTerminalStatus = (status: string): boolean => {
   );
 };
 
+if (typeof window !== 'undefined') {
+  (window as any).__mockDataAdapter = mockDataAdapter;
+}
+
 export const ChatView: React.FC = () => {
   const { params, navigate } = useRouter();
   const { mode } = useApiMode();
@@ -51,11 +55,18 @@ export const ChatView: React.FC = () => {
   const [turn, setTurn] = useState<ChatTurnVariants | null>(null);
   const [canStop, setCanStop] = useState(false);
   const [isStopping, setIsStopping] = useState(false);
+  const [isActionLocked, setIsActionLocked] = useState(false);
+  const [historyLoadError, setHistoryLoadError] = useState(false);
   const actionLockRef = useRef(false);
   const operationRef = useRef(0);
   const modeRef = useRef(mode);
   const routeModeRef = useRef(mode);
   modeRef.current = mode;
+
+  const setActionLock = useCallback((locked: boolean) => {
+    actionLockRef.current = locked;
+    setIsActionLocked(locked);
+  }, []);
   const [showMobileSidebar, setShowMobileSidebar] = useState(false);
 
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -106,11 +117,13 @@ export const ChatView: React.FC = () => {
     activeGenerationIdRef.current = null;
     activeGenerationConversationIdRef.current = null;
     isStoppingRef.current = false;
+    setActionLock(false);
+    setHistoryLoadError(false);
     setErrorBanner(null);
     setModels([]);
     setSelectedModelId('');
     setSelectedReasoningEffort(undefined);
-  }, [mode]);
+  }, [mode, setActionLock]);
 
   // Load conversations list
   const loadConversations = useCallback(async () => {
@@ -246,7 +259,7 @@ export const ChatView: React.FC = () => {
     (conversationIdRef.current === id || createdConversationIdRef.current === id);
 
   const release = () => {
-    actionLockRef.current = false;
+    setActionLock(false);
     setCanStop(false);
     activeGenerationIdRef.current = null;
     activeGenerationConversationIdRef.current = null;
@@ -269,9 +282,9 @@ export const ChatView: React.FC = () => {
       activeGenerationIdRef.current = latest.id;
       activeGenerationConversationIdRef.current = id;
       setCanStop(true);
-      actionLockRef.current = true;
+      setActionLock(true);
       setIsStreaming(true);
-      await reconcileAuthoritativeGeneration(id, latest.id);
+      void reconcileAuthoritativeGeneration(id, latest.id);
     }
   };
 
@@ -351,6 +364,7 @@ export const ChatView: React.FC = () => {
     setMessages([]);
     setTurn(null);
     setErrorBanner(null);
+    setHistoryLoadError(false);
   }, [conversationId, mode]);
 
   // Load specific conversation messages
@@ -358,6 +372,7 @@ export const ChatView: React.FC = () => {
     async (id: string) => {
       const requestId = ++messageLoadRequestIdRef.current;
       setIsMessagesLoading(true);
+      setHistoryLoadError(false);
       try {
         const res =
           mode === 'real'
@@ -371,9 +386,11 @@ export const ChatView: React.FC = () => {
           return;
         }
         setMessages(res.messages);
+        setHistoryLoadError(false);
+        setErrorBanner(null);
         await inspectTurn(id, res.messages, operationRef.current);
         if (conversationIdRef.current === id && !activeGenerationIdRef.current) {
-          actionLockRef.current = false;
+          setActionLock(false);
         }
       } catch (err: unknown) {
         if (
@@ -389,14 +406,15 @@ export const ChatView: React.FC = () => {
               ? err.message
               : 'Failed to load conversation messages';
         setErrorBanner(message);
-        actionLockRef.current = true;
+        setHistoryLoadError(true);
+        setActionLock(true);
       } finally {
         if (messageLoadRequestIdRef.current === requestId) {
           setIsMessagesLoading(false);
         }
       }
     },
-    [mode]
+    [mode, setActionLock]
   );
 
   useEffect(() => {
@@ -456,8 +474,8 @@ export const ChatView: React.FC = () => {
   };
 
   const runGeneration = async (content?: string, action?: 'retry' | 'regenerate') => {
-    if (actionLockRef.current || isMessagesLoading) return;
-    actionLockRef.current = true; // Synchronous: protects clicks before React renders.
+    if (actionLockRef.current || isMessagesLoading || historyLoadError) return;
+    setActionLock(true); // Synchronous: protects clicks before React renders.
     const op = ++operationRef.current;
     let id = conversationIdRef.current;
     setIsStreaming(true);
@@ -717,38 +735,54 @@ export const ChatView: React.FC = () => {
               title={mode === 'real' ? 'Chat API Error' : 'Notice'}
               message={errorBanner}
               action={
-                actionLockRef.current && conversationId ? (
+                conversationId ? (
                   <div style={{ display: 'flex', gap: '8px' }}>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => {
-                        if (
-                          conversationId &&
-                          activeGenerationIdRef.current &&
-                          (!activeGenerationConversationIdRef.current || activeGenerationConversationIdRef.current === conversationId)
-                        ) {
-                          reconcileAuthoritativeGeneration(conversationId, activeGenerationIdRef.current);
-                        } else if (conversationId) {
+                    {historyLoadError ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => {
+                          setErrorBanner(null);
+                          setHistoryLoadError(false);
                           loadMessages(conversationId);
-                        }
-                      }}
-                    >
-                      Retry Status Check
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="danger"
-                      disabled={
-                        isStopping ||
-                        !canStop ||
-                        (activeGenerationConversationIdRef.current !== null &&
-                          activeGenerationConversationIdRef.current !== conversationId)
-                      }
-                      onClick={handleStopStreaming}
-                    >
-                      Retry Stop
-                    </Button>
+                        }}
+                      >
+                        Retry Loading History
+                      </Button>
+                    ) : (
+                      <>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => {
+                            if (
+                              conversationId &&
+                              activeGenerationIdRef.current &&
+                              (!activeGenerationConversationIdRef.current || activeGenerationConversationIdRef.current === conversationId)
+                            ) {
+                              reconcileAuthoritativeGeneration(conversationId, activeGenerationIdRef.current);
+                            } else if (conversationId) {
+                              loadMessages(conversationId);
+                            }
+                          }}
+                        >
+                          Retry Status Check
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="danger"
+                          disabled={
+                            isStopping ||
+                            !canStop ||
+                            (activeGenerationConversationIdRef.current !== null &&
+                              activeGenerationConversationIdRef.current !== conversationId)
+                          }
+                          onClick={handleStopStreaming}
+                        >
+                          Retry Stop
+                        </Button>
+                      </>
+                    )}
                   </div>
                 ) : undefined
               }
@@ -765,7 +799,39 @@ export const ChatView: React.FC = () => {
             </div>
           )}
 
-          {!isMessagesLoading && messages.length === 0 && !isStreaming && (
+          {!isMessagesLoading && messages.length === 0 && historyLoadError && (
+            <div
+              className="g-empty"
+              style={{
+                margin: 'auto',
+                textAlign: 'center',
+                maxWidth: '480px',
+                padding: '32px 16px',
+              }}
+            >
+              <h2 style={{ fontSize: '16px', fontWeight: 600, color: 'var(--giga-text, #F8FAFC)', marginBottom: '8px' }}>
+                Failed to load conversation history
+              </h2>
+              <p style={{ fontSize: '13px', lineHeight: 1.6, marginBottom: '20px', color: 'var(--giga-text-secondary, #94A3B8)' }}>
+                An error occurred while loading messages for this discussion.
+              </p>
+              {conversationId && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    setErrorBanner(null);
+                    setHistoryLoadError(false);
+                    loadMessages(conversationId);
+                  }}
+                >
+                  Retry Loading History
+                </Button>
+              )}
+            </div>
+          )}
+
+          {!isMessagesLoading && messages.length === 0 && !isStreaming && !historyLoadError && (
             <div
               className="g-empty"
               style={{
@@ -851,7 +917,7 @@ export const ChatView: React.FC = () => {
           onSend={handleSendMessage}
           onStop={handleStopStreaming}
           isStreaming={isStreaming}
-          disabled={isMessagesLoading || actionLockRef.current && !isStreaming}
+          disabled={isMessagesLoading || (isActionLocked && !isStreaming) || historyLoadError}
           isStopping={isStopping}
           canStop={canStop}
           models={models}

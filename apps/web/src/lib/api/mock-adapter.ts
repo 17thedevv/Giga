@@ -525,10 +525,14 @@ export class MockDataAdapter {
         this.generations.set(id, generation);
         onEvent({ event: 'message.delta', data: { messageId: id, generationId: id, text } });
       }, () => { complete = true; }, options?.signal);
-      if (options?.signal?.aborted || this.generations.get(id)?.status === 'stopped') {
+      if (this.generations.get(id)?.status === 'stopped') {
         generation = { ...generation, status: 'stopped', finishReason: 'cancelled', finishedAt: new Date().toISOString() };
         this.generations.set(id, generation);
         onEvent({ event: 'message.stopped', data: { messageId: id, generationId: id, finishReason: 'cancelled' } });
+      } else if (options?.signal?.aborted) {
+        generation = { ...generation, status: 'interrupted', finishReason: 'other', finishedAt: new Date().toISOString() };
+        this.generations.set(id, generation);
+        onEvent({ event: 'message.failed', data: { messageId: id, generationId: id, error: { code: 'INTERRUPTED', message: 'Stream interrupted' } } });
       } else if (complete) {
         const message: Message = { id, conversationId, role: 'assistant', content: generation.partialContent, createdAt: new Date().toISOString(), status: 'completed' };
         this.messages[conversationId].push(message);

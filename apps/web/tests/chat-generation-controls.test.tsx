@@ -472,6 +472,285 @@ describe('latest-turn generation controls', () => {
     expect(await screen.findByText('Message from A')).toBeDefined();
     expect(screen.queryByText('Message from B')).toBeNull();
   });
+
+  it('start generation in A -> navigate to B -> return to A while generation remains active recovers generation and permits Stop', async () => {
+    const cancelCalledWith: any[] = [];
+    vi.spyOn(realApiClient, 'streamMessage').mockImplementation(async (_id, _text, callback) => {
+      callback({ event: 'message.started', data: { conversationId: 'cA', messageId: 'gA', generationId: 'gA' } });
+      return new Promise<void>(() => {});
+    });
+    vi.spyOn(realApiClient, 'cancelGeneration').mockImplementation(async (convId, genId) => {
+      cancelCalledWith.push([convId, genId]);
+      return { generation: { id: genId, conversationId: convId, userMessageId: 'uA', modelId: 'giga-chat-default', status: 'stopped', partialContent: 'Recovered partial text', createdAt: timestamp } };
+    });
+    vi.spyOn(realApiClient, 'getGeneration').mockImplementation(async (convId, genId) => {
+      return { generation: { id: genId, conversationId: convId, userMessageId: 'uA', modelId: 'giga-chat-default', status: 'streaming', partialContent: 'Recovered partial text', createdAt: timestamp } };
+    });
+    vi.spyOn(realApiClient, 'getConversation').mockImplementation(async id => {
+      if (id === 'cA') {
+        return {
+          conversation: { ...conversation, id: 'cA' },
+          messages: [{ id: 'uA', conversationId: 'cA', role: 'user', content: 'Prompt in A', createdAt: timestamp }],
+        };
+      }
+      return { conversation: { ...conversation, id: 'cB' }, messages: [] };
+    });
+    vi.spyOn(realApiClient, 'getTurnVariants').mockImplementation(async (id, _userId) => {
+      if (id === 'cA') {
+        return {
+          userMessageId: 'uA',
+          selectedGenerationId: null,
+          items: [{ id: 'gA', action: 'new_prompt', modelId: 'giga-chat-default', status: 'streaming', createdAt: timestamp }],
+        };
+      }
+      return { userMessageId: 'uB', selectedGenerationId: null, items: [] };
+    });
+
+    function Navigation() {
+      const { navigate } = useRouter();
+      return (
+        <div>
+          <button onClick={() => navigate('/chat/cA')}>Go to A</button>
+          <button onClick={() => navigate('/chat/cB')}>Go to B</button>
+        </div>
+      );
+    }
+
+    render(
+      <ApiModeProvider initialMode="real">
+        <RouterProvider initialPath="/chat/cA">
+          <Navigation />
+          <ChatView />
+        </RouterProvider>
+      </ApiModeProvider>
+    );
+
+    // Initial load of conversation A
+    expect(await screen.findByText('Prompt in A')).toBeDefined();
+
+    // Navigate to B
+    fireEvent.click(screen.getByRole('button', { name: 'Go to B' }));
+    await waitFor(() => expect(screen.queryByText('Prompt in A')).toBeNull());
+
+    // Navigate back to A
+    fireEvent.click(screen.getByRole('button', { name: 'Go to A' }));
+    expect(await screen.findByText('Prompt in A')).toBeDefined();
+
+    // Verify generation A is recovered, Stop button is visible, new generation is locked
+    const stopBtn = await screen.findByRole('button', { name: 'Stop Generating' });
+    expect(stopBtn).toBeDefined();
+
+    // Verify textarea is disabled / generation action locked
+    const textarea = screen.getByPlaceholderText(/Generating response...|Ask Giga anything/);
+    expect(textarea.hasAttribute('disabled')).toBe(true);
+
+    // Click Stop Generating
+    fireEvent.click(stopBtn);
+
+    // Verify cancelGeneration was called with ('cA', 'gA') and NEVER ('cB', 'gA')
+    await waitFor(() => expect(cancelCalledWith.length).toBeGreaterThan(0));
+    expect(cancelCalledWith[0]).toEqual(['cA', 'gA']);
+    const mismatched = cancelCalledWith.some(([c, g]) => c === 'cB' && g === 'gA');
+    expect(mismatched).toBe(false);
+  });
+
+  it('returning to conversation A after generation completed restores terminal state and enables Regenerate', async () => {
+    vi.spyOn(realApiClient, 'getConversation').mockImplementation(async id => {
+      if (id === 'cA') {
+        return {
+          conversation: { ...conversation, id: 'cA' },
+          messages: [
+            { id: 'uA', conversationId: 'cA', role: 'user', content: 'Prompt in A', createdAt: timestamp },
+            { id: 'aA', conversationId: 'cA', role: 'assistant', content: 'Finished answer in A', createdAt: timestamp, status: 'completed' },
+          ],
+        };
+      }
+      return { conversation: { ...conversation, id: 'cB' }, messages: [] };
+    });
+    vi.spyOn(realApiClient, 'getTurnVariants').mockImplementation(async id => {
+      if (id === 'cA') {
+        return {
+          userMessageId: 'uA',
+          selectedGenerationId: 'gA_completed',
+          items: [{ id: 'gA_completed', action: 'new_prompt', modelId: 'giga-chat-default', status: 'completed', assistantMessageId: 'aA', content: 'Finished answer in A', createdAt: timestamp }],
+        };
+      }
+      return { userMessageId: 'uB', selectedGenerationId: null, items: [] };
+    });
+
+    function Navigation() {
+      const { navigate } = useRouter();
+      return (
+        <div>
+          <button onClick={() => navigate('/chat/cA')}>Go to A</button>
+          <button onClick={() => navigate('/chat/cB')}>Go to B</button>
+        </div>
+      );
+    }
+
+    render(
+      <ApiModeProvider initialMode="real">
+        <RouterProvider initialPath="/chat/cB">
+          <Navigation />
+          <ChatView />
+        </RouterProvider>
+      </ApiModeProvider>
+    );
+
+    // Navigate to A
+    fireEvent.click(screen.getByRole('button', { name: 'Go to A' }));
+
+    // Messages and completed response restored
+    expect(await screen.findByText('Finished answer in A')).toBeDefined();
+
+    // Regenerate is available, Retry is not, Composer is unlocked
+    expect(screen.getByRole('button', { name: 'Regenerate' })).toBeDefined();
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+    const textarea = screen.getByPlaceholderText(/Ask Giga anything/);
+    expect(textarea.hasAttribute('disabled')).toBe(false);
+  });
+
+  it('history loading failure displays visible Retry button and locks Composer until retry succeeds', async () => {
+    let failCount = 1;
+    vi.spyOn(realApiClient, 'getConversation').mockImplementation(async id => {
+      if (id === 'cA' && failCount > 0) {
+        failCount--;
+        throw new Error('Network timeout loading history');
+      }
+      return {
+        conversation: { ...conversation, id: 'cA' },
+        messages: [{ id: 'uA', conversationId: 'cA', role: 'user', content: 'Recovered prompt', createdAt: timestamp }],
+      };
+    });
+    vi.spyOn(realApiClient, 'getTurnVariants').mockResolvedValue({
+      userMessageId: 'uA',
+      selectedGenerationId: null,
+      items: [],
+    });
+
+    render(
+      <ApiModeProvider initialMode="real">
+        <RouterProvider initialPath="/chat/cA">
+          <ChatView />
+        </RouterProvider>
+      </ApiModeProvider>
+    );
+
+    // Verify error is displayed
+    expect(await screen.findByText(/Network timeout loading history/)).toBeDefined();
+
+    // Composer is locked due to history loading failure
+    const textarea = screen.getByPlaceholderText(/Chat is disabled|Ask Giga anything/);
+    expect(textarea.hasAttribute('disabled')).toBe(true);
+
+    // Find and click Retry Loading History button
+    const retryBtn = screen.getAllByRole('button', { name: /Retry/ })[0];
+    fireEvent.click(retryBtn);
+
+    // On successful retry, history is restored and Composer is unlocked
+    expect(await screen.findByText('Recovered prompt')).toBeDefined();
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText(/Ask Giga anything/).hasAttribute('disabled')).toBe(false);
+    });
+  });
+
+  it('history loading failure followed by retry with active generation keeps Composer locked and enables Stop', async () => {
+    let failCount = 1;
+    vi.spyOn(realApiClient, 'getConversation').mockImplementation(async id => {
+      if (id === 'cA' && failCount > 0) {
+        failCount--;
+        throw new Error('500 Internal Server Error');
+      }
+      return {
+        conversation: { ...conversation, id: 'cA' },
+        messages: [{ id: 'uA', conversationId: 'cA', role: 'user', content: 'Active prompt', createdAt: timestamp }],
+      };
+    });
+    vi.spyOn(realApiClient, 'getTurnVariants').mockResolvedValue({
+      userMessageId: 'uA',
+      selectedGenerationId: null,
+      items: [{ id: 'gA_active', action: 'new_prompt', modelId: 'giga-chat-default', status: 'streaming', createdAt: timestamp }],
+    });
+    vi.spyOn(realApiClient, 'getGeneration').mockResolvedValue({
+      generation: { id: 'gA_active', conversationId: 'cA', userMessageId: 'uA', modelId: 'giga-chat-default', status: 'streaming', partialContent: 'In flight', createdAt: timestamp },
+    });
+
+    render(
+      <ApiModeProvider initialMode="real">
+        <RouterProvider initialPath="/chat/cA">
+          <ChatView />
+        </RouterProvider>
+      </ApiModeProvider>
+    );
+
+    // Expect error
+    expect(await screen.findByText(/500 Internal Server Error/)).toBeDefined();
+
+    // Click retry
+    const retryBtn = screen.getAllByRole('button', { name: /Retry/ })[0];
+    fireEvent.click(retryBtn);
+
+    // Message restored, but active generation discovered -> Stop enabled and Composer locked
+    expect(await screen.findByText('Active prompt')).toBeDefined();
+    expect(await screen.findByRole('button', { name: 'Stop Generating' })).toBeDefined();
+    expect(screen.getByPlaceholderText(/Generating response...|Ask Giga anything/).hasAttribute('disabled')).toBe(true);
+  });
+
+  it('rapid A -> B navigation while history request for A fails does not lock Composer in B', async () => {
+    let rejectA: ((err: any) => void) | null = null;
+    vi.spyOn(realApiClient, 'getConversation').mockImplementation(async id => {
+      if (id === 'cA') {
+        return new Promise((_, reject) => {
+          rejectA = reject;
+        });
+      }
+      return {
+        conversation: { ...conversation, id: 'cB' },
+        messages: [{ id: 'uB', conversationId: 'cB', role: 'user', content: 'Prompt in B', createdAt: timestamp }],
+      };
+    });
+    vi.spyOn(realApiClient, 'getTurnVariants').mockResolvedValue({
+      userMessageId: 'uB',
+      selectedGenerationId: null,
+      items: [],
+    });
+
+    function Navigation() {
+      const { navigate } = useRouter();
+      return (
+        <div>
+          <button onClick={() => navigate('/chat/cA')}>Go to A</button>
+          <button onClick={() => navigate('/chat/cB')}>Go to B</button>
+        </div>
+      );
+    }
+
+    render(
+      <ApiModeProvider initialMode="real">
+        <RouterProvider initialPath="/chat/cA">
+          <Navigation />
+          <ChatView />
+        </RouterProvider>
+      </ApiModeProvider>
+    );
+
+    // Immediately navigate to B while A is still pending
+    fireEvent.click(screen.getByRole('button', { name: 'Go to B' }));
+
+    // Now fail request for A
+    if (rejectA) {
+      const rej: (err: any) => void = rejectA;
+      await act(async () => {
+        rej(new Error('Stale failure in A'));
+      });
+    }
+
+    // In conversation B: prompt in B is displayed, no error from A, and Composer is NOT locked
+    expect(await screen.findByText('Prompt in B')).toBeDefined();
+    expect(screen.queryByText(/Stale failure in A/)).toBeNull();
+    const textarea = screen.getByPlaceholderText(/Ask Giga anything/);
+    expect(textarea.hasAttribute('disabled')).toBe(false);
+  });
 });
 
 describe('implemented HTTP contract', () => {
