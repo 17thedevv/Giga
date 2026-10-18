@@ -51,8 +51,29 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, [mode]);
 
   useEffect(() => {
-    checkSession();
-  }, [checkSession]);
+    let active = true;
+    setIsLoading(true);
+    setError(null);
+    const run = async () => {
+      try {
+        if (mode === 'real') {
+          const res = await realApiClient.getMe();
+          if (active) setUser(res.user);
+        } else {
+          const res = await mockDataAdapter.getMe();
+          if (active) setUser(res.user);
+        }
+      } catch {
+        if (active) setUser(null);
+      } finally {
+        if (active) setIsLoading(false);
+      }
+    };
+    run();
+    return () => {
+      active = false;
+    };
+  }, [mode]);
 
   const login = async (email: string, password: string) => {
     setIsLoading(true);

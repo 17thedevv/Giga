@@ -10,6 +10,7 @@ import { ChatView } from '../features/chat/ChatView.js';
 import { AgentLauncherView } from '../features/agent/AgentLauncherView.js';
 import { AgentRunView } from '../features/agent/AgentRunView.js';
 import { SkillsView } from '../features/skills/SkillsView.js';
+import { SettingsView } from '../features/settings/SettingsView.js';
 
 const AppRoutes: React.FC = () => {
   const { path } = useRouter();
@@ -20,6 +21,7 @@ const AppRoutes: React.FC = () => {
 
   const isSkills = path.startsWith('/skills');
   const isPersonalization = path.startsWith('/personalization');
+  const isSettings = path.startsWith('/settings');
 
   return (
     <AuthGuard>
@@ -29,7 +31,8 @@ const AppRoutes: React.FC = () => {
         {path.startsWith('/agent/runs/') && <AgentRunView />}
         {isSkills && <SkillsView initialTab="skills" />}
         {isPersonalization && <SkillsView initialTab="personalization" />}
-        {!path.startsWith('/chat') && !path.startsWith('/agent') && !isSkills && !isPersonalization && <ChatView />}
+        {isSettings && <SettingsView />}
+        {!path.startsWith('/chat') && !path.startsWith('/agent') && !isSkills && !isPersonalization && !isSettings && <ChatView />}
       </Layout>
     </AuthGuard>
   );

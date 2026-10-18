@@ -4,7 +4,7 @@ import { useAuth } from './context/AuthContext.js';
 import { useApiMode } from './context/ApiModeContext.js';
 import { useTheme } from './context/ThemeContext.js';
 import { GigaLogo } from '../components/GigaLogo.js';
-import { ChatIcon, AgentIcon, WorkflowIcon, MenuIcon, XIcon, SunIcon, MoonIcon } from '../components/Icons.js';
+import { ChatIcon, AgentIcon, WorkflowIcon, SettingsIcon, MenuIcon, XIcon, SunIcon, MoonIcon } from '../components/Icons.js';
 import { Badge } from '../components/Badge.js';
 import { Button } from '../components/Button.js';
 import { SessionExpiredModal } from '../features/auth/SessionExpiredModal.js';
@@ -19,6 +19,7 @@ export const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) =>
   const isChat = path.startsWith('/chat');
   const isAgent = path.startsWith('/agent');
   const isSkills = path.startsWith('/skills') || path.startsWith('/personalization');
+  const isSettings = path.startsWith('/settings');
 
   return (
     <div
@@ -129,6 +130,29 @@ export const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) =>
             data-testid="nav-skills"
           >
             <WorkflowIcon size={20} />
+          </button>
+
+          <button
+            onClick={() => navigate('/settings')}
+            style={{
+              width: '42px',
+              height: '42px',
+              borderRadius: 'var(--giga-radius-md, 8px)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              backgroundColor: isSettings ? 'var(--giga-primary-subtle, rgba(59, 130, 246, 0.15))' : 'transparent',
+              color: isSettings ? 'var(--giga-primary, #3B82F6)' : 'var(--giga-text-secondary, #94A3B8)',
+              border: `1px solid ${isSettings ? 'var(--giga-primary, #3B82F6)' : 'transparent'}`,
+              cursor: 'pointer',
+              transition: 'all 0.15s ease',
+            }}
+            title="Settings & AI Providers"
+            aria-label="Settings & AI Providers"
+            aria-current={isSettings ? 'page' : undefined}
+            data-testid="nav-settings"
+          >
+            <SettingsIcon size={20} />
           </button>
         </nav>
 
@@ -307,6 +331,17 @@ export const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) =>
               icon={<WorkflowIcon size={18} />}
             >
               Skills & Personalization
+            </Button>
+            <Button
+              variant={isSettings ? 'primary' : 'outline'}
+              onClick={() => {
+                navigate('/settings');
+                setMobileMenuOpen(false);
+              }}
+              icon={<SettingsIcon size={18} />}
+              data-testid="mobile-nav-settings"
+            >
+              Settings & AI Providers
             </Button>
             <div style={{ marginTop: 'auto', display: 'flex', flexDirection: 'column', gap: '12px' }}>
               <Button variant="secondary" onClick={toggleTheme}>

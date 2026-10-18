@@ -321,3 +321,36 @@ export interface UpdatePreferencesDto {
   responseStyle?: 'professional' | 'casual' | 'technical';
   customInstructions?: string;
 }
+
+// ==========================================
+// Provider Credentials & BYOK (Task 17T-37 / 17T-39)
+// ==========================================
+
+export type ProviderType = 'gemini';
+export type CredentialStatus = 'unverified' | 'valid' | 'invalid';
+export type ChatCredentialMode = 'platform' | 'byok';
+
+export interface ProviderCredential {
+  readonly id: string;
+  readonly provider: ProviderType;
+  readonly displayHint: string;
+  readonly status: CredentialStatus;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly lastValidatedAt: string | null;
+}
+
+export interface ChatCredentialPreference {
+  readonly mode: ChatCredentialMode;
+  readonly credentialId: string | null;
+}
+
+export interface SaveCredentialDto {
+  readonly provider: ProviderType;
+  readonly apiKey: string;
+}
+
+export interface SetCredentialPreferenceDto {
+  readonly mode: ChatCredentialMode;
+  readonly credentialId?: string | null;
+}
