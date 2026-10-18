@@ -17,6 +17,7 @@ import type {
   UserPreferences,
   UpdatePreferencesDto,
   ChatGeneration,
+  ChatTurnVariants,
   ChatStreamEvent,
   ReasoningEffort,
   ModelsResponse,
@@ -398,6 +399,12 @@ export class RealApiClient {
         method: 'POST',
         headers,
       }
+    );
+  }
+
+  async getTurnVariants(conversationId: string, userMessageId: string): Promise<ChatTurnVariants> {
+    return this.request<ChatTurnVariants>(
+      `/api/v1/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(userMessageId)}/generations`
     );
   }
 

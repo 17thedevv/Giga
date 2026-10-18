@@ -15,6 +15,8 @@ import type { Conversation, Message, ChatGeneration } from '../src/lib/api/types
 
 describe('17T-33 — GigaChat Conversation & Streaming UI Tests', () => {
   beforeEach(() => {
+    // Legacy fixtures predate turn inspection; explicit empty response retains legacy answers.
+    vi.spyOn(realApiClient, 'getTurnVariants').mockImplementation(async (_id, userMessageId) => ({ userMessageId, selectedGenerationId: null, items: [] }));
     if (typeof window !== 'undefined') {
       if (window.sessionStorage) {
         window.sessionStorage.clear();
@@ -484,6 +486,11 @@ describe('17T-33 — GigaChat Conversation & Streaming UI Tests', () => {
         messages: [],
       });
 
+      vi.spyOn(realApiClient, 'getGeneration').mockResolvedValue({ generation: {
+        id: 'gen_err', conversationId: 'conv_failure', userMessageId: 'u1',
+        modelId: 'giga-chat-default', status: 'failed', partialContent: 'Partial text before failure...',
+        createdAt: new Date().toISOString(), error: { code: 'PROVIDER_TIMEOUT', message: 'Upstream LLM timed out' },
+      } });
       vi.spyOn(realApiClient, 'streamMessage').mockImplementation(async (_convId, _content, onEvent) => {
         onEvent({
           event: 'message.started',
