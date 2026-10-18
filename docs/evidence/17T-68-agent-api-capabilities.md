@@ -137,7 +137,7 @@ outside the repository. No raw secrets/log credentials are included in evidence.
 | Command / scope | Result |
 |---|---|
 | API: `npx tsx --test --test-concurrency=1 tests/agent/agent-contract.test.ts` with dedicated PostgreSQL | PASS: 10 tests, 2 suites, 0 fail, 0 skipped |
-| API: `npm test` with dedicated PostgreSQL | PASS: 477 tests, 66 suites, 0 fail, 0 skipped, 0 cancelled |
+| API: final `npm test` with dedicated PostgreSQL | PASS: 478 tests, 66 suites, 0 fail, 0 skipped, 0 cancelled |
 | API: `npm run typecheck` | PASS, exit 0 |
 | API: `npm run build` | PASS, exit 0 |
 | Import built `dist/modules/agent/capabilities.js` and assert Execute unavailable | PASS, exit 0; shared runtime resolves from compiled API |
@@ -148,6 +148,12 @@ outside the repository. No raw secrets/log credentials are included in evidence.
 | Root: `node --test .agents/scripts/validate-git-workflow.test.mjs` | PASS: 6 tests, 0 fail, 0 skipped |
 | Root: `node .agents/scripts/validate-skills.mjs` | PASS: all 8 skills |
 | Root: `git diff --check` | PASS |
+
+The initial full run passed 477 tests; a coherent future-enablement regression was added
+and the final full run passed all 478, including 11 new contract/API tests. Exact base/head
+Git policy validation also passed for `e7fe37a7ef25ff4895560dd2515aa08a6f5ee445` →
+`3c0b3d89bb37ca0af8bd6b043e91bf8cdad9df17`. The disposable local PostgreSQL server was stopped
+after validation; its isolated test files remain outside the repository.
 
 Mandatory case mapping:
 
@@ -170,8 +176,23 @@ gates, not evidence supplied by unit tests.
 
 ## GitHub publication and CI
 
-Implementation/test HEAD SHA: pending initial commit.
-Draft PR and exact GitHub Actions run URLs/results: pending publication; update after checks.
+Implementation/test HEAD SHA: `3c0b3d89bb37ca0af8bd6b043e91bf8cdad9df17`.
+Draft PR: [#34](https://github.com/17thedevv/Giga/pull/34).
+Current PR HEAD may include a subsequent evidence-only commit; the PR metadata records
+that SHA. No implementation changes are hidden in the evidence update.
+
+Initial exact implementation-head GitHub Actions:
+
+- [Git workflow](https://github.com/17thedevv/Giga/actions/runs/39139093558): PASS.
+- [Backend CI](https://github.com/17thedevv/Giga/actions/runs/39139093604): PASS;
+  Node 22 / PostgreSQL 16.15, 478 tests, 66 suites, 0 failed, 0 skipped.
+- [Frontend CI](https://github.com/17thedevv/Giga/actions/runs/39139093573): PASS;
+  typecheck, build and all unit/integration tests succeeded.
+
+The connected GitHub account created the PR as `Edtc235200732-create`, rather than the
+intended backend owner's account. That account cannot formally approve its own PR.
+Thư's independent compatibility confirmation and a separate eligible formal reviewer
+are still required; no review or approval has been fabricated.
 
 ## Changed files and review handoff
 
