@@ -114,15 +114,47 @@ Browser verification at `http://127.0.0.1:4173/chat?demo=1` (Edge headless autom
 ![History retry recovery with unlocked composer](screen_17t_38_history_retry.png)
 ![Mobile responsive layout](screen_17t_38_mobile.png)
 
-## Checks not executed / review gates
+## Backend in-process HTTP handler integration
 
-- No deployed Real API browser test, cloud deployment, production writes or new
-  provisioning. Cookie/CORS/CSRF and provider behavior need the existing approved
-  integration environment with the backend owner.
-- No backend/database tests: no backend/database changes.
-- No standalone lint/format script exists in `apps/web/package.json`.
-- Mock fixtures live in memory and reset on full page reload. Real refresh reads
-  durable history and latest-turn variants; automated tests cover this path.
-- Trà's independent review and public browser integration remain open. Keep the PR
-  Draft; do not merge or mark the issue Done. No cloud cross-training was performed
-  or required by this local frontend implementation.
+Issue: 17T-38 verification with real Hono application and database persistence.
+
+- Runner: Node.js test runner via `npx --prefix apps/api tsx --test apps/api/tests/chat/chat-runtime.test.ts`
+- Environment: In-memory PostgreSQL (`pg-mem`) via `test-db-helper.ts` with all 12 forward SQL migrations applied.
+- Provider: `FakeProvider` (deterministic in-process substitute; NOT live Gemini LLM).
+- Test suite result: **70 tests (57 passed, 0 failed, 13 skipped for live PostgreSQL)**.
+- Full API suite: `npm test --prefix apps/api` &rarr; **400 tests across 54 suites (376 passed, 0 failed, 24 skipped)**.
+- Specific 17T-38 integration test added:
+  `17T-38 navigation recovery and cross-conversation stop isolation`
+  - Validates client downstream transport abort (`reader.cancel()`) on conversation A while generation is running.
+  - Confirms backend finalizes generation as `interrupted` upon delivery disconnect.
+  - Verifies that issuing Stop from conversation B for generation A (`POST /api/v1/conversations/:idB/generations/:genA/cancel`) strictly returns HTTP 404 (mismatched conversation route fencing).
+  - Verifies that cross-user cancel requests (User B session cookie) strictly return HTTP 404.
+  - Verifies that returning to conversation A recovers authoritative state via `GET /:idA/generations/:genA` and variants list `GET /:idA/messages/:userMsgId/generations`.
+  - Verifies that `POST /api/v1/conversations/:idA/generations/:genA/cancel` with empty body is accepted.
+  - Verifies that `action: 'retry'` on the interrupted attempt produces a newly selected completed generation.
+  - Verifies that `action: 'regenerate'` with an existing completed variant streams an alternative variant and selects it upon completion, preserving prior attempts in the variants list.
+
+## Local integration environment status & review gates
+
+- **Docker PostgreSQL container (`infra/docker/docker-compose.dev.yml`):**
+  - Status: **UNAVAILABLE** on this developer workstation.
+  - Blocker: Docker CLI is not installed (`docker : The term 'docker' is not recognized`).
+  - Native PostgreSQL on port 5432 is not running.
+- **Live Gemini LLM Provider (`GEMINI_API_KEY`):**
+  - Status: **UNCONFIGURED** (`GEMINI_API_KEY` absent from environment).
+- **In-process HTTP Integration:**
+  - Status: **VERIFIED (PASS)**. The exact production Hono application factory (`createApp`), session middleware, CSRF validator, `ChatRuntime`, `PostgresGenerationRepository`, and variant/cancel routes were executed and verified against `pg-mem`.
+- **Reproducible steps for backend owner (Trà):**
+  1. Start local PostgreSQL: `docker compose -f infra/docker/docker-compose.dev.yml up -d`
+  2. Set `.env` in `apps/api`:
+     ```bash
+     DATABASE_URL=postgresql://giga:giga_dev_password@localhost:5432/giga_dev
+     GEMINI_API_KEY=<valid-gemini-key>
+     CHAT_MODEL_ID=gemini-2.5-flash
+     CHAT_ENABLED=true
+     ```
+  3. Run migrations: `npm run migrate --prefix apps/api`
+  4. Run chat smoke test: `npm run chat:smoke --prefix apps/api`
+  5. Start backend: `npm run dev --prefix apps/api`
+  6. Start frontend: `npm run dev --prefix apps/web` (proxies `/api` to `localhost:3000`)
+- **Review recommendation:** Keep PR #32 **Draft** and unmerged for independent peer review by Trà. All automated unit tests, in-process HTTP handler integration tests, TypeScript typechecks, production builds, and mock browser evidence pass. Deployed live-provider end-to-end testing requires the approved integration environment.

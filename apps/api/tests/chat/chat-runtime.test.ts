@@ -1127,4 +1127,105 @@ describe('Persisted Chat Runtime', { timeout: 30000 }, () => {
     assert.equal(await messageCount('assistant'), 0);
     assert.equal(provider.lastRequest!.signal.aborted, true);
   });
+
+  it('17T-38 navigation recovery and cross-conversation stop isolation', async () => {
+    // 1. Create conversation B for owner
+    const convB = randomUUID();
+    await db.pool.query('INSERT INTO conversations (id, user_id, title) VALUES ($1, $2, $3)', [convB, owner, 'Conversation B']);
+
+    // 2. Start stream in conversation A with controlled chunk streaming
+    setup({ chunks: ['First token in A. ', 'Second token in A. '], chunkDelayMs: 30 });
+    const streamResA = await post(randomUUID(), { content: 'Prompt in A' });
+    assert.equal(streamResA.status, 200);
+
+    // Read first event (message.started) to retrieve generation ID
+    const readerA = streamResA.body!.getReader();
+    const decoder = new TextDecoder();
+    let readBuffer = '';
+    let startedData: { generationId: string; messageId: string } | null = null;
+
+    while (!startedData) {
+      const { value, done } = await readerA.read();
+      if (done) break;
+      readBuffer += decoder.decode(value, { stream: true });
+      const frames = readBuffer.split('\n\n');
+      for (const frame of frames) {
+        if (frame.includes('event: message.started')) {
+          const match = frame.match(/data: (\{.*\})/);
+          if (match?.[1]) startedData = JSON.parse(match[1]);
+        }
+      }
+    }
+    assert.ok(startedData?.generationId);
+    const genAId = startedData.generationId;
+
+    // 3. Client navigates away to conversation B: aborts downstream SSE reader
+    await readerA.cancel();
+
+    // 4. In conversation B, attempt to cancel genA using convB -> MUST be 404
+    const crossCancelRes = await app.request(`/api/v1/conversations/${convB}/generations/${genAId}/cancel`, {
+      method: 'POST',
+      headers: { Origin: origin, Cookie: cookie, 'Idempotency-Key': randomUUID() },
+    });
+    assert.equal(crossCancelRes.status, 404, 'Mismatched conversation ID must reject with 404');
+
+    // 5. User B (otherCookie) attempts to cancel genA -> MUST be 404
+    const otherUserCancelRes = await app.request(`/api/v1/conversations/${conversationId}/generations/${genAId}/cancel`, {
+      method: 'POST',
+      headers: { Origin: origin, Cookie: otherCookie, 'Idempotency-Key': randomUUID() },
+    });
+    assert.equal(otherUserCancelRes.status, 404, 'Mismatched user session must reject with 404');
+
+    // 6. Client navigates back to conversation A: inspects authoritative state via GET
+    const getGenRes = await app.request(`/api/v1/conversations/${conversationId}/generations/${genAId}`, {
+      headers: { Cookie: cookie },
+    });
+    assert.equal(getGenRes.status, 200);
+    const { generation: recoveredGen } = (await getGenRes.json()) as { generation: ChatGeneration };
+    assert.equal(recoveredGen.id, genAId);
+    assert.equal(recoveredGen.conversationId, conversationId);
+
+    // 7. Client issues Stop on conversation A with genA -> accepted (202 or 200)
+    const validCancelRes = await app.request(`/api/v1/conversations/${conversationId}/generations/${genAId}/cancel`, {
+      method: 'POST',
+      headers: { Origin: origin, Cookie: cookie, 'Idempotency-Key': randomUUID() },
+    });
+    assert.ok([200, 202].includes(validCancelRes.status));
+
+    // Confirm authoritative status is stopped, interrupted or completed
+    const finalGenRes = await app.request(`/api/v1/conversations/${conversationId}/generations/${genAId}`, {
+      headers: { Cookie: cookie },
+    });
+    const { generation: finalGen } = (await finalGenRes.json()) as { generation: ChatGeneration };
+    assert.ok(['stopped', 'interrupted', 'completed'].includes(finalGen.status));
+
+    // 8. Test Retry on the interrupted/stopped attempt:
+    const userMsgId = recoveredGen.userMessageId;
+    const variantsBefore = await variants(userMsgId);
+    assert.ok(variantsBefore.items.some((item) => item.id === genAId));
+
+    // Retry creates a newly selected completed generation
+    setup({ chunks: ['Retried answer to completion. '] });
+    const retryRes = await variant(userMsgId, 'retry');
+    assert.equal(retryRes.status, 200);
+    const retryEvents = eventsFrom(await retryRes.text());
+    assert.equal(retryEvents.at(-1)!.event, 'message.completed');
+
+    const variantsAfterRetry = await variants(userMsgId);
+    assert.equal(variantsAfterRetry.items.length, variantsBefore.items.length + 1);
+    const completedRetryId = variantsAfterRetry.selectedGenerationId;
+    assert.ok(completedRetryId);
+    assert.notEqual(completedRetryId, genAId);
+
+    // 9. Test Regenerate now that a completed variant exists:
+    setup({ chunks: ['Second alternative variant. '] });
+    const regenRes = await variant(userMsgId, 'regenerate');
+    assert.equal(regenRes.status, 200);
+    const regenEvents = eventsFrom(await regenRes.text());
+    assert.equal(regenEvents.at(-1)!.event, 'message.completed');
+
+    const variantsAfterRegen = await variants(userMsgId);
+    assert.equal(variantsAfterRegen.items.length, 3);
+    assert.notEqual(variantsAfterRegen.selectedGenerationId, completedRetryId);
+  });
 });
