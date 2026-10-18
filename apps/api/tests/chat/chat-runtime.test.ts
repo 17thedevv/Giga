@@ -1134,7 +1134,7 @@ describe('Persisted Chat Runtime', { timeout: 30000 }, () => {
     await db.pool.query('INSERT INTO conversations (id, user_id, title) VALUES ($1, $2, $3)', [convB, owner, 'Conversation B']);
 
     // 2. Start stream in conversation A with controlled chunk streaming
-    setup({ chunks: ['First token in A. ', 'Second token in A. '], chunkDelayMs: 30 });
+    setup({ chunks: ['First token in A. ', 'Second token in A. ', 'Third token in A. ', 'Fourth token in A. '], chunkDelayMs: 100 });
     const streamResA = await post(randomUUID(), { content: 'Prompt in A' });
     assert.equal(streamResA.status, 200);
 
@@ -1185,19 +1185,39 @@ describe('Persisted Chat Runtime', { timeout: 30000 }, () => {
     assert.equal(recoveredGen.id, genAId);
     assert.equal(recoveredGen.conversationId, conversationId);
 
-    // 7. Client issues Stop on conversation A with genA -> accepted (202 or 200)
+    // 7. Client issues Stop on conversation A with genA -> accepted (202 acknowledgment or 200)
     const validCancelRes = await app.request(`/api/v1/conversations/${conversationId}/generations/${genAId}/cancel`, {
       method: 'POST',
       headers: { Origin: origin, Cookie: cookie, 'Idempotency-Key': randomUUID() },
     });
-    assert.ok([200, 202].includes(validCancelRes.status));
+    assert.ok(
+      [200, 202].includes(validCancelRes.status),
+      `Expected cancellation acknowledgment (200 or 202), got ${validCancelRes.status}`
+    );
 
-    // Confirm authoritative status is stopped, interrupted or completed
-    const finalGenRes = await app.request(`/api/v1/conversations/${conversationId}/generations/${genAId}`, {
-      headers: { Cookie: cookie },
-    });
-    const { generation: finalGen } = (await finalGenRes.json()) as { generation: ChatGeneration };
-    assert.ok(['stopped', 'interrupted', 'completed'].includes(finalGen.status));
+    // Bounded polling for authoritative terminal status (stopped or interrupted)
+    const pollDeadline = Date.now() + 5000;
+    let finalGen: ChatGeneration | null = null;
+    while (Date.now() < pollDeadline) {
+      const finalGenRes = await app.request(`/api/v1/conversations/${conversationId}/generations/${genAId}`, {
+        headers: { Cookie: cookie },
+      });
+      assert.equal(finalGenRes.status, 200);
+      const data = (await finalGenRes.json()) as { generation: ChatGeneration };
+      if (['stopped', 'interrupted', 'completed'].includes(data.generation.status)) {
+        finalGen = data.generation;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.ok(
+      finalGen,
+      `Generation ${genAId} did not reach terminal status within bounded polling timeout`
+    );
+    assert.ok(
+      ['stopped', 'interrupted', 'completed'].includes(finalGen.status),
+      `Expected terminal status 'stopped', 'interrupted', or 'completed', got '${finalGen.status}'`
+    );
 
     // 8. Test Retry on the interrupted/stopped attempt:
     const userMsgId = recoveredGen.userMessageId;
