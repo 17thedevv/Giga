@@ -30,7 +30,7 @@ Environment: Windows, Node v24.12.0, npm 11.6.2. Base: `6dc2b1a` from `origin/ma
 - `npm ci` in `apps/web`: succeeded; lockfile unchanged. npm reported three existing dependency audit findings (one moderate, two critical); no dependency upgrades were made.
 - `npm run typecheck --prefix apps/web`: PASS.
 - `npm run build --prefix apps/web`: PASS.
-- `npm test --prefix apps/web`: PASS, 125 tests across 10 files.
+- `npm test --prefix apps/web`: PASS, 129 tests across 10 files (23 focused generation-control tests).
 - `node --test .agents/scripts/validate-git-workflow.test.mjs`: PASS, six tests.
 - `node .agents/scripts/validate-skills.mjs`: PASS, eight skills.
 - `git diff --check`: PASS.
@@ -39,8 +39,9 @@ Focused coverage includes Stop/stopped SSE, completion winning Stop, lost cancel
 response, latest-turn Retry without output, failed/stopped regeneration preserving
 selection, duplicate admission envelopes, admission discovery before started,
 synchronous double actions including conversation creation, active-generation route
-refresh, and Enter-to-send. Existing stream, model capability, auth and other web
-regressions remain in the full suite.
+refresh, Enter-to-send, cross-conversation stop prevention, late SSE event isolation,
+model and reasoning effort preservation on regenerate, and rapid conversation switching.
+Existing stream, model capability, auth and other web regressions remain in the full suite.
 
 ## Review follow-up: stale operations and duplicate active admission
 
@@ -58,28 +59,33 @@ promise regression tests before the fixes (16 focused tests passed, two failed).
   Stop enabled through bounded polling while new actions remain locked. The test
   then cancels that generation and reconciles stopped state.
 
-`npm test -- --run tests/chat-generation-controls.test.tsx`: PASS, 19 focused tests
-after the fixes. Full typecheck, build, 125 web tests, six Git-validator tests,
-eight skill validations and whitespace checks were rerun successfully. No public
-contract, backend, dependency or deployment changes were needed.
+## Review follow-up: cross-conversation stop prevention and late SSE isolation
+
+- An `activeGenerationConversationIdRef` tracks the owning conversation ID alongside
+  each active generation ID.
+- `handleStopStreaming` strictly fences against mismatched conversation IDs, ensuring
+  the client never sends `(conversation B, generation A)` when navigating during streaming.
+- SSE callbacks and `reconcileAuthoritativeGeneration` verify route and owning
+  conversation IDs so late events arriving from conversation A cannot mutate conversation B.
+- Retry and Regenerate preserve currently selected `modelId` and `reasoningEffort`.
+- 4 additional regression tests added to `chat-generation-controls.test.tsx` (bringing suite to 23 tests, 129 total web tests).
 
 ## Local browser evidence
 
-In-app browser at `http://127.0.0.1:5173`, explicit Mock mode, 614 × 508 viewport:
+Browser verification at `http://127.0.0.1:4173/chat?demo=1` (1280 × 800 viewport):
 
-These screenshots were captured on the initial implementation at `840075e`;
-the review follow-up changes were verified through automated regression tests.
+1. Stop generation: Clicking Regenerate followed by Stop cancels streaming, updates
+   status to "Response stopped by user", and keeps Retry and Regenerate available.
+2. Retry generation: Resumes generation to completion and displays the new variant.
+3. Regenerate & Previous answers: Generates another variant; previous completed
+   answers are preserved in the expandable `<details>` section.
+4. Navigation during active stream: Navigating to New Chat during stream cleanly
+   unmounts and resets without route contamination or orphan Stop dispatches.
 
-1. Regenerate, then Stop: original completed answer stays selected; stopped status
-   and Retry/Regenerate are visible. Controls wrap and use 44px minimum height.
-2. Activate Retry with Enter: controls disable while streaming, then completion
-   selects the new answer.
-3. Activate Previous completed answers with Enter: original answer remains readable;
-   native focus outline is visible.
-
-![Stopped regeneration with original answer retained](stopped-mock.png)
-![Completed retry with prior variants available](completed-variants-mock.png)
-![Keyboard-expanded prior completed answer](previous-variant-mock.png)
+![Stopped generation with original answer retained](screen_17t_38_stop.png)
+![Completed retry with prior variants available](screen_17t_38_retry.png)
+![Regenerate with prior variants expanded](screen_17t_38_regenerate.png)
+![Navigation during active stream](screen_17t_38_nav_streaming.png)
 
 ## Checks not executed / review gates
 

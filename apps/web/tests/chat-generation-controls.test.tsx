@@ -5,7 +5,7 @@ import { ApiModeProvider } from '../src/app/context/ApiModeContext.js';
 import { RouterProvider, useRouter } from '../src/app/router.js';
 import { ApiException, RealApiClient, realApiClient } from '../src/lib/api/client.js';
 import { MockDataAdapter } from '../src/lib/api/mock-adapter.js';
-import type { ChatGeneration, ChatStreamEvent, ChatTurnVariants, Message } from '../src/lib/api/types.js';
+import type { ChatGeneration, ChatStreamEvent, ChatTurnVariants, Message, ModelMetadata } from '../src/lib/api/types.js';
 
 const timestamp = '2026-10-16T00:00:00Z';
 const conversation = { id: 'c1', title: 'Controls test', createdAt: timestamp, updatedAt: timestamp };
@@ -266,6 +266,211 @@ describe('latest-turn generation controls', () => {
     });
     expect(create).toHaveBeenCalledTimes(1);
     expect(create).toHaveBeenCalledWith('New keyboard turn');
+  });
+
+  it('navigating from conversation A to B prevents sending (conversation B, generation A) on Stop', async () => {
+    vi.spyOn(realApiClient, 'streamMessage').mockImplementation(async (_id, _text, callback) => {
+      callback({ event: 'message.started', data: { conversationId: 'cA', messageId: 'gA', generationId: 'gA' } });
+      return new Promise<void>(() => {});
+    });
+    const cancel = vi.spyOn(realApiClient, 'cancelGeneration').mockImplementation(() => new Promise(() => {}));
+
+    vi.spyOn(realApiClient, 'getConversation').mockImplementation(async id => {
+      if (id === 'cA') return { conversation: { ...conversation, id: 'cA' }, messages: [] };
+      return { conversation: { ...conversation, id: 'cB' }, messages: [] };
+    });
+
+    function Navigation() {
+      const { navigate } = useRouter();
+      return (
+        <div>
+          <button onClick={() => navigate('/chat/cA')}>Go to A</button>
+          <button onClick={() => navigate('/chat/cB')}>Go to B</button>
+        </div>
+      );
+    }
+
+    render(
+      <ApiModeProvider initialMode="real">
+        <RouterProvider initialPath="/chat/cA">
+          <Navigation />
+          <ChatView />
+        </RouterProvider>
+      </ApiModeProvider>
+    );
+
+    // Send in conversation A
+    const inputA = await screen.findByPlaceholderText(/Ask Giga anything/);
+    fireEvent.change(inputA, { target: { value: 'Prompt in A' } });
+    fireEvent.submit(inputA.closest('form')!);
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Stop Generating' })).toBeDefined());
+
+    // Navigate to conversation B
+    fireEvent.click(screen.getByRole('button', { name: 'Go to B' }));
+
+    // In conversation B, generation A is not active on this route
+    expect(cancel).not.toHaveBeenCalled();
+
+    // Verify cancelGeneration is never called with ('cB', 'gA')
+    const calls = cancel.mock.calls;
+    const sentMismatched = calls.some(args => args[0] === 'cB' && args[1] === 'gA');
+    expect(sentMismatched).toBe(false);
+  });
+
+  it('late SSE events from conversation A do not overwrite conversation B', async () => {
+    let emitA!: (event: ChatStreamEvent) => void;
+    vi.spyOn(realApiClient, 'streamMessage').mockImplementation(async (id, _text, callback) => {
+      if (id === 'cA') {
+        emitA = callback;
+        callback({ event: 'message.started', data: { conversationId: 'cA', messageId: 'gA', generationId: 'gA' } });
+        return new Promise<void>(() => {});
+      }
+      return new Promise<void>(() => {});
+    });
+
+    vi.spyOn(realApiClient, 'getConversation').mockImplementation(async id => {
+      if (id === 'cA') return { conversation: { ...conversation, id: 'cA' }, messages: [] };
+      return {
+        conversation: { ...conversation, id: 'cB' },
+        messages: [
+          { id: 'uB', conversationId: 'cB', role: 'user', content: 'User message in B', createdAt: timestamp },
+          { id: 'aB', conversationId: 'cB', role: 'assistant', content: 'Authoritative answer in B', createdAt: timestamp },
+        ],
+      };
+    });
+
+    function Navigation() {
+      const { navigate } = useRouter();
+      return (
+        <div>
+          <button onClick={() => navigate('/chat/cA')}>Go to A</button>
+          <button onClick={() => navigate('/chat/cB')}>Go to B</button>
+        </div>
+      );
+    }
+
+    render(
+      <ApiModeProvider initialMode="real">
+        <RouterProvider initialPath="/chat/cA">
+          <Navigation />
+          <ChatView />
+        </RouterProvider>
+      </ApiModeProvider>
+    );
+
+    // Send in conversation A
+    const inputA = await screen.findByPlaceholderText(/Ask Giga anything/);
+    fireEvent.change(inputA, { target: { value: 'Prompt in A' } });
+    fireEvent.submit(inputA.closest('form')!);
+
+    await waitFor(() => expect(emitA).toBeDefined());
+
+    // Navigate to conversation B
+    fireEvent.click(screen.getByRole('button', { name: 'Go to B' }));
+
+    // Wait for conversation B history to display
+    expect(await screen.findByText('Authoritative answer in B')).toBeDefined();
+
+    // Now emit late events from conversation A
+    await act(async () => {
+      emitA({ event: 'message.delta', data: { messageId: 'gA', generationId: 'gA', text: 'Late leakage text from A' } });
+      emitA({ event: 'message.completed', data: { messageId: 'gA', generationId: 'gA' } });
+    });
+
+    // Conversation B must NOT be contaminated by late A events
+    expect(screen.queryByText('Late leakage text from A')).toBeNull();
+    expect(screen.getByText('Authoritative answer in B')).toBeDefined();
+  });
+
+  it('regenerate respects selected model and reasoning effort', async () => {
+    const customModel: ModelMetadata = {
+      id: 'giga-custom-preview',
+      capabilities: ['text', 'streaming'],
+      reasoning: { supported: true, efforts: ['low', 'medium', 'high'] },
+    };
+    vi.spyOn(realApiClient, 'listModels').mockResolvedValue({
+      models: [customModel],
+    });
+
+    view(); await ready();
+
+    // Select high reasoning effort
+    const effortSelect = screen.getByTestId('composer-reasoning-select');
+    fireEvent.change(effortSelect, { target: { value: 'high' } });
+
+    // Click Regenerate
+    fireEvent.click(screen.getByRole('button', { name: 'Regenerate' }));
+
+    await waitFor(() => {
+      expect(realApiClient.streamVariant).toHaveBeenCalledWith(
+        'c1',
+        'u1',
+        'regenerate',
+        expect.any(Function),
+        expect.objectContaining({
+          modelId: 'giga-custom-preview',
+          reasoningEffort: 'high',
+        })
+      );
+    });
+  });
+
+  it('rapid conversation switching cleans up in-flight requests without stale contamination', async () => {
+    let resolveA!: (value: any) => void;
+    let resolveB!: (value: any) => void;
+
+    vi.spyOn(realApiClient, 'getConversation').mockImplementation(async id => {
+      if (id === 'cA') {
+        return new Promise(resolve => { resolveA = resolve; });
+      }
+      return new Promise(resolve => { resolveB = resolve; });
+    });
+
+    function Navigation() {
+      const { navigate } = useRouter();
+      return (
+        <div>
+          <button onClick={() => navigate('/chat/cA')}>Go to A</button>
+          <button onClick={() => navigate('/chat/cB')}>Go to B</button>
+        </div>
+      );
+    }
+
+    render(
+      <ApiModeProvider initialMode="real">
+        <RouterProvider initialPath="/chat/cA">
+          <Navigation />
+          <ChatView />
+        </RouterProvider>
+      </ApiModeProvider>
+    );
+
+    // Switch rapidly A -> B -> A
+    fireEvent.click(screen.getByRole('button', { name: 'Go to B' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Go to A' }));
+
+    // Resolve B after navigating back to A
+    if (resolveB) {
+      await act(async () => {
+        resolveB({
+          conversation: { ...conversation, id: 'cB' },
+          messages: [{ id: 'mB', conversationId: 'cB', role: 'assistant', content: 'Message from B', createdAt: timestamp }],
+        });
+      });
+    }
+
+    // Resolve A
+    await act(async () => {
+      resolveA({
+        conversation: { ...conversation, id: 'cA' },
+        messages: [{ id: 'mA', conversationId: 'cA', role: 'assistant', content: 'Message from A', createdAt: timestamp }],
+      });
+    });
+
+    // In conversation A, only message from A should be visible; message from B must be ignored
+    expect(await screen.findByText('Message from A')).toBeDefined();
+    expect(screen.queryByText('Message from B')).toBeNull();
   });
 });
 

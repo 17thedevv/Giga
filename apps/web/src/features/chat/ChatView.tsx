@@ -61,6 +61,7 @@ export const ChatView: React.FC = () => {
   const abortControllerRef = useRef<AbortController | null>(null);
   const accumulatedTextRef = useRef('');
   const activeGenerationIdRef = useRef<string | null>(null);
+  const activeGenerationConversationIdRef = useRef<string | null>(null);
   const isStoppingRef = useRef(false);
   const createdConversationIdRef = useRef<string | null>(null);
   const stopTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -103,6 +104,7 @@ export const ChatView: React.FC = () => {
     setStreamingText('');
     accumulatedTextRef.current = '';
     activeGenerationIdRef.current = null;
+    activeGenerationConversationIdRef.current = null;
     isStoppingRef.current = false;
     setErrorBanner(null);
     setModels([]);
@@ -247,6 +249,7 @@ export const ChatView: React.FC = () => {
     actionLockRef.current = false;
     setCanStop(false);
     activeGenerationIdRef.current = null;
+    activeGenerationConversationIdRef.current = null;
     isStoppingRef.current = false;
     setIsStopping(false);
     setIsStreaming(false);
@@ -264,6 +267,7 @@ export const ChatView: React.FC = () => {
     const latest = variants.items.at(-1);
     if (latest && !isTerminalStatus(latest.status)) {
       activeGenerationIdRef.current = latest.id;
+      activeGenerationConversationIdRef.current = id;
       setCanStop(true);
       actionLockRef.current = true;
       setIsStreaming(true);
@@ -276,7 +280,13 @@ export const ChatView: React.FC = () => {
     id: string, generationId: string, fallback?: string, localPartial?: string,
     attempt = 0, op = operationRef.current, snapshot?: ChatGeneration
   ): Promise<boolean> => {
-    if (!current(id, op) || activeGenerationIdRef.current !== generationId) return false;
+    if (
+      !current(id, op) ||
+      activeGenerationIdRef.current !== generationId ||
+      (activeGenerationConversationIdRef.current && activeGenerationConversationIdRef.current !== id)
+    ) {
+      return false;
+    }
     try {
       const generation = snapshot || (await api.getGeneration(id, generationId)).generation;
       if (!current(id, op) || activeGenerationIdRef.current !== generationId) return false;
@@ -486,6 +496,7 @@ export const ChatView: React.FC = () => {
         if (event.event === 'message.started') {
           if (event.data.conversationId !== target) return;
           activeGenerationIdRef.current = event.data.generationId;
+          activeGenerationConversationIdRef.current = target;
           setCanStop(true);
         } else if (event.data.generationId !== activeGenerationIdRef.current) return;
         if (event.event === 'message.delta') {
@@ -560,6 +571,7 @@ export const ChatView: React.FC = () => {
       const duplicate = err instanceof ApiException ? err.details?.generation as ChatGeneration | undefined : undefined;
       if (duplicate?.conversationId === id) {
         activeGenerationIdRef.current = duplicate.id;
+        activeGenerationConversationIdRef.current = id;
         setCanStop(!isTerminalStatus(duplicate.status));
       }
       if (activeGenerationIdRef.current) {
@@ -588,31 +600,33 @@ export const ChatView: React.FC = () => {
     message.status === 'failed' || message.status === 'stopped' ? 'retry' : 'regenerate');
 
   const handleStopStreaming = async () => {
-    const id = conversationIdRef.current || createdConversationIdRef.current;
+    const owningConvId = activeGenerationConversationIdRef.current;
+    const currentConvId = conversationIdRef.current || createdConversationIdRef.current;
     const genId = activeGenerationIdRef.current;
-    if (!id || !genId || isStoppingRef.current) return;
+    if (!owningConvId || !genId || isStoppingRef.current) return;
+    if (currentConvId !== owningConvId) return;
     const op = operationRef.current;
     isStoppingRef.current = true;
     setIsStopping(true);
     try {
-      const result = await api.cancelGeneration(id, genId);
-      if (!current(id, op) || activeGenerationIdRef.current !== genId) return;
+      const result = await api.cancelGeneration(owningConvId, genId);
+      if (!current(owningConvId, op) || activeGenerationIdRef.current !== genId) return;
       if (mode === 'mock') abortControllerRef.current?.abort();
       if (isTerminalStatus(result.generation.status)) {
-        await reconcileAuthoritativeGeneration(id, genId, undefined, accumulatedTextRef.current, 0, op, result.generation);
-        if (current(id, op) && !activeGenerationIdRef.current) abortControllerRef.current?.abort();
+        await reconcileAuthoritativeGeneration(owningConvId, genId, undefined, accumulatedTextRef.current, 0, op, result.generation);
+        if (current(owningConvId, op) && !activeGenerationIdRef.current) abortControllerRef.current?.abort();
       } else {
         stopTimeoutRef.current = setTimeout(() => {
-          void reconcileAuthoritativeGeneration(id, genId, undefined, accumulatedTextRef.current);
+          void reconcileAuthoritativeGeneration(owningConvId, genId, undefined, accumulatedTextRef.current);
         }, STOP_FALLBACK_TIMEOUT_MS);
       }
     } catch (err) {
-      if (!current(id, op) || activeGenerationIdRef.current !== genId) return;
+      if (!current(owningConvId, op) || activeGenerationIdRef.current !== genId) return;
       setErrorBanner(err instanceof Error ? err.message : 'Failed to cancel generation');
       isStoppingRef.current = false;
       setIsStopping(false);
       // A lost cancel response may still mean the intent committed.
-      void reconcileAuthoritativeGeneration(id, genId);
+      void reconcileAuthoritativeGeneration(owningConvId, genId);
     }
   };
 
@@ -709,7 +723,11 @@ export const ChatView: React.FC = () => {
                       size="sm"
                       variant="outline"
                       onClick={() => {
-                        if (conversationId && activeGenerationIdRef.current) {
+                        if (
+                          conversationId &&
+                          activeGenerationIdRef.current &&
+                          (!activeGenerationConversationIdRef.current || activeGenerationConversationIdRef.current === conversationId)
+                        ) {
                           reconcileAuthoritativeGeneration(conversationId, activeGenerationIdRef.current);
                         } else if (conversationId) {
                           loadMessages(conversationId);
@@ -721,7 +739,12 @@ export const ChatView: React.FC = () => {
                     <Button
                       size="sm"
                       variant="danger"
-                      disabled={isStopping || !canStop}
+                      disabled={
+                        isStopping ||
+                        !canStop ||
+                        (activeGenerationConversationIdRef.current !== null &&
+                          activeGenerationConversationIdRef.current !== conversationId)
+                      }
                       onClick={handleStopStreaming}
                     >
                       Retry Stop
