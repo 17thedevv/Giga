@@ -6,11 +6,17 @@ import { ValidationError } from '../auth/auth-validation.js';
 import type { AgentService } from './service.js';
 import { agentUuid, eventCursor, listMessagesOptions, listOptions } from './validation.js';
 import { observeEvents, type ObserverOptions } from './sse.js';
+import { getAgentCapabilities } from './capabilities.js';
 
 export function createAgentRoutes(service: AgentService, auth: AuthService, observerOptions?: ObserverOptions): Hono {
   const router = new Hono();
   router.use('*', createAuthMiddleware(auth));
   router.use('*', bodyLimit({ maxSize: 100000, onError: () => { throw new ValidationError('Request body exceeds size limit'); } }));
+  router.get('/capabilities', (c) => {
+    if (Object.keys(c.req.queries()).length) throw new ValidationError('Unknown query parameters');
+    c.header('Cache-Control', 'private, no-store');
+    return c.json(getAgentCapabilities());
+  });
   async function json(req: { json(): Promise<unknown> }): Promise<unknown> {
     try { return await req.json(); } catch { throw new ValidationError('Invalid JSON payload'); }
   }

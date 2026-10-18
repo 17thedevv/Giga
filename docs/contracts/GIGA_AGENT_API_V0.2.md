@@ -1,292 +1,275 @@
-# GigaAgent — Workspace-first REST/SSE API Proposal v0.2
+# GigaAgent — Workspace-first REST/SSE API v0.2
 
-> **STATUS: DRAFT / NOT FROZEN.** Only the 17T-44 implementation candidate below is implemented by its PR; the broader proposal remains future work. Trà (Backend) + Thư (Frontend) must review exact route, DTO, statuses, SSE payloads and security. This candidate updates the historical GitHub-first agent assumptions in [canonical API v0.1](API_CONTRACT_V0.1.md) while retaining shared Auth/Chat semantics. [ADR-001](../decisions/ADR-001-api-compatibility.md) controls actual freeze/compatibility; [17T-24](https://linear.app/17thedev/issue/17T-24/redesign-gigaagent-as-agentic-workspace-with-sandbox-runtime).
+> **DRAFT / NOT FROZEN.** Reconciled for [17T-68](https://linear.app/17thedev/issue/17T-68)
+> against merged control plane, orchestrator, messages and sandbox adapter code.
+> Owner: Trà (Backend/Agent); reviewer: Thư (Frontend/UX); independent security review pending.
+> [ADR-001](../decisions/ADR-001-api-compatibility.md) governs compatibility. Joint sign-off,
+> deployed browser checks and fixtures are required before freeze. Interfaces and mocks
+> are not evidence that a public feature is operational.
 
-## Implementation candidate — 17T-44
+## 1. Authority and implementation boundary
 
-Tracking: [17T-44](https://linear.app/17thedev/issue/17T-44).
-[ADR-008](../decisions/ADR-008-agent-control-plane-foundation.md),
-[verification evidence](../evidence/17T-44-agent-control-plane.md). Independent review pending.
+Public wiring: `createApp → createAgentRoutes → AgentService → AgentRepository.admitRun`.
+It admits and persists runs but does not dispatch an execution worker. Every newly admitted
+Ask/Plan/Execute run commits `failed` with `RUNTIME_UNAVAILABLE`. HTTP 201 means a durable
+run was created, not that a task can execute. No Cloud runner is enabled.
 
-| Previous implementation | Candidate behavior | Compatibility / consumers |
-|---|---|---|
-| No Agent backend routes or durable Agent data | Blank Workspace create/list/get; Run create/list/get/events | Additive server routes; old Agent frontend fixtures remain mocks |
-| Proposed queued execution without a runner | Persist admission and immediate `failed` / `RUNTIME_UNAVAILABLE` atomically | Truthful control-plane behavior; no promise of queued execution |
-| Proposed replay semantics | Persist per-run sequences; SSE is read-only replay/tail | Client must retain last processed ID per run, deduplicate and ignore unknown future event types |
-| Auth and GigaChat routes | Unchanged | Existing clients unaffected; API remains DRAFT |
+Shared public types and runtime response validators:
+[`agent.d.ts`](../../packages/contracts/agent.d.ts), [`agent.js`](../../packages/contracts/agent.js).
+Backend `types.ts` re-exports public DTOs; worker leases, steps and sandbox sessions remain
+internal. Web `agent-contract.ts` re-exports the same definitions. No DB migration.
 
-Implemented endpoints only:
+### Implementation candidate — 17T-44
 
-| Method | Path | Concrete DTO / response |
-|---|---|---|
-| POST | `/api/v1/agent/workspaces` | `{ name?: string, source: { kind: 'blank' } }` → 201 `{ workspace }` |
-| GET | `/api/v1/agent/workspaces` | `limit?`, `cursor?` → 200 `{ items, nextCursor }` |
-| GET | `/api/v1/agent/workspaces/:id` | 200 `{ workspace }` |
-| POST | `/api/v1/agent/runs` | `{ workspaceId, task, mode?, runtime?, modelId? }`, required `Idempotency-Key` → 201 `{ run }`; exact replay → 200 `{ run }` |
-| GET | `/api/v1/agent/runs` | `workspaceId?`, `limit?`, `cursor?` → 200 `{ items, nextCursor }` |
-| GET | `/api/v1/agent/runs/:id` | 200 `{ run }` |
-| GET | `/api/v1/agent/runs/:id/events` | `Last-Event-ID?` → 200 `text/event-stream` |
-| POST | `/api/v1/agent/runs/:id/messages` | `{ content }`, required `Idempotency-Key` → 201 `{ message }`; replay → 200 `{ message }`; terminal run → 409 `CONFLICT` |
-| GET | `/api/v1/agent/runs/:id/messages` | `limit?`, `cursor?` → 200 `{ items, nextCursor }` (deterministic ascending sequence order) |
+Workspace create/list/get, Run admission/list/get and durable event replay are implemented.
+Blank Workspace means durable metadata, not a created directory or saved snapshot.
+See [ADR-008](../decisions/ADR-008-agent-control-plane-foundation.md) and
+[control-plane evidence](../evidence/17T-44-agent-control-plane.md).
 
-- Workspace DTO is `{ id, name, sourceKind: 'blank', revision: 1, createdAt, updatedAt }`.
-  Blank means durable metadata only; no directory, snapshot or files are created.
-- Names default to `New Workspace`; supplied names are trimmed, nonempty, max 255 UTF-8 bytes.
-- `workspaceId` is an owned UUID. Task is trimmed, nonempty, max 16,384 UTF-8 bytes.
-  Mode accepts `ask | plan | execute`, default `ask`; runtime is `cloud`, default `cloud`.
-  The sole accepted/default Agent alias is `giga-agent-default`. It is an admission alias,
-  with no provider/model execution configured. It does not reuse Chat credentials or Memory.
-- Body bound is 100,000 bytes. Unknown fields, unsupported sources/models/runtime, null or
-  malformed values, missing/invalid idempotency keys and invalid cursors return 400
-  `VALIDATION_ERROR`. Keys follow the existing 1–128 ASCII letter/digit/`._:-` policy.
-- Run DTO includes `{ id, workspaceId, task, mode, runtime, modelId, status, createdAt,
-  updatedAt, finishedAt?, error? }`. Current admission always returns `status: 'failed'`,
-  `finishedAt`, and `error: { code: 'RUNTIME_UNAVAILABLE', message: 'Agent execution runtime is not available' }`.
-  It never returns a result, artifacts or fabricated verification. Seven public statuses
-  remain unchanged; unavailable is an error code, not an eighth status.
-- Owner-qualified queries and composite FKs scope workspaces, runs and events. Cross-owner
-  and missing resource IDs return the same generic 404. All routes require a session;
-  POSTs use existing Origin/CSRF middleware. No provider configuration is public.
-- Idempotency namespace is Agent run creation per authenticated owner. SHA-256 covers the
-  normalized workspace/task/mode/runtime/model tuple. Defaults, whitespace trimming and UUID
-  case normalize before hashing. Changed identity under the same key returns 409. Admission,
-  queued event and terminal failure commit together. Replays create neither runs nor events.
-- Lists use `{ items, nextCursor: string | null }`, default limit 20, max 100, ordered by
-  immutable `createdAt DESC, id DESC`. Opaque cursors preserve PostgreSQL microseconds and
-  bind collection kind/workspace filter. Unknown/repeated list parameters are rejected.
+### Merged foundations — 17T-45 / 17T-46 / 17T-47
 
-SSE candidate details:
+- 17T-45: durable orchestration, steps/events, worker leases/fencing and deterministic fake
+  runtime. Internal foundations only; public admission does not enqueue execution.
+- 17T-46: persisted initial user message, message lists and idempotent follow-up to
+  nonterminal runs. Normal public admission is terminal, so usable follow-up is disabled
+  in discovery. Internal orchestration can persist bounded/redacted assistant/tool summaries.
+- 17T-47: isolated sandbox adapter and simulated provider tests. No production provider
+  dispatch, approved Cloud activation, public files or artifacts. Internal stop/cleanup
+  methods do not implement the public cancel endpoint.
 
-1. A new admitted run stores `id: 1`, `event: run.status`, data
-   `{ runId, status: 'queued', phase: 'waiting_runtime' }` and then `id: 2`,
-   `event: run.failed`, data `{ runId, code: 'RUNTIME_UNAVAILABLE', message }` in the
-   same transaction as the final run row. The queued event is historical admission state.
-2. Replay is strictly greater than `Last-Event-ID` (missing/empty = 0). IDs are canonical
-   decimal integers 0–2,147,483,647; malformed or future IDs return 400 before headers,
-   after owner authorization. Query `after` is not implemented.
-3. Replay fetches at most 100 events per database read and drains pages in ascending order
-   through the captured committed high-water mark. Terminal streams close after replay;
-   reconnecting at the terminal ID returns an empty 200 stream.
-4. Nonterminal observations poll durable rows every 500 ms. `heartbeat` has `data: {}`
-   with no ID every 15 seconds while idle and is never persisted. Subscriptions close
-   after 60 seconds of active observation; reconnect resumes from the last processed ID.
-5. Disconnect, backpressure, observer timeout and database-read failure close only the
-   subscription. They never write state, start a worker, cancel or restart a run. There
-   is no event retention/truncation in this slice; future retention needs a reviewed
-   replay-expired contract. Clients must tolerate duplicate delivery and unknown events.
+## 2. Implemented endpoint matrix
 
-- Message DTO is `{ id, workspaceId, runId, sequence, role, content, createdAt }`.
-  Allowed roles are `user`, `assistant`, and `tool_summary`. Sequences start at 1 for the initial user task.
-- `POST /api/v1/agent/runs/:id/messages` accepts `{ content }` (1–16,384 bytes, strictly validated JSON, rejecting unknown fields).
-  Requires `Idempotency-Key`. Returns 201 `{ message }` on first admission, 200 `{ message }` on duplicate replay,
-  409 `CONFLICT` on key reuse with different content, and 409 `CONFLICT` on follow-up to terminal runs (`completed`, `failed`, `cancelled`).
-  Follow-up instructions cannot escalate permissions (`ask` -> `execute`), change tool policies, or alter lease/worker state.
-- `GET /api/v1/agent/runs/:id/messages` provides deterministic pagination (`sequence ASC`), with bounded limits (default 20, max 100)
-  and stable cursors. Reconstructing conversation from this endpoint is authoritative; the browser must never be the authoritative store.
-- Conversation context boundary (`getConversationContext`) provides bounded conversation context to `AgentDecisionProvider`
-  without raw chain-of-thought, without GigaChat/Memory cross-talk, and with tool results summarized/redacted.
+Prefix `/api/v1/agent`. All require a session cookie (401 `UNAUTHENTICATED` otherwise).
+Ownership comes from the session; clients cannot select owner or permissions. Missing and
+cross-owner resources return generic 404 `NOT_FOUND`. POSTs retain exact trusted-Origin/
+Referer CSRF protection (403 `FORBIDDEN`). Unknown body/nested source fields are rejected.
+Body bound: 100,000 bytes. Malformed JSON, oversized body and validation errors return
+400 `VALIDATION_ERROR`, not 413. Unexpected failures use 500 `INTERNAL_ERROR` without secrets.
 
-All other endpoints in the proposal below (including cancel/files/uploads,
-artifacts/approvals/imports/previews) remain unimplemented. Real runner selection,
-dispatch, leases/fencing, budgets, snapshot lifecycle and sandbox security are later work.
+| Method / route | Request | Success DTO | Owner / cursor / idempotency | Status |
+|---|---|---|---|---|
+| GET `/capabilities` | No query parameters | 200 `AgentCapabilities` | Session only; no resource data; no-store | Implemented |
+| POST `/workspaces` | `CreateAgentWorkspace` | 201 `{ workspace: AgentWorkspace }` | Session owner; no retry deduplication | Implemented |
+| GET `/workspaces` | `limit?`, `cursor?` | 200 `Page<AgentWorkspace>` | Owner list; workspace cursor | Implemented |
+| GET `/workspaces/:id` | UUID | 200 `{ workspace }` | Owned workspace or 404 | Implemented |
+| POST `/runs` | `CreateAgentRun`, `Idempotency-Key` | 201 `{ run: AgentRun }`; 200 duplicate | Owned workspace; owner/key; mismatch 409 `CONFLICT` | Implemented admission; execution Disabled |
+| GET `/runs` | `limit?`, `cursor?`, `workspaceId?` | 200 `Page<AgentRun>` | Owner list; owned workspace filter; run cursor | Implemented |
+| GET `/runs/:id` | UUID | 200 `{ run }` | Owned run; PostgreSQL authoritative | Implemented |
+| GET `/runs/:id/events` | `Last-Event-ID?`; no query | 200 `text/event-stream` | Owned run before cursor validation; per-run sequence | Implemented |
+| GET `/runs/:id/messages` | `limit?`, `cursor?` | 200 `Page<AgentMessage>` | Owned run; ascending sequence cursor | Implemented |
+| POST `/runs/:id/messages` | `CreateAgentMessage`, `Idempotency-Key` | 201 `{ message }`; 200 duplicate | Owned nonterminal run; owner/run/key; mismatch or terminal 409 | Implemented endpoint; usable follow-up Disabled |
 
-Review questions: Does the immediate persisted unavailable failure and 201/200 replay
-behavior fit the Agent UI? Does the frontend retain a separate cursor per run, ignore
-unknown events and reconcile terminal state with GET? No compatibility approval is claimed.
+All implemented routes can return 401; resource routes can return 404; validated inputs,
+UUIDs and cursors can return 400; POSTs can return 403. Only keyed admissions use 409.
+No implemented Agent route currently returns 202, 302, 429, 502 or runtime-unavailable HTTP
+503. `RUNTIME_UNAVAILABLE` is a persisted run error inside successful admission, not an
+HTTP error or an eighth run status.
 
-## 1. Conventions / authority
+## 3. Capability discovery
 
-- Prefix /api/v1, UTC ISO timestamps, UUID resource IDs, camelCase response fields.
-- Session cookie Auth, CSRF + exact Origin checks for mutating requests, no arbitrary userId as ownership authority, HTTPS on public deployment.
-- Collection shape { items: T[], nextCursor: string | null }; one-resource shape { workspace | run | artifact | approval }.
-- Errors { error: { code, message, details?, requestId? } }. Use 400 VALIDATION_ERROR, 401 UNAUTHENTICATED, 403 FORBIDDEN, 404 NOT_FOUND (including cross-owner), 409 CONFLICT, 413 PAYLOAD_TOO_LARGE, 429 RATE_LIMITED, 502 UPSTREAM_ERROR or 503 runtime unavailable as reviewed.
-- Never return raw provider tokens, sandbox credentials, private system prompts, unredacted tool environment, non-owner paths or direct object-storage keys.
-- "run completed" means **actual verified task outcome**, not a mandatory GitHub PR. The Agent API does NOT require a repository, baseRef, GitHub account or PR URL.
+`GET /api/v1/agent/capabilities` returns this complete authenticated response with
+`Cache-Control: private, no-store`. It reflects actual application wiring, not interface
+existence, fake adapters, Chat config, environment credentials or client flags. No runtime
+activation config is connected to public admission. Future discovery and real dispatch
+must change together under runtime/security/cost gates.
 
-## 2. Candidate endpoints
-
-| Method | Path | Request | Response / result |
-|---|---|---|---|
-| POST | /api/v1/agent/workspaces | name?, source: { kind:'blank' } | 201 { workspace } |
-| GET | /api/v1/agent/workspaces?cursor=&limit= | pagination | 200 { items, nextCursor } |
-| GET | /api/v1/agent/workspaces/:id | none | 200 { workspace } |
-| PATCH | /api/v1/agent/workspaces/:id | name? + expectedRevision | 200 { workspace }, 409 stale |
-| DELETE | /api/v1/agent/workspaces/:id | none | 204 after authorized lifecycle cleanup (retention clarified) |
-| GET | /api/v1/agent/workspaces/:id/files?path= | directory path | 200 { items: FileEntry[] } from saved snapshot |
-| GET | /api/v1/agent/workspaces/:id/files/content?path= | file path | 200 { path, content, encoding, revision } for bounded text |
-| POST | /api/v1/agent/workspaces/:id/uploads | multipart / signed upload flow (TBD) | 202 { uploadId, status } (later milestone) |
-| GET | /api/v1/agent/runs?cursor=&limit= | pagination, optional workspaceId | 200 { items, nextCursor } |
-| POST | /api/v1/agent/runs | { workspaceId, task, mode?, runtime?, modelId? } | 201 { run } |
-| GET | /api/v1/agent/runs/:id | none | 200 { run } |
-| GET | /api/v1/agent/runs/:id/events | Last-Event-ID or after cursor | 200 text/event-stream |
-| POST | /api/v1/agent/runs/:id/messages | { content }, Idempotency-Key | 202 { message, run } or documented 409 terminal |
-| POST | /api/v1/agent/runs/:id/cancel | empty, Idempotency-Key | 202 { run } or 409 when irreversible external effect |
-| GET | /api/v1/agent/runs/:id/steps | pagination | 200 { items, nextCursor } |
-| GET | /api/v1/agent/runs/:id/artifacts | none | 200 { items, nextCursor } |
-| GET | /api/v1/agent/artifacts/:id/download | none | 302 to short-lived authorized URL OR streamed download, never direct permanent storage key |
-| GET | /api/v1/agent/approvals/:id | none | 200 { approval } |
-| POST | /api/v1/agent/approvals/:id/decision | { decision:'approve'|'reject', effectHash }, Idempotency-Key | 202 { approval, run } |
-
-**MVP reduction:** workspace create/list/get/files, run create/list/get/events/cancel, steps, artifacts/download and approval decision are first priority. Upload/patch/delete/workspace editor content may be deferred until secure artifact/snapshot protocols are ready. Explicitly document the implemented subset and mock the rest; do not claim all endpoints available from this proposal.
-
-## 3. DTO examples (types to migrate to packages/contracts only after review)
-
-~~~ts
-type AgentMode = 'ask' | 'plan' | 'execute';
-type AgentPublicStatus =
-  | 'queued' | 'running' | 'awaiting_approval'
-  | 'applying' | 'completed' | 'failed' | 'cancelled';
-type AgentPhase = 'planning' | 'executing' | 'observing' | 'verifying' | 'waiting_runtime';
-
-interface AgentWorkspace {
-  id: string;
-  name: string;
-  sourceKind: 'blank' | 'upload' | 'import';
-  revision: number;
-  activeSnapshotId?: string;
-  createdAt: string;
-  updatedAt: string;
-}
-interface AgentRun {
-  id: string;
-  workspaceId: string;
-  task: string;
-  mode: AgentMode;
-  runtime: 'cloud';  // local runner is future capability
-  modelId: string;   // allowlisted alias, not arbitrary provider options
-  status: AgentPublicStatus;
-  phase?: AgentPhase; // optional progress
-  createdAt: string;
-  updatedAt: string;
-  result?: {
-    summary: string;
-    artifactIds: string[];
-    verifiedChecks: Array<{ name: string; outcome: 'passed'|'failed'|'not_run' }>;
-  };
-  error?: { code: string; message: string };
-}
-interface FileEntry {
-  name: string; path: string; kind: 'file'|'directory';
-  sizeBytes?: number; sha256?: string;
-}
-interface AgentArtifact {
-  id: string; runId: string; name: string; mimeType: string;
-  sizeBytes: number; sha256: string; createdAt: string;
-  expiresAt?: string;
-}
-interface AgentApproval {
-  id: string; runId: string; actionSummary: string; target: string;
-  effectHash: string; status: 'pending'|'approved'|'rejected'|'expired';
-  expiresAt: string;
-}
-~~~
-
-**New-run request** (without GitHub):
-
-~~~json
+```json
 {
-  "workspaceId": "a20bf2e1-ab87-4fd7-a92a-d1df98fc81db",
-  "task": "Build a responsive React task manager, run build and fix errors.",
-  "mode": "execute",
-  "runtime": "cloud",
-  "modelId": "default"
+  "schemaVersion": 1,
+  "capabilities": {
+    "workspaceManagement": { "available": true },
+    "runAdmission": { "available": true },
+    "runHistory": { "available": true },
+    "runExecution": { "available": false, "reason": "runtime_unavailable" },
+    "ask": { "available": false, "reason": "runtime_unavailable" },
+    "plan": { "available": false, "reason": "runtime_unavailable" },
+    "execute": { "available": false, "reason": "runtime_unavailable" },
+    "durableMessages": { "available": true },
+    "followUp": { "available": false, "reason": "runtime_unavailable" },
+    "eventReplay": { "available": true },
+    "cancellation": { "available": false, "reason": "not_implemented" },
+    "sandboxFiles": { "available": false, "reason": "not_implemented" },
+    "artifacts": { "available": false, "reason": "not_implemented" },
+    "artifactDownload": { "available": false, "reason": "not_implemented" },
+    "externalApproval": { "available": false, "reason": "not_implemented" },
+    "cloudRuntime": { "available": false, "reason": "runtime_unavailable" }
+  }
 }
-~~~
+```
 
-Return 201 { run }, with run.status=queued. Server verifies workspace owner, mode policy, runner availability/quota, allowed model alias, task length and Idempotency-Key for retries; no caller-supplied owner ID. Failure to allocate an expensive runtime may return queued with an explicit quota/availability policy, not an unbounded promise.
+`workspaceManagement`: create/list/get blank metadata only, not patch/delete/import.
+`durableMessages`: read persisted conversations, including initial task. `followUp`: an
+instruction can reach an active execution loop. `runAdmission` never enables execution
+controls. Artifact listing/access and download have separate flags. No provider names,
+credentials, worker/lease IDs, internal quotas or host paths appear in this response.
 
-**Workspace create:** POST { "name":"Task Manager", "source":{"kind":"blank"} } => 201 { workspace } with revision=1. Future imports must be bound to grants and checksums; no arbitrary GitHub URL can silently grant access.
+Server `agentCapabilitiesSchema.parse` requires complete, coherent known metadata and
+projects public fields. Shared client `readAgentCapabilities(unknown)` follows these rules:
 
-## 4. Runs and messages
+- Missing/invalid envelope or unknown schema version: every feature disabled.
+- Missing known entry, invalid boolean, conflicting metadata or unknown reason: that entry
+  becomes `{ available: false, reason: 'unknown' }`.
+- Unknown capability names/additive fields ignored, never interpreted as permissions.
+- Execution requires Cloud runtime and run admission; modes require execution; follow-up
+  also requires durable messages; download requires artifacts. Inconsistent affirmative
+  metadata fails closed; server schema rejects it.
+- UI checks `isAgentCapabilityAvailable(response, name)` for explicit affirmative support.
+  Auth/network errors still need error handling. A 401 never grants a capability.
 
-POST messages is for safe follow-up instruction, **not a second independent run initiation**. During running it may queue a user instruction for next agent turn; during awaiting_approval it must not silently approve an action or change the exact frozen effect. For completed/failed/cancelled, prefer 409 + offer a new run within same workspace (or separately reviewed resume protocol). Cap message length, apply CSRF/owner checks and idempotency. Do not allow a message to grant tools/runner capabilities.
+Discovery is not an authorization token. All server resource/mutation checks remain active.
 
-Ask: no mutations; Plan: read-only inspection and plan artifact; Execute: normal sandbox file edits/build tools within policy. An Ask/Plan user cannot escalate to Execute by sending text; mode changes require a separate reviewed endpoint or new run.
+## 4. Public DTO compatibility
 
-## 5. Agent SSE protocol
+Shared response schemas validate required fields and project known public fields while
+accepting additive fields. HTTP responses remain explicit repository projections, never
+whole database rows or `ClaimedRun` objects.
 
-GET events uses EventSource/standard SSE with credentials per reviewed deployment topology; Last-Event-ID is **per-run** monotonic sequence, not global wall-clock timestamp. On connect, confirm owner, fetch saved run/current state, replay bounded events after given ID and continue live until terminal. When old event history expired, return a documented replay-expired behavior and fetch current run + steps (not invented events). Payloads redact full file bodies, secrets and private tool output.
+| DTO | Actual public fields |
+|---|---|
+| `AgentWorkspace` | `id`, `name`, `sourceKind: 'blank'`, `revision`, `createdAt`, `updatedAt` |
+| `AgentRun` | `id`, `workspaceId`, `task`, `mode`, `runtime: 'cloud'`, `modelId`, `status`, `createdAt`, `updatedAt`; optional `phase`, `finishedAt`, `error`, `result` |
+| `AgentMessage` | `id`, `workspaceId`, `runId`, `sequence`, `role: 'user' \| 'assistant' \| 'tool_summary'`, `content`, `createdAt` |
+| Run `result` | `summary`, `artifactIds: string[]`, `verifiedChecks: { name, outcome: 'passed' \| 'failed' \| 'not_run', summary? }[]` |
+| Run `error` | `{ code: string, message: string }` |
+| `Page<T>` | `{ items: T[], nextCursor: string \| null }` |
 
-Candidate event types (additive relative to initial draft, pending reviewer check):
+IDs: UUIDs; timestamps: UTC ISO with milliseconds. Seven statuses unchanged: `queued`,
+`running`, `awaiting_approval`, `applying`, `completed`, `failed`, `cancelled`. Optional
+phases: `waiting_runtime`, `planning`, `executing`, `observing`, `verifying`. Queued REST
+rows currently expose `waiting_runtime`; orchestrator phases may appear in events without
+being in REST projections. Enum support does not imply an operational public action.
+Internal fake completions have empty `artifactIds`; artifact storage is not implemented.
 
-| Event | Data | Meaning |
+Normal admission exposes only run error `RUNTIME_UNAVAILABLE`. Existing internal worker
+paths can persist `STEP_LIMIT_EXCEEDED`, `TOOL_ERROR`, `EXECUTION_FAILED`,
+`VERIFICATION_FAILED`, `CANCELLED`, `UNKNOWN_TOOL`, `INVALID_ARGUMENTS`, `POLICY_VIOLATION`,
+`INTERNAL_ERROR`, `ABORTED`, `PERMANENT_ERROR`, `TIMEOUT`, `SECURITY_VIOLATION` and
+`RUNTIME_UNAVAILABLE` (the decision-provider allowlist in `types.ts`). Error `code` remains
+a string: clients must tolerate unknown additive codes and display safe `message`, not
+reinterpret an unfamiliar code as success or a new public status. This task does not
+wire those workers into public admission or alter existing internal error semantics.
+
+Request types:
+
+- `CreateAgentWorkspace`: `{ source: { kind: 'blank' }, name? }`; default `New Workspace`;
+  supplied name trims to 1–255 UTF-8 bytes.
+- `CreateAgentRun`: `{ workspaceId, task, mode?, runtime?, modelId? }`; defaults `ask`,
+  `cloud`, sole alias `giga-agent-default`. Supplied values are strictly allowlisted.
+- `CreateAgentMessage`: `{ content }`. Task/content trim to 1–16,384 UTF-8 bytes, reject NUL.
+- No repository/baseRef, owner ID, native provider options, tool grants or client capabilities.
+
+| Before | After 17T-68 | Impact / evidence |
 |---|---|---|
-| run.status | { runId, status, phase? } | Public lifecycle |
-| plan.updated | { runId, version, steps: safe summaries[] } | New plan |
-| tool.started | { runId, toolCallId, name, stepNumber } | Tool dispatch |
-| tool.completed | { runId, toolCallId, outcome, durationMs, summary? } | Tool result |
-| tool.failed | { runId, toolCallId, code, summary } | Tool failure |
-| approval.required | { runId, approvalId, actionSummary, expiresAt } | Explicit human action |
-| artifact.ready | { runId, artifactId, name } | Durable result available |
-| run.completed | { runId, artifactIds, verifiedChecks } | Terminal completion |
-| run.failed | { runId, code, message } | Terminal failure |
-| heartbeat | empty / safe timestamp | Connection keepalive |
+| Backend local Workspace/Run/Message types | Same fields shared and re-exported | No response change; real API fixtures |
+| No discovery | Authenticated capability metadata | Additive route; 401/fail-closed tests |
+| Admission accepts modes, fails unavailable | Unchanged; discovery distinguishes execution | 201/200/409/replay regressions |
+| Legacy web repository/baseRef/prUrl demo | Preserved; separate shared workspace boundary and discovery method | Legacy demo incompatible with real admission; needs Thư migration review |
+| Proposal routes beside shipped routes | Explicit implemented/disabled/proposed matrix | No implied cancel/files/approval handler |
+| Auth/Chat/Memory | Unchanged | Full API regressions |
 
-Example:
+Canonical fixtures: [`fixtures/agent.json`](../../packages/contracts/fixtures/agent.json),
+checked against real responses and web consumers. Mock discovery uses the same disabled
+runtime response. Historical `apps/web/mocks/agent` lifecycle/PR fixtures remain demos,
+not current API fixtures. Full workspace UI migration is outside this task. No frontend
+compatibility sign-off is claimed.
 
-~~~text
-id: 12
-event: tool.started
-data: {"runId":"...","toolCallId":"...","name":"run_tests","stepNumber":3}
+## 5. Idempotency and pagination
 
-id: 13
-event: tool.completed
-data: {"runId":"...","toolCallId":"...","outcome":"success","durationMs":2150}
+- Keys: 1–128 ASCII chars; first alphanumeric, rest alphanumeric or `._:-`. Missing/invalid
+  required key is 400. Workspace creation has no idempotency semantics.
+- Run key namespace: authenticated owner. SHA-256 fingerprints normalized workspace/task/
+  mode/runtime/model. Defaults, UUID case and whitespace normalize before comparison.
+  First admission 201, exact retry 200 with current persisted run, changed tuple 409.
+  Run, initial message (migration 013), queued/failure events commit atomically. Replay
+  creates no new messages/events/execution.
+- Message namespace: authenticated owner + run. Fingerprint uses normalized user role/content.
+  First 201, exact retry 200, changed content 409. Exact replay is checked before terminal
+  conflict; new follow-up to terminal run is 409. Messages cannot escalate mode/tools,
+  approve effects or modify worker leases.
+- Workspace/run lists: default 20, max 100; `createdAt DESC, id DESC`. Base64url cursors bind
+  collection kind and optional workspace filter, preserving PostgreSQL microseconds.
+  UUID/time/calendar/query validation happens before SQL.
+- Message list: **default 50**, max 100; `sequence ASC`, exclusive cursor bound to a run.
+  This corrects the old document's default 20; implementation remains unchanged.
+- One value per supported query parameter. Unknown/repeated params, noncanonical limits
+  and malformed/mismatched cursors return 400. Cursors never authorize access; owner
+  predicates still apply. Keyset pages are not transaction snapshots.
 
-id: 14
-event: artifact.ready
-data: {"runId":"...","artifactId":"...","name":"project.zip"}
+## 6. SSE replay and reconciliation
 
-id: 15
-event: run.completed
-data: {"runId":"...","artifactIds":["..."],"verifiedChecks":[{"name":"npm run build","outcome":"passed"}]}
-~~~
+1. Authorize run before interpreting `Last-Event-ID`. Per-run cursor, never global.
+   Missing/empty = 0. Canonical decimal integers 0–2,147,483,647; malformed/future IDs
+   return 400 before headers. Query `after` is not implemented.
+2. Replay strictly greater sequences ascending, at most 100 per DB read; drain committed
+   pages before terminal close. Terminal cursor returns empty 200 SSE. Admission commits
+   ID 1 `run.status` (`queued`, `waiting_runtime`) and ID 2 `run.failed`
+   (`RUNTIME_UNAVAILABLE`) with failed row atomically. Historical queued replay cannot
+   override a terminal run fetched from PostgreSQL.
+3. Poll active durable state every 500 ms; nonpersisted `heartbeat` with `{}` and no ID
+   every 15 seconds idle; close after 60 seconds observation. Disconnect, timeout,
+   backpressure and DB failure close observation only, never execution or saved run state.
+4. Client retains last processed ID separately per run, deduplicates replay and ignores
+   unknown additive names/fields while advancing its cursor. Transport safely parses
+   unknown names; Agent reducer/reconnect integration remains frontend work. Heartbeat
+   is not completion or a new business event.
+5. After disconnect/error/timeout, GET Run (PostgreSQL terminal state authoritative),
+   reload messages as needed, reconnect with that run's last processed ID. Closed SSE
+   never implies success. Refresh reconstructs via REST/replay, not browser-only state.
+   No retention/truncation/replay-expired behavior is implemented yet.
 
-**Ordering:** persist the result and its event durably before broadcasting. On reconnect, resend saved events with duplicate IDs safely ignored by frontend. Unknown event types must not crash clients. Heartbeat is not a persisted business-state transition. An unavailable stream does not cancel the background task.
+Persisted admission/internal-orchestrator events:
 
-## 6. Approval and cancellation
+| Event | Public data |
+|---|---|
+| `run.status` | `{ runId, status, phase? }` |
+| `plan.updated` | `{ runId, version, steps: string[] }` summaries |
+| `tool.started` | `{ runId, toolCallId, name, stepNumber }` |
+| `tool.completed` | `{ runId, toolCallId, outcome: 'success', durationMs, summary? }` |
+| `tool.failed` | `{ runId, toolCallId, code, summary }` |
+| `run.completed` | `{ runId, artifactIds, verifiedChecks, summary? }` |
+| `run.failed` | `{ runId, code, message }` |
 
-Approval represents a bounded **external/privileged** action. It is NOT required to edit a normal file inside a disposable authorized sandbox. Approval must bind authenticated user, run, exact canonical effect hash, target/params, expiry, current policy and privileges. Race with cancellation/revocation must fail securely. A repeated idempotent decision returns prior accepted decision; a conflicting request is 409.
+Internal cancellation uses `run.status` with `cancelled`, not a new `run.cancelled` event.
+No public cancel route. Results/events persist before observation. No raw tool bodies,
+chain-of-thought, provider credentials or worker/lease metadata in public DTOs.
+`approval.required`, `approval.decided`, `artifact.ready`, `run.phase` are future proposals.
 
-The historical POST /agent/runs/:id/decision (proposalId, approve/reject) is **superseded for new generic Agent design** by /agent/approvals/:id/decision. Because contract is DRAFT, document this migration rather than implementing two inconsistent interpretations. If old mock clients still require legacy path, implement a temporary explicit adapter after review, never silently repurpose it.
+## 7. Proposed endpoints — NOT IMPLEMENTED
 
-Cancel uses best-effort stop of an isolated runner. For external effects already dispatched, report indeterminate/committed facts and reconcile; 409 may mean cannot guarantee safe cancellation. Mark completed only on proven saved outcome, not because frontend optimistic state updated.
+These have no handlers: generic route 404, subject to existing auth/CSRF middleware.
+Requests/responses/errors below are candidates only. Implementations must add session,
+owner, validation, idempotency and lifecycle checks before claiming support.
 
-## 7. Errors, quotas, UX response matrix
-
-| Scenario | Status / code | UX |
+| Method / route | Proposed request/result | Status |
 |---|---|---|
-| No session or invalid CSRF | 401/403 | Sign in or retry safely |
-| Cross-owner run/workspace ID | 404 NOT_FOUND | Generic missing state |
-| Invalid mode/tool config | 400 VALIDATION_ERROR | Inline feedback |
-| Outdated snapshot revision | 409 CONFLICT | Refresh/rebase workspace |
-| Workspace busy writable session | 409 CONFLICT | Queue/read-only options |
-| Runner unavailable/cold start | 503 RUNTIME_UNAVAILABLE or queued with declared timeout | Progress/error guidance |
-| Budget exceeded | 429 RATE_LIMITED at admission; terminal run.failed with LIMIT_EXCEEDED in background | Show usage and partial artifacts |
-| File too large/unsafe archive | 413 PAYLOAD_TOO_LARGE / validation | File feedback |
-| Need permission | run awaiting_approval + approval.required | Review specific effect |
-| Stale/expired approval | 409 CONFLICT | Inspect/restart explicit action |
-| LLM/API failure | 502 UPSTREAM_ERROR / run.failed | Retry/new run after policy |
-| Snapshot/artifact not ready | 404 or 409 by agreed contract | Loading and retry |
-| Stop while external effect exists | 409 or accepted with partial/indeterminate status | Honest remote state |
+| PATCH `/workspaces/:id` | name + expectedRevision → workspace; stale 409 | Proposed |
+| DELETE `/workspaces/:id` | Authorized lifecycle/retention cleanup → 204 | Proposed |
+| GET `/workspaces/:id/files` | Safe path → saved snapshot file tree | Proposed |
+| GET `/workspaces/:id/files/content` | Bounded text → content/encoding/revision | Proposed |
+| POST `/workspaces/:id/uploads` | Checked upload/import → upload metadata; protocol TBD | Proposed |
+| POST `/runs/:id/cancel` | Idempotent bounded stop → truthful run/partial state | Proposed |
+| GET `/runs/:id/steps` | Owner-scoped paginated safe step/verification DTO | Proposed |
+| GET `/runs/:id/artifacts` | Owner-scoped durable artifact list/cursor | Proposed |
+| GET `/artifacts/:id/download` | Short-lived authorized URL or streamed download | Proposed |
+| GET `/approvals/:id` | Bounded external-effect approval DTO | Proposed |
+| POST `/approvals/:id/decision` | decision + effectHash + idempotency → approval/run | Proposed |
 
-## 8. Compatibility matrix: legacy draft versus proposal
+External approvals must bind actor, run, exact action hash, target, expiry and current policy.
+Normal isolated sandbox writes do not require a GitHub PR. Real runner activation remains
+gated by [ADR-003](../decisions/ADR-003-agentic-workspace-and-isolated-runtime.md), locked
+INV-07, security and cost approval. No host execution fallback. Legacy `/runs/:id/proposal`
+and `/runs/:id/decision` are historical GitHub mock proposals, not shipped compatibility
+adapters. No deployment, E2B provisioning or external effects are authorized by this contract.
 
-| Previously drafted | New preferred direction | Impact |
-|---|---|---|
-| POST agent/runs {task,repository,baseRef?} | POST agent/runs {workspaceId,task,mode,runtime,modelId?} | **Breaking vs old draft**; not yet FROZEN. Frontend mock must update |
-| Every run tied to GitHub | Repository import optional | Product change |
-| GET agent/runs/:id/proposal required | Artifacts/steps, optional proposal when action needs approval | Remove GitHub-only assumption; preserve old mock as historical |
-| POST agent/runs/:id/decision | POST agent/approvals/:id/decision | Proposed replacement; review migrations |
-| Run.completed implies PR URL | Run.completed means evidenced task result | Client semantics change |
-| Seven public statuses | Keep seven draft statuses; optional phase | Minimize client break |
-| SSE run.status/tool.started/tool.completed etc. | Same core + plan.updated/approval/artifact (draft additions) | Additive only after parser tests |
-| Chat SSE / conversations | **Unchanged** | No Chat coupling |
+## 8. Acceptance
 
-## 9. Contract acceptance
+See [17T-68 evidence](../evidence/17T-68-agent-api-capabilities.md) for exact commands,
+results, HEAD SHA, CI links and review risks.
 
-- [ ] Trà approves route and runtime permission semantics, tenant filters, worker/event durability and response shapes.
-- [ ] Thư approves Agent Manager/Editor loading, refresh, pending approval, file tree, editor, terminal, preview and artifact UX.
-- [ ] Shared DTOs/fixtures, API negative tests, SSE replay/unknown events and CSRF browser tests pass before API freeze.
-- [ ] Optional GitHub integration has its own later contract/grants and never blocks empty-workspace run.
-- [ ] No API path here is claimed available in main; the existing mock frontend is not proof of implementation.
+- [ ] Trà approves admission, DTOs, tenant filters, public events and capability mapping.
+- [ ] Thư independently approves schema, disabled-mode UX, new workspace imports, mock
+  separation, 201/200/409, message default 50 and per-run replay/dedup/reconciliation.
+- [ ] Independent security review confirms no internal leak/grant escalation/Cloud execution.
+- [ ] Deployed browser Auth/CSRF/SSE compatibility passes before explicit API freeze.
+
+**No joint approval or API freeze is claimed.**

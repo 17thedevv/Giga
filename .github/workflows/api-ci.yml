@@ -4,11 +4,13 @@ on:
   pull_request:
     paths:
       - 'apps/api/**'
+      - 'packages/contracts/**'
       - '.github/workflows/api-ci.yml'
   push:
     branches: [main]
     paths:
       - 'apps/api/**'
+      - 'packages/contracts/**'
       - '.github/workflows/api-ci.yml'
 
 jobs:

@@ -1,7 +1,7 @@
-export type AgentMode = 'ask' | 'plan' | 'execute';
-export type AgentStatus = 'queued' | 'running' | 'awaiting_approval' | 'applying' | 'completed' | 'failed' | 'cancelled';
+import type { AgentMode, AgentStatus, AgentRun, AgentMessageRole, VerifiedCheck } from '../../../../../packages/contracts/agent.js';
+export type { AgentMode, AgentStatus, AgentWorkspace, AgentRun, AgentMessage, AgentMessageRole,
+  AgentRunResult, VerifiedCheck, VerifiedCheckOutcome, Page } from '../../../../../packages/contracts/agent.js';
 export type ToolRisk = 'read' | 'sandbox_write' | 'sandbox_execute';
-export type VerifiedCheckOutcome = 'passed' | 'failed' | 'not_run';
 
 export const AGENT_MODEL_ALIAS = 'giga-agent-default';
 export const RUNTIME_UNAVAILABLE = { code: 'RUNTIME_UNAVAILABLE', message: 'Agent execution runtime is not available' } as const;
@@ -49,43 +49,6 @@ export interface SandboxSessionInfo {
   readonly active: boolean;
   readonly createdAt: string;
   readonly timeoutMs?: number;
-}
-
-export interface VerifiedCheck {
-  readonly name: string;
-  readonly outcome: VerifiedCheckOutcome;
-  readonly summary?: string;
-}
-
-export interface AgentRunResult {
-  readonly summary: string;
-  readonly artifactIds: readonly string[];
-  readonly verifiedChecks: readonly VerifiedCheck[];
-}
-
-export interface AgentWorkspace {
-  readonly id: string;
-  readonly name: string;
-  readonly sourceKind: 'blank';
-  readonly revision: number;
-  readonly createdAt: string;
-  readonly updatedAt: string;
-}
-
-export interface AgentRun {
-  readonly id: string;
-  readonly workspaceId: string;
-  readonly task: string;
-  readonly mode: AgentMode;
-  readonly runtime: 'cloud';
-  readonly modelId: string;
-  readonly status: AgentStatus;
-  readonly phase?: 'waiting_runtime' | 'planning' | 'executing' | 'observing' | 'verifying';
-  readonly createdAt: string;
-  readonly updatedAt: string;
-  readonly finishedAt?: string;
-  readonly error?: { readonly code: string; readonly message: string };
-  readonly result?: AgentRunResult;
 }
 
 export interface WorkerLease {
@@ -161,18 +124,6 @@ export interface AgentCursor {
   readonly id: string;
 }
 
-export type AgentMessageRole = 'user' | 'assistant' | 'tool_summary';
-
-export interface AgentMessage {
-  readonly id: string;
-  readonly workspaceId: string;
-  readonly runId: string;
-  readonly sequence: number;
-  readonly role: AgentMessageRole;
-  readonly content: string;
-  readonly createdAt: string;
-}
-
 export interface AgentMessageCursor {
   readonly kind: 'messages';
   readonly runId: string;
@@ -201,5 +152,4 @@ export interface MessageInput {
   readonly content: string;
 }
 
-export interface Page<T> { readonly items: readonly T[]; readonly nextCursor: string | null }
 export interface ListOptions { readonly limit: number; readonly cursor?: AgentCursor; readonly workspaceId?: string }
