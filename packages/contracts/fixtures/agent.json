@@ -1,0 +1,99 @@
+{
+  "capabilities": {
+    "schemaVersion": 1,
+    "capabilities": {
+      "workspaceManagement": {
+        "available": true
+      },
+      "runAdmission": {
+        "available": true
+      },
+      "runHistory": {
+        "available": true
+      },
+      "runExecution": {
+        "available": false,
+        "reason": "runtime_unavailable"
+      },
+      "ask": {
+        "available": false,
+        "reason": "runtime_unavailable"
+      },
+      "plan": {
+        "available": false,
+        "reason": "runtime_unavailable"
+      },
+      "execute": {
+        "available": false,
+        "reason": "runtime_unavailable"
+      },
+      "durableMessages": {
+        "available": true
+      },
+      "followUp": {
+        "available": false,
+        "reason": "runtime_unavailable"
+      },
+      "eventReplay": {
+        "available": true
+      },
+      "cancellation": {
+        "available": false,
+        "reason": "not_implemented"
+      },
+      "sandboxFiles": {
+        "available": false,
+        "reason": "not_implemented"
+      },
+      "artifacts": {
+        "available": false,
+        "reason": "not_implemented"
+      },
+      "artifactDownload": {
+        "available": false,
+        "reason": "not_implemented"
+      },
+      "externalApproval": {
+        "available": false,
+        "reason": "not_implemented"
+      },
+      "cloudRuntime": {
+        "available": false,
+        "reason": "runtime_unavailable"
+      }
+    }
+  },
+  "workspace": {
+    "id": "10000000-0000-4000-8000-000000000001",
+    "name": "New Workspace",
+    "sourceKind": "blank",
+    "revision": 1,
+    "createdAt": "2026-10-18T00:00:00.000Z",
+    "updatedAt": "2026-10-18T00:00:00.000Z"
+  },
+  "run": {
+    "id": "20000000-0000-4000-8000-000000000001",
+    "workspaceId": "10000000-0000-4000-8000-000000000001",
+    "task": "Explain this task",
+    "mode": "ask",
+    "runtime": "cloud",
+    "modelId": "giga-agent-default",
+    "status": "failed",
+    "createdAt": "2026-10-18T00:00:00.000Z",
+    "updatedAt": "2026-10-18T00:00:00.000Z",
+    "finishedAt": "2026-10-18T00:00:00.000Z",
+    "error": {
+      "code": "RUNTIME_UNAVAILABLE",
+      "message": "Agent execution runtime is not available"
+    }
+  },
+  "message": {
+    "id": "30000000-0000-4000-8000-000000000001",
+    "workspaceId": "10000000-0000-4000-8000-000000000001",
+    "runId": "20000000-0000-4000-8000-000000000001",
+    "sequence": 1,
+    "role": "user",
+    "content": "Explain this task",
+    "createdAt": "2026-10-18T00:00:00.000Z"
+  }
+}

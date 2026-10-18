@@ -4,6 +4,13 @@
 > **Status:** Alignment with `docs/contracts/API_CONTRACT_V0.1.md` (DRAFT).  
 > **Author:** Tráng A Thư (Frontend / UX) · **Reviewer:** Trà (Backend / API)
 
+**17T-68 Agent boundary:** `agent/` contains historical GitHub lifecycle demonstrations,
+not fixtures for the implemented workspace API. Current Workspace/Run/Message and disabled
+capability fixtures are shared at `packages/contracts/fixtures/agent.json`; API real-response
+tests and web contract tests consume them. Use `src/lib/api/agent-contract.ts` for the new
+wire DTOs and `getAgentCapabilities()` for discovery. Legacy demo types remain unchanged
+pending frontend migration/review; their repository/PR/cancel/approval flows are not shipped APIs.
+
 ---
 
 ## 1. Directory Structure

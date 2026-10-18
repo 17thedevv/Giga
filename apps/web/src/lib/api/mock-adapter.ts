@@ -23,6 +23,8 @@ import type {
   ReasoningEffort,
 } from './types.js';
 import { ApiException } from './client.js';
+import { readAgentCapabilities, type AgentCapabilities } from './agent-contract.js';
+import agentContractFixture from '../../../../../packages/contracts/fixtures/agent.json';
 
 export const MOCK_AUTH_STORAGE_KEY = 'giga_mock_auth_active';
 
@@ -670,6 +672,10 @@ export class MockDataAdapter {
   }
 
   // Agent Runs
+  async getAgentCapabilities(): Promise<AgentCapabilities> {
+    return readAgentCapabilities(agentContractFixture.capabilities);
+  }
+
   async listRuns(): Promise<{ items: AgentRun[] }> {
     await this.delay(150);
     return { items: [...this.runs] };

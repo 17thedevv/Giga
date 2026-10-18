@@ -22,6 +22,7 @@ import type {
   ModelsResponse,
 } from './types.js';
 import { SseStreamParser, validateChatStreamEvent } from './sse-parser.js';
+import { readAgentCapabilities, type AgentCapabilities } from './agent-contract.js';
 
 export class ApiException extends Error {
   constructor(
@@ -401,6 +402,10 @@ export class RealApiClient {
   }
 
   // Agent Operations
+  async getAgentCapabilities(): Promise<AgentCapabilities> {
+    return readAgentCapabilities(await this.request<unknown>('/api/v1/agent/capabilities'));
+  }
+
   async createAgentRun(task: string, repository: string, baseRef?: string): Promise<{ run: AgentRun }> {
     return this.request<{ run: AgentRun }>('/api/v1/agent/runs', {
       method: 'POST',
