@@ -723,7 +723,38 @@ function getDemoStorage(): Storage | null {
   return null;
 }
 
-function isValidWorkspace(item: unknown): item is AgentWorkspace {
+export const CANONICAL_AGENT_STATUSES = new Set<AgentStatus>([
+  'queued',
+  'running',
+  'awaiting_approval',
+  'applying',
+  'completed',
+  'failed',
+  'cancelled',
+]);
+
+export const CANONICAL_AGENT_PHASES = new Set([
+  'waiting_runtime',
+  'planning',
+  'executing',
+  'observing',
+  'verifying',
+]);
+
+export const CANONICAL_AGENT_MODES = new Set<AgentMode>([
+  'ask',
+  'plan',
+  'execute',
+]);
+
+const VALID_PLAN_STEP_STATUSES = new Set(['completed', 'running', 'pending', 'failed']);
+const VALID_TIMELINE_STATUSES = new Set(['completed', 'running', 'pending', 'failed']);
+const VALID_FILE_CHANGE_STATUSES = new Set(['created', 'modified', 'deleted']);
+const VALID_CHECK_OUTCOMES = new Set(['passed', 'failed', 'not_run']);
+const VALID_APPROVAL_RISKS = new Set(['low', 'medium', 'high']);
+const VALID_APPROVAL_STATUSES = new Set(['pending', 'approved', 'rejected']);
+
+export function isValidWorkspace(item: unknown): item is AgentWorkspace {
   if (!item || typeof item !== 'object') return false;
   const w = item as Record<string, unknown>;
   return (
@@ -731,45 +762,188 @@ function isValidWorkspace(item: unknown): item is AgentWorkspace {
     w.id.length > 0 &&
     typeof w.name === 'string' &&
     w.name.length > 0 &&
-    (w.sourceKind === 'blank' || w.sourceKind === 'github' || w.sourceKind === 'template') &&
+    w.sourceKind === 'blank' &&
     typeof w.revision === 'number' &&
     typeof w.createdAt === 'string' &&
     typeof w.updatedAt === 'string'
   );
 }
 
-function isValidRunDetail(item: unknown): item is AgentRunDetail {
+export function isValidPlanStep(item: unknown): item is PlanStep {
+  if (!item || typeof item !== 'object') return false;
+  const s = item as Record<string, unknown>;
+  return (
+    typeof s.id === 'string' &&
+    s.id.length > 0 &&
+    typeof s.stepNumber === 'number' &&
+    typeof s.title === 'string' &&
+    typeof s.description === 'string' &&
+    typeof s.status === 'string' &&
+    VALID_PLAN_STEP_STATUSES.has(s.status)
+  );
+}
+
+export function isValidTimelineEvent(item: unknown): item is TimelineEvent {
+  if (!item || typeof item !== 'object') return false;
+  const e = item as Record<string, unknown>;
+  return (
+    typeof e.id === 'string' &&
+    e.id.length > 0 &&
+    typeof e.timestamp === 'string' &&
+    typeof e.category === 'string' &&
+    typeof e.label === 'string' &&
+    (e.detail === undefined || typeof e.detail === 'string') &&
+    typeof e.status === 'string' &&
+    VALID_TIMELINE_STATUSES.has(e.status) &&
+    (e.durationMs === undefined || typeof e.durationMs === 'number')
+  );
+}
+
+export function isValidWorkspaceFileChange(item: unknown): item is WorkspaceFileChange {
+  if (!item || typeof item !== 'object') return false;
+  const f = item as Record<string, unknown>;
+  return (
+    typeof f.path === 'string' &&
+    f.path.length > 0 &&
+    typeof f.status === 'string' &&
+    VALID_FILE_CHANGE_STATUSES.has(f.status) &&
+    (f.additions === undefined || typeof f.additions === 'number') &&
+    (f.deletions === undefined || typeof f.deletions === 'number') &&
+    (f.diffPreview === undefined || typeof f.diffPreview === 'string')
+  );
+}
+
+export function isValidVerifiedCheck(item: unknown): item is VerifiedCheck {
+  if (!item || typeof item !== 'object') return false;
+  const c = item as Record<string, unknown>;
+  return (
+    typeof c.name === 'string' &&
+    c.name.length > 0 &&
+    typeof c.outcome === 'string' &&
+    VALID_CHECK_OUTCOMES.has(c.outcome) &&
+    (c.summary === undefined || typeof c.summary === 'string')
+  );
+}
+
+export function isValidArtifactItem(item: unknown): item is AgentArtifactItem {
+  if (!item || typeof item !== 'object') return false;
+  const a = item as Record<string, unknown>;
+  return (
+    typeof a.id === 'string' &&
+    a.id.length > 0 &&
+    typeof a.name === 'string' &&
+    typeof a.type === 'string' &&
+    typeof a.size === 'string' &&
+    typeof a.summary === 'string' &&
+    (a.isDemo === undefined || typeof a.isDemo === 'boolean')
+  );
+}
+
+export function isValidApprovalRequest(item: unknown): item is ExternalApprovalRequest {
+  if (!item || typeof item !== 'object') return false;
+  const app = item as Record<string, unknown>;
+  return (
+    typeof app.id === 'string' &&
+    app.id.length > 0 &&
+    typeof app.action === 'string' &&
+    typeof app.target === 'string' &&
+    typeof app.risk === 'string' &&
+    VALID_APPROVAL_RISKS.has(app.risk) &&
+    typeof app.reason === 'string' &&
+    typeof app.scope === 'string' &&
+    typeof app.sideEffects === 'string' &&
+    typeof app.status === 'string' &&
+    VALID_APPROVAL_STATUSES.has(app.status)
+  );
+}
+
+export function isValidRunResult(item: unknown): boolean {
+  if (!item || typeof item !== 'object') return false;
+  const res = item as Record<string, unknown>;
+  return (
+    typeof res.summary === 'string' &&
+    Array.isArray(res.artifactIds) &&
+    res.artifactIds.every((id) => typeof id === 'string') &&
+    Array.isArray(res.verifiedChecks) &&
+    res.verifiedChecks.every(isValidVerifiedCheck)
+  );
+}
+
+export function isValidRunError(item: unknown): boolean {
+  if (!item || typeof item !== 'object') return false;
+  const err = item as Record<string, unknown>;
+  return typeof err.code === 'string' && typeof err.message === 'string';
+}
+
+export function isValidRunDetail(item: unknown): item is AgentRunDetail {
   if (!item || typeof item !== 'object') return false;
   const r = item as Record<string, unknown>;
-  const validModes = ['ask', 'plan', 'execute'];
-  const validStatuses = [
-    'pending',
-    'planning',
-    'running',
-    'executing',
-    'verifying',
-    'awaiting_approval',
-    'completed',
-    'failed',
-    'cancelled',
-  ];
-  return (
-    typeof r.id === 'string' &&
-    r.id.length > 0 &&
-    typeof r.workspaceId === 'string' &&
-    typeof r.workspaceName === 'string' &&
-    typeof r.task === 'string' &&
-    typeof r.mode === 'string' &&
-    validModes.includes(r.mode) &&
-    typeof r.status === 'string' &&
-    validStatuses.includes(r.status) &&
-    typeof r.createdAt === 'string' &&
-    Array.isArray(r.plan) &&
-    Array.isArray(r.timeline) &&
-    Array.isArray(r.fileChanges) &&
-    Array.isArray(r.verifications) &&
-    Array.isArray(r.artifacts)
-  );
+
+  // Required scalar identity & contract fields
+  if (
+    typeof r.id !== 'string' ||
+    r.id.length === 0 ||
+    typeof r.workspaceId !== 'string' ||
+    r.workspaceId.length === 0 ||
+    typeof r.workspaceName !== 'string' ||
+    typeof r.task !== 'string' ||
+    typeof r.mode !== 'string' ||
+    !CANONICAL_AGENT_MODES.has(r.mode as AgentMode) ||
+    typeof r.status !== 'string' ||
+    !CANONICAL_AGENT_STATUSES.has(r.status as AgentStatus) ||
+    typeof r.createdAt !== 'string'
+  ) {
+    return false;
+  }
+
+  // Optional scalar fields
+  if (r.runtime !== undefined && typeof r.runtime !== 'string') return false;
+  if (r.modelId !== undefined && typeof r.modelId !== 'string') return false;
+  if (r.updatedAt !== undefined && typeof r.updatedAt !== 'string') return false;
+  if (r.finishedAt !== undefined && typeof r.finishedAt !== 'string') return false;
+
+  // Canonical optional phase (treated strictly as optional phase, never public status)
+  if (r.phase !== undefined && (typeof r.phase !== 'string' || !CANONICAL_AGENT_PHASES.has(r.phase))) {
+    return false;
+  }
+
+  // Optional error object
+  if (r.error !== undefined && !isValidRunError(r.error)) {
+    return false;
+  }
+
+  // Optional result object
+  if (r.result !== undefined && !isValidRunResult(r.result)) {
+    return false;
+  }
+
+  // Nested presentation structures: plan, timeline, fileChanges, verifications, artifacts
+  if (!Array.isArray(r.plan) || !r.plan.every(isValidPlanStep)) {
+    return false;
+  }
+
+  if (!Array.isArray(r.timeline) || !r.timeline.every(isValidTimelineEvent)) {
+    return false;
+  }
+
+  if (!Array.isArray(r.fileChanges) || !r.fileChanges.every(isValidWorkspaceFileChange)) {
+    return false;
+  }
+
+  if (!Array.isArray(r.verifications) || !r.verifications.every(isValidVerifiedCheck)) {
+    return false;
+  }
+
+  if (!Array.isArray(r.artifacts) || !r.artifacts.every(isValidArtifactItem)) {
+    return false;
+  }
+
+  // Optional approval request
+  if (r.approvalRequest !== undefined && !isValidApprovalRequest(r.approvalRequest)) {
+    return false;
+  }
+
+  return true;
 }
 
 // Mutable Demo State Manager for Browser Session with Bounded Local Persistence

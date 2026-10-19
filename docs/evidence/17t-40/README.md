@@ -55,7 +55,8 @@ Web frontend redesign aligning the GigaAgent user experience with Giga's workspa
 9. **Bounded Demo Persistence Across Hard Browser Refresh (Linear 17T-40 Acceptance)**:
    - Newly created user workspaces and runs persist across browser refresh and direct URL navigation via namespaced `localStorage` keys (`giga_demo_workspaces_v1` and `giga_demo_runs_v1`).
    - Deterministic seeded fixtures (`INITIAL_WORKSPACES` and `INITIAL_RUNS`) are always preserved and deduplicated, guaranteeing baseline fixtures are never erased.
-   - Restored data is validated against strict schemas, gracefully recovers from corrupted or malformed payloads without throwing, and is strictly bounded by storage quotas (max 20 user workspaces, 50 user runs).
+   - Restored data is validated against canonical `AgentStatus` contracts (`queued`, `running`, `awaiting_approval`, `applying`, `completed`, `failed`, `cancelled`), canonical `AgentWorkspace` contract (`sourceKind: 'blank'` only), and deep nested presentation structures (`plan`, `timeline`, `fileChanges`, `verifications`, `artifacts`, `approvalRequest`). Outdated or malformed records are safely discarded without throwing or crashing React rendering.
+   - Strictly bounded by storage quotas (max 20 user workspaces, 50 user runs).
    - Real API mode strictly isolates from Demo persistence, never loading or displaying mock fixtures.
 
 ---
@@ -64,8 +65,8 @@ Web frontend redesign aligning the GigaAgent user experience with Giga's workspa
 
 ### Frontend Test Results
 - **Suite**: `vitest run`
-- **Results**: **214 / 214 tests passing** across 13 test files (zero failures, zero regressions).
-- **Dedicated Test File**: `apps/web/tests/agent-workspace-ux.test.tsx` (38 scenarios covering Blank Workspace defaults, prompt validation, gated sources, mode toggling, runtime boundaries, Golden Flow execution, Ask/Plan modes, failed runs, cancellation, INV-07 approval gates, Real mode truthfulness, subpath routing, hard refresh rehydration, quota boundaries, and review finding regressions).
+- **Results**: **218 / 218 tests passing** across 13 test files (zero failures, zero regressions).
+- **Dedicated Test File**: `apps/web/tests/agent-workspace-ux.test.tsx` (42 scenarios covering Blank Workspace defaults, prompt validation, gated sources, mode toggling, runtime boundaries, Golden Flow execution, Ask/Plan modes, failed runs, cancellation, INV-07 approval gates, Real mode truthfulness, subpath routing, hard refresh rehydration, canonical AgentStatus/sourceKind validation, deep nested structure validation, and quota bounds).
 
 ### Compiler & Production Build
 - **Typecheck**: `npm run typecheck --prefix apps/web` (0 errors, clean TypeScript emit).
