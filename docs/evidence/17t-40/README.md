@@ -47,9 +47,16 @@ Web frontend redesign aligning the GigaAgent user experience with Giga's workspa
    - The default new-task flow clearly targets a fresh blank workspace (`selectedWorkspaceId = ''`, labeled `New Blank Workspace (Default)` in target selector and composer).
    - Launching with blank workspace creates a brand new workspace without mutating or attaching to existing fixtures (`ws-react-task-manager`, `ws-csv-analytics`, `ws-doc-site`). Existing workspace cards allow clear toggling of target selection.
 
-8. **Demo Simulation Transparency**:
+8. **Demo Simulation Transparency & Explicit Runtime Boundary**:
    - In Demo Mode (`?demo=1`), simulated sandbox execution, verification, and artifact metadata are prominently labeled (`DEMO SIMULATION`, `SIMULATED SANDBOX FILES`, `SIMULATED EVIDENCE`, `DEMO LABELED`).
+   - The runtime boundary notice explicitly distinguishes simulation from real execution: Demo mode simulates isolated sandbox execution, files and verification; Real mode Cloud execution is unavailable (tracked under Linear 17T-48); actual future execution must be constrained to an isolated runtime so that ordinary sandbox edits do not alter external repositories or host systems.
    - Artifact downloads are disabled with explicit notice that downloads are not supported or advertised in Demo Mode.
+
+9. **Bounded Demo Persistence Across Hard Browser Refresh (Linear 17T-40 Acceptance)**:
+   - Newly created user workspaces and runs persist across browser refresh and direct URL navigation via namespaced `localStorage` keys (`giga_demo_workspaces_v1` and `giga_demo_runs_v1`).
+   - Deterministic seeded fixtures (`INITIAL_WORKSPACES` and `INITIAL_RUNS`) are always preserved and deduplicated, guaranteeing baseline fixtures are never erased.
+   - Restored data is validated against strict schemas, gracefully recovers from corrupted or malformed payloads without throwing, and is strictly bounded by storage quotas (max 20 user workspaces, 50 user runs).
+   - Real API mode strictly isolates from Demo persistence, never loading or displaying mock fixtures.
 
 ---
 
@@ -57,8 +64,8 @@ Web frontend redesign aligning the GigaAgent user experience with Giga's workspa
 
 ### Frontend Test Results
 - **Suite**: `vitest run`
-- **Results**: **208 / 208 tests passing** across 13 test files (zero failures, zero regressions).
-- **Dedicated Test File**: `apps/web/tests/agent-workspace-ux.test.tsx` (32 scenarios covering Blank Workspace defaults, prompt validation, gated sources, mode toggling, runtime boundaries, Golden Flow execution, Ask/Plan modes, failed runs, cancellation, INV-07 approval gates, Real mode truthfulness, subpath routing, and PR #36 review finding regressions).
+- **Results**: **214 / 214 tests passing** across 13 test files (zero failures, zero regressions).
+- **Dedicated Test File**: `apps/web/tests/agent-workspace-ux.test.tsx` (38 scenarios covering Blank Workspace defaults, prompt validation, gated sources, mode toggling, runtime boundaries, Golden Flow execution, Ask/Plan modes, failed runs, cancellation, INV-07 approval gates, Real mode truthfulness, subpath routing, hard refresh rehydration, quota boundaries, and review finding regressions).
 
 ### Compiler & Production Build
 - **Typecheck**: `npm run typecheck --prefix apps/web` (0 errors, clean TypeScript emit).
@@ -83,6 +90,10 @@ Clearly defaults to a fresh blank workspace with `New Blank Workspace (Default)`
 #### Real API Mode Isolation & Runtime Warning
 Upon switching to Real API Mode, Mock fixtures and runs are immediately cleared. An explicit warning alert informs the developer that backend Cloud runtime execution requires separate infrastructure readiness (Linear 17T-48 tracks frontend control-plane integration), launch buttons are disabled, and zero mock data leaks.
 ![Real Mode Isolation](screen_17t_40_mode_switching_real.png)
+
+#### Browser Refresh & Direct Run URL Reopening (Linear 17T-40 Acceptance)
+User-created run opened directly via URL and persisted through hard page reload (`Page.reload`). The execution view accurately restores task requirements, workspace identity (`Blank Workspace 5`), execution plan steps, timeline, and `DEMO SIMULATION` badge without 404 or session loss.
+![Persisted Run After Reload](screen_17t_40_run_persisted_reload.png)
 
 ---
 

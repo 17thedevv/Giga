@@ -691,28 +691,185 @@ const AWAITING_APPROVAL_RUN: AgentRunDetail = {
   },
 };
 
-// Mutable Demo State Manager for Browser Session
-class WorkspaceFixtureStore {
-  private workspaces: AgentWorkspace[] = [...INITIAL_WORKSPACES];
-  private runs: AgentRunDetail[] = [
-    GOLDEN_REACT_RUN,
-    ASK_MODE_RUN,
-    PLAN_MODE_RUN,
-    FAILED_RUN,
-    CANCELLED_RUN,
-    AWAITING_APPROVAL_RUN,
-  ];
+// Initial Deterministic Run Fixtures
+export const INITIAL_RUNS: readonly AgentRunDetail[] = [
+  GOLDEN_REACT_RUN,
+  ASK_MODE_RUN,
+  PLAN_MODE_RUN,
+  FAILED_RUN,
+  CANCELLED_RUN,
+  AWAITING_APPROVAL_RUN,
+];
 
-  reset() {
+export const DEMO_STORAGE_KEY_WORKSPACES = 'giga_demo_workspaces_v1';
+export const DEMO_STORAGE_KEY_RUNS = 'giga_demo_runs_v1';
+export const MAX_USER_DEMO_WORKSPACES = 20;
+export const MAX_USER_DEMO_RUNS = 50;
+
+export const INITIAL_WORKSPACE_IDS = new Set(INITIAL_WORKSPACES.map((w) => w.id));
+export const INITIAL_RUN_IDS = new Set(INITIAL_RUNS.map((r) => r.id));
+
+function getDemoStorage(): Storage | null {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      return window.localStorage;
+    }
+    if (typeof globalThis !== 'undefined' && (globalThis as any).localStorage) {
+      return (globalThis as any).localStorage;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function isValidWorkspace(item: unknown): item is AgentWorkspace {
+  if (!item || typeof item !== 'object') return false;
+  const w = item as Record<string, unknown>;
+  return (
+    typeof w.id === 'string' &&
+    w.id.length > 0 &&
+    typeof w.name === 'string' &&
+    w.name.length > 0 &&
+    (w.sourceKind === 'blank' || w.sourceKind === 'github' || w.sourceKind === 'template') &&
+    typeof w.revision === 'number' &&
+    typeof w.createdAt === 'string' &&
+    typeof w.updatedAt === 'string'
+  );
+}
+
+function isValidRunDetail(item: unknown): item is AgentRunDetail {
+  if (!item || typeof item !== 'object') return false;
+  const r = item as Record<string, unknown>;
+  const validModes = ['ask', 'plan', 'execute'];
+  const validStatuses = [
+    'pending',
+    'planning',
+    'running',
+    'executing',
+    'verifying',
+    'awaiting_approval',
+    'completed',
+    'failed',
+    'cancelled',
+  ];
+  return (
+    typeof r.id === 'string' &&
+    r.id.length > 0 &&
+    typeof r.workspaceId === 'string' &&
+    typeof r.workspaceName === 'string' &&
+    typeof r.task === 'string' &&
+    typeof r.mode === 'string' &&
+    validModes.includes(r.mode) &&
+    typeof r.status === 'string' &&
+    validStatuses.includes(r.status) &&
+    typeof r.createdAt === 'string' &&
+    Array.isArray(r.plan) &&
+    Array.isArray(r.timeline) &&
+    Array.isArray(r.fileChanges) &&
+    Array.isArray(r.verifications) &&
+    Array.isArray(r.artifacts)
+  );
+}
+
+// Mutable Demo State Manager for Browser Session with Bounded Local Persistence
+export class WorkspaceFixtureStore {
+  private workspaces: AgentWorkspace[] = [...INITIAL_WORKSPACES];
+  private runs: AgentRunDetail[] = [...INITIAL_RUNS];
+
+  constructor() {
+    this.rehydrateFromStorage();
+  }
+
+  private loadPersistedWorkspaces(): AgentWorkspace[] {
+    const storage = getDemoStorage();
+    if (!storage) return [];
+    try {
+      const raw = storage.getItem(DEMO_STORAGE_KEY_WORKSPACES);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return [];
+      return parsed
+        .filter(isValidWorkspace)
+        .filter((w) => !INITIAL_WORKSPACE_IDS.has(w.id))
+        .slice(0, MAX_USER_DEMO_WORKSPACES);
+    } catch {
+      return [];
+    }
+  }
+
+  private loadPersistedRuns(): AgentRunDetail[] {
+    const storage = getDemoStorage();
+    if (!storage) return [];
+    try {
+      const raw = storage.getItem(DEMO_STORAGE_KEY_RUNS);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return [];
+      return parsed
+        .filter(isValidRunDetail)
+        .filter((r) => !INITIAL_RUN_IDS.has(r.id))
+        .slice(0, MAX_USER_DEMO_RUNS)
+        .map((r) => ({
+          ...r,
+          isDemo: true as const,
+        }));
+    } catch {
+      return [];
+    }
+  }
+
+  private persistWorkspaces(): void {
+    const storage = getDemoStorage();
+    if (!storage) return;
+    try {
+      const userWorkspaces = this.workspaces
+        .filter((w) => !INITIAL_WORKSPACE_IDS.has(w.id))
+        .slice(0, MAX_USER_DEMO_WORKSPACES);
+      storage.setItem(DEMO_STORAGE_KEY_WORKSPACES, JSON.stringify(userWorkspaces));
+    } catch {
+      // safe fallback
+    }
+  }
+
+  private persistRuns(): void {
+    const storage = getDemoStorage();
+    if (!storage) return;
+    try {
+      const userRuns = this.runs
+        .filter((r) => !INITIAL_RUN_IDS.has(r.id))
+        .slice(0, MAX_USER_DEMO_RUNS)
+        .map((r) => ({
+          ...r,
+          isDemo: true as const,
+        }));
+      storage.setItem(DEMO_STORAGE_KEY_RUNS, JSON.stringify(userRuns));
+    } catch {
+      // safe fallback
+    }
+  }
+
+  rehydrateFromStorage(): void {
+    const userWorkspaces = this.loadPersistedWorkspaces();
+    const userRuns = this.loadPersistedRuns();
+
+    // Deterministic seeded fixtures are always preserved and deduplicated
+    this.workspaces = [...userWorkspaces, ...INITIAL_WORKSPACES];
+    this.runs = [...userRuns, ...INITIAL_RUNS];
+  }
+
+  reset(): void {
+    const storage = getDemoStorage();
+    if (storage) {
+      try {
+        storage.removeItem(DEMO_STORAGE_KEY_WORKSPACES);
+        storage.removeItem(DEMO_STORAGE_KEY_RUNS);
+      } catch {
+        // ignore
+      }
+    }
     this.workspaces = [...INITIAL_WORKSPACES];
-    this.runs = [
-      GOLDEN_REACT_RUN,
-      ASK_MODE_RUN,
-      PLAN_MODE_RUN,
-      FAILED_RUN,
-      CANCELLED_RUN,
-      AWAITING_APPROVAL_RUN,
-    ];
+    this.runs = [...INITIAL_RUNS];
   }
 
   getWorkspaces(): AgentWorkspace[] {
@@ -734,6 +891,7 @@ class WorkspaceFixtureStore {
       updatedAt: new Date().toISOString(),
     };
     this.workspaces.unshift(newWs);
+    this.persistWorkspaces();
     return newWs;
   }
 
@@ -874,6 +1032,7 @@ class WorkspaceFixtureStore {
     };
 
     this.runs.unshift(newRun);
+    this.persistRuns();
     return newRun;
   }
 
@@ -891,6 +1050,7 @@ class WorkspaceFixtureStore {
     if (idx !== -1) {
       this.runs[idx] = updated;
     }
+    this.persistRuns();
     return updated;
   }
 
@@ -908,6 +1068,7 @@ class WorkspaceFixtureStore {
       };
       const idx = this.runs.findIndex((r) => r.id === id);
       if (idx !== -1) this.runs[idx] = updated;
+      this.persistRuns();
       return updated;
     }
 
@@ -926,6 +1087,7 @@ class WorkspaceFixtureStore {
     };
     const idx = this.runs.findIndex((r) => r.id === id);
     if (idx !== -1) this.runs[idx] = updated;
+    this.persistRuns();
     return updated;
   }
 
@@ -968,6 +1130,7 @@ class WorkspaceFixtureStore {
     };
     const idx = this.runs.findIndex((r) => r.id === id);
     if (idx !== -1) this.runs[idx] = updated;
+    this.persistRuns();
     return updated;
   }
 }

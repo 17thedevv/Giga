@@ -8,7 +8,12 @@ import { ApiModeProvider, useApiMode } from '../src/app/context/ApiModeContext.j
 import { ThemeProvider } from '../src/app/context/ThemeContext.js';
 import { AuthProvider } from '../src/app/context/AuthContext.js';
 import { RouterProvider, useRouter } from '../src/app/router.js';
-import { workspaceFixtureStore } from '../src/features/agent/workspace-fixtures.js';
+import {
+  workspaceFixtureStore,
+  DEMO_STORAGE_KEY_WORKSPACES,
+  DEMO_STORAGE_KEY_RUNS,
+  MAX_USER_DEMO_WORKSPACES,
+} from '../src/features/agent/workspace-fixtures.js';
 import { mockDataAdapter, MOCK_USER } from '../src/lib/api/mock-adapter.js';
 import { realApiClient, ApiException } from '../src/lib/api/client.js';
 
@@ -206,7 +211,9 @@ describe('Workspace-First GigaAgent UX (17T-40)', () => {
       expect(notice.textContent).toContain('Target Runtime:');
       expect(notice.textContent).toContain('Cloud Workspace (Isolated Sandbox)');
       expect(notice.textContent).toContain('Local Runner: Coming later (not operational)');
-      expect(notice.textContent).toContain('Ordinary sandbox edits do not alter external repositories');
+      expect(notice.textContent).toContain('Demo mode simulates isolated sandbox execution, files and verification');
+      expect(notice.textContent).toContain('Real mode Cloud execution is currently unavailable (tracked under Linear 17T-48)');
+      expect(notice.textContent).toContain('ordinary sandbox edits do not alter external repositories');
     });
   });
 
@@ -1077,6 +1084,152 @@ describe('Workspace-First GigaAgent UX (17T-40)', () => {
       const warningText = screen.getByTestId('real-mode-runtime-warning').textContent;
       expect(warningText).toContain('Frontend control-plane integration is tracked under Linear 17T-48');
       expect(warningText).toContain('Cloud sandbox execution runtime requires separate backend infrastructure readiness');
+    });
+  });
+
+  describe('Demo Persistence Across Hard Browser Refresh (Linear 17T-40 Acceptance)', () => {
+    it('persists newly created user workspace and run across simulated browser refresh', async () => {
+      // 1. Create a custom workspace and a demo run
+      const customWs = workspaceFixtureStore.createWorkspace('Analytics Pipeline Workspace');
+      const customRun = workspaceFixtureStore.createDemoRun({
+        workspaceId: customWs.id,
+        task: 'Implement high-throughput stream processing pipeline in TypeScript',
+        mode: 'execute',
+      });
+
+      // 2. Assert raw entries exist in localStorage under expected namespaced keys
+      const rawWs = localStorage.getItem(DEMO_STORAGE_KEY_WORKSPACES);
+      const rawRuns = localStorage.getItem(DEMO_STORAGE_KEY_RUNS);
+      expect(rawWs).toBeTruthy();
+      expect(rawRuns).toBeTruthy();
+      expect(rawWs).toContain('Analytics Pipeline Workspace');
+      expect(rawRuns).toContain('high-throughput stream processing pipeline');
+
+      // 3. Simulate hard browser refresh by rehydrating the store
+      workspaceFixtureStore.rehydrateFromStorage();
+
+      // 4. Confirm the store restored the user fixtures alongside deterministic fixtures
+      const restoredWs = workspaceFixtureStore.getWorkspace(customWs.id);
+      expect(restoredWs).toBeDefined();
+      expect(restoredWs?.name).toBe('Analytics Pipeline Workspace');
+
+      const restoredRun = workspaceFixtureStore.getRun(customRun.id);
+      expect(restoredRun).toBeDefined();
+      expect(restoredRun?.task).toBe('Implement high-throughput stream processing pipeline in TypeScript');
+      expect(restoredRun?.workspaceName).toBe('Analytics Pipeline Workspace');
+      expect(restoredRun?.isDemo).toBe(true);
+
+      // Deterministic seeded fixtures remain intact
+      expect(workspaceFixtureStore.getWorkspace('ws-react-task-manager')?.name).toBe('React Task Manager');
+      expect(workspaceFixtureStore.getRun('run-golden-react')?.task).toContain('Build a responsive React task manager');
+
+      // 5. Mount AgentRunView at the new run's URL (/agent/runs/:runId)
+      renderWithProviders(<AgentRunView />, `/agent/runs/${customRun.id}`);
+
+      await waitFor(() => {
+        expect(screen.getByTestId('agent-run-view')).toBeDefined();
+      });
+
+      expect(screen.getByTestId('run-task-title').textContent).toBe(
+        'Implement high-throughput stream processing pipeline in TypeScript'
+      );
+      expect(screen.getByTestId('run-workspace-name').textContent).toContain('Analytics Pipeline Workspace');
+      expect(screen.getByTestId('demo-run-badge').textContent).toBe('DEMO SIMULATION');
+      expect(screen.queryByText('Run not found in workspace session.')).toBeNull();
+    });
+
+    it('renders persisted workspaces and runs in AgentLauncherView after browser refresh', async () => {
+      const customWs = workspaceFixtureStore.createWorkspace('Mobile App Prototype');
+      const customRun = workspaceFixtureStore.createDemoRun({
+        workspaceId: customWs.id,
+        task: 'Build React Native prototype screen for inventory tracking',
+        mode: 'plan',
+      });
+
+      // Simulate browser reload
+      workspaceFixtureStore.rehydrateFromStorage();
+
+      renderWithProviders(<AgentLauncherView />);
+
+      await waitFor(() => {
+        expect(screen.getByTestId('active-workspace-select')).toBeDefined();
+      });
+
+      const select = screen.getByTestId('active-workspace-select') as HTMLSelectElement;
+      const optionTexts = Array.from(select.options).map((opt) => opt.textContent);
+      expect(optionTexts.some((text) => text?.includes('Mobile App Prototype'))).toBe(true);
+
+      const recentRuns = screen.getByTestId('recent-runs-list');
+      expect(recentRuns.textContent).toContain(customRun.task);
+      expect(recentRuns.textContent).toContain('Mobile App Prototype');
+    });
+
+    it('guarantees Real mode never displays or leaks persisted Demo fixtures', async () => {
+      workspaceFixtureStore.createWorkspace('Secret Demo Staging Workspace');
+      workspaceFixtureStore.createDemoRun({
+        workspaceId: 'ws-react-task-manager',
+        task: 'Top secret demo execution that must never leak into Real mode',
+        mode: 'execute',
+      });
+
+      // Mount in Real mode
+      renderWithProviders(<AgentLauncherView />, '/agent', 'real');
+
+      await waitFor(() => {
+        expect(screen.getByTestId('real-mode-runtime-warning')).toBeDefined();
+      });
+
+      // Must never see demo workspaces or runs in Real mode
+      expect(screen.queryByText('Secret Demo Staging Workspace')).toBeNull();
+      expect(screen.queryByText('Top secret demo execution that must never leak into Real mode')).toBeNull();
+      expect(screen.getByTestId('no-runs-state')).toBeDefined();
+      expect(screen.getByTestId('no-runs-state').textContent).toContain('No past runs recorded');
+    });
+
+    it('resiliently handles corrupted or malformed localStorage without crashing', async () => {
+      // Set corrupted data in localStorage
+      localStorage.setItem(DEMO_STORAGE_KEY_WORKSPACES, '{"malformed": json [');
+      localStorage.setItem(DEMO_STORAGE_KEY_RUNS, JSON.stringify([{ invalid: 'schema', missingId: true }]));
+
+      // Should not throw
+      expect(() => workspaceFixtureStore.rehydrateFromStorage()).not.toThrow();
+
+      // Deterministic seeded fixtures must still be present and valid
+      expect(workspaceFixtureStore.getWorkspaces().length).toBe(3);
+      expect(workspaceFixtureStore.getWorkspace('ws-react-task-manager')).toBeDefined();
+      expect(workspaceFixtureStore.getRun('run-golden-react')).toBeDefined();
+    });
+
+    it('enforces maximum storage bounds on user workspaces and runs', async () => {
+      // Create more than MAX_USER_DEMO_WORKSPACES (20) workspaces
+      for (let i = 0; i < 25; i++) {
+        workspaceFixtureStore.createWorkspace(`Bulk Workspace ${i}`);
+      }
+
+      const raw = localStorage.getItem(DEMO_STORAGE_KEY_WORKSPACES);
+      expect(raw).toBeTruthy();
+      const parsed = JSON.parse(raw!);
+      expect(parsed.length).toBeLessThanOrEqual(MAX_USER_DEMO_WORKSPACES);
+    });
+
+    it('persists run status updates like cancellation across refresh', async () => {
+      const customWs = workspaceFixtureStore.createWorkspace('Cancellable Project');
+      const customRun = workspaceFixtureStore.createDemoRun({
+        workspaceId: customWs.id,
+        task: 'Long running computation that will be cancelled',
+        mode: 'execute',
+      });
+
+      // Cancel the run
+      const cancelled = workspaceFixtureStore.cancelDemoRun(customRun.id);
+      expect(cancelled?.status).toBe('cancelled');
+
+      // Simulate refresh
+      workspaceFixtureStore.rehydrateFromStorage();
+
+      const refreshed = workspaceFixtureStore.getRun(customRun.id);
+      expect(refreshed?.status).toBe('cancelled');
+      expect(refreshed?.error?.code).toBe('CANCELLED');
     });
   });
 });

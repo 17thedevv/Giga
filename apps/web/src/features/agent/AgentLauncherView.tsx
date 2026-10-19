@@ -612,7 +612,7 @@ export const AgentLauncherView: React.FC = () => {
               </span>
             </div>
             <p style={{ color: 'var(--giga-text-secondary, #94A3B8)', margin: 0, lineHeight: 1.4 }}>
-              Code executes in an isolated sandbox with memory, CPU, and network boundaries. Ordinary sandbox edits do not alter external repositories or host systems.
+              Demo mode simulates isolated sandbox execution, files and verification. Real mode Cloud execution is currently unavailable (tracked under Linear 17T-48). Actual future execution must be constrained to an isolated runtime so that ordinary sandbox edits do not alter external repositories or host systems.
             </p>
           </div>
 
