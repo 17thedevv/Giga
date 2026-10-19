@@ -286,8 +286,9 @@ The E2B Cloud Sandbox provider client is **strictly disabled by default**:
 ## 7. Delivery Metadata & Next Steps
 
 - **Branch:** `feat/17t-69-e2b-provider-adapter`
-- **Base Branch:** `main` (commit `e86edd9f705ca49fea66a2cb6bbfe42e668d751e`)
+- **Base Branch:** `main` (merged up to `f06d46462134f92f7626a515782f93e0c5f7f8e9`, remote main at `8bb2faf8b0ae46b074a4413da6f157ad7a51804f`)
 - **Implementation Commit SHA:** `2fbf70534051cb1ffc840eeb388114a34a52ebd8`
+- **Verification & Alignment Commit SHA:** `4abb47702f232491a657c7c1da91845920364966`
 - **Draft PR URL:** [https://github.com/17thedevv/Giga/pull/new/feat/17t-69-e2b-provider-adapter](https://github.com/17thedevv/Giga/pull/new/feat/17t-69-e2b-provider-adapter)
 - **Tracking Linear Issue:** [17T-69](https://linear.app/17thedev/issue/17T-69/implement-e2b-cloud-sandbox-provider-client-behind-disabled-feature)
 - **Peer Reviewer:** Tráng A Thư (Frontend / UX)
