@@ -21,6 +21,10 @@ import type {
   ChatStreamEvent,
   ReasoningEffort,
   ModelsResponse,
+  ProviderCredential,
+  ChatCredentialPreference,
+  SaveCredentialDto,
+  SetCredentialPreferenceDto,
 } from './types.js';
 import { SseStreamParser, validateChatStreamEvent } from './sse-parser.js';
 import { readAgentCapabilities, type AgentCapabilities } from './agent-contract.js';
@@ -528,6 +532,52 @@ export class RealApiClient {
   async updateInstallation(id: string, dto: UpdateInstallationDto): Promise<{ installation: SkillInstallation }> {
     return this.request<{ installation: SkillInstallation }>(`/api/v1/skills/${encodeURIComponent(id)}/installation`, {
       method: 'PATCH',
+      body: JSON.stringify(dto),
+    });
+  }
+
+  // ==========================================
+  // Provider Credentials & BYOK (Task 17T-37 / 17T-39)
+  // ==========================================
+
+  async getProviderCredentials(): Promise<{ items: ProviderCredential[] }> {
+    return this.request<{ items: ProviderCredential[] }>('/api/v1/me/provider-credentials', {
+      method: 'GET',
+    });
+  }
+
+  async saveProviderCredential(dto: SaveCredentialDto): Promise<{ credential: ProviderCredential }> {
+    return this.request<{ credential: ProviderCredential }>('/api/v1/me/provider-credentials', {
+      method: 'POST',
+      body: JSON.stringify(dto),
+    });
+  }
+
+  async deleteProviderCredential(id: string): Promise<void> {
+    await this.request<void>(`/api/v1/me/provider-credentials/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+  }
+
+  async validateProviderCredential(id: string): Promise<{ credential: ProviderCredential }> {
+    return this.request<{ credential: ProviderCredential }>(
+      `/api/v1/me/provider-credentials/${encodeURIComponent(id)}/validate`,
+      {
+        method: 'POST',
+        body: JSON.stringify({}),
+      }
+    );
+  }
+
+  async getChatCredentialPreference(): Promise<ChatCredentialPreference> {
+    return this.request<ChatCredentialPreference>('/api/v1/me/chat-credential-preference', {
+      method: 'GET',
+    });
+  }
+
+  async setChatCredentialPreference(dto: SetCredentialPreferenceDto): Promise<ChatCredentialPreference> {
+    return this.request<ChatCredentialPreference>('/api/v1/me/chat-credential-preference', {
+      method: 'PUT',
       body: JSON.stringify(dto),
     });
   }

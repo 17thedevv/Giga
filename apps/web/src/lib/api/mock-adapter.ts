@@ -22,6 +22,10 @@ import type {
   ModelMetadata,
   ModelsResponse,
   ReasoningEffort,
+  ProviderCredential,
+  ChatCredentialPreference,
+  SaveCredentialDto,
+  SetCredentialPreferenceDto,
 } from './types.js';
 import { ApiException } from './client.js';
 import { readAgentCapabilities, type AgentCapabilities } from './agent-contract.js';
@@ -394,6 +398,18 @@ export class MockDataAdapter {
     this.preferences = { ...INITIAL_PREFERENCES };
     this.skills = INITIAL_SKILLS.map((s) => ({ ...s }));
     this.skillVersions = JSON.parse(JSON.stringify(INITIAL_SKILL_VERSIONS));
+  }
+
+  // Provider Credentials & BYOK State (17T-39)
+  private credentials: ProviderCredential[] = [];
+  private credentialPreference: ChatCredentialPreference = { mode: 'platform', credentialId: null };
+  public mockValidateBehavior: 'normal' | 'invalid' | 'rate_limit' | 'transient_error' = 'normal';
+
+  // Reset credentials and BYOK preferences for test isolation
+  resetCredentials(): void {
+    this.credentials = [];
+    this.credentialPreference = { mode: 'platform', credentialId: null };
+    this.mockValidateBehavior = 'normal';
   }
 
   // Conversations
@@ -930,6 +946,145 @@ export class MockDataAdapter {
     };
 
     return { installation };
+  }
+
+  // ==========================================
+  // Provider Credentials & BYOK Operations (17T-39)
+  // ==========================================
+
+  async getProviderCredentials(): Promise<{ items: ProviderCredential[] }> {
+    await this.delay(100);
+    if (!this.currentUser) {
+      throw new ApiException(401, 'UNAUTHORIZED', 'Session required');
+    }
+    return { items: this.credentials.map((c) => ({ ...c })) };
+  }
+
+  async saveProviderCredential(dto: SaveCredentialDto): Promise<{ credential: ProviderCredential }> {
+    await this.delay(150);
+    if (!this.currentUser) {
+      throw new ApiException(401, 'UNAUTHORIZED', 'Session required');
+    }
+    if (dto.provider !== 'gemini' || typeof dto.apiKey !== 'string' || !/^[\x21-\x7e]{16,512}$/.test(dto.apiKey)) {
+      throw new ApiException(400, 'VALIDATION_ERROR', 'Expected Gemini provider and a printable credential of 16 to 512 characters');
+    }
+
+    const id = `cred_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    const displayHint = `••••${dto.apiKey.slice(-4)}`;
+    const now = new Date().toISOString();
+
+    const newCred: ProviderCredential = {
+      id,
+      provider: 'gemini',
+      displayHint,
+      status: 'unverified',
+      createdAt: now,
+      updatedAt: now,
+      lastValidatedAt: null,
+    };
+
+    // Atomically replace existing credentials (1 per user)
+    this.credentials = [newCred];
+
+    // If currently in BYOK mode, rebind preference to new credential ID!
+    if (this.credentialPreference.mode === 'byok') {
+      this.credentialPreference = { mode: 'byok', credentialId: id };
+    }
+
+    return { credential: { ...newCred } };
+  }
+
+  async deleteProviderCredential(id: string): Promise<void> {
+    await this.delay(120);
+    if (!this.currentUser) {
+      throw new ApiException(401, 'UNAUTHORIZED', 'Session required');
+    }
+    const index = this.credentials.findIndex((c) => c.id === id);
+    if (index === -1) {
+      throw new ApiException(404, 'NOT_FOUND', 'Credential not found');
+    }
+
+    this.credentials.splice(index, 1);
+
+    // If currently in BYOK mode and selected credential was deleted, set credentialId to null while keeping mode 'byok'
+    if (this.credentialPreference.mode === 'byok' && this.credentialPreference.credentialId === id) {
+      this.credentialPreference = { mode: 'byok', credentialId: null };
+    }
+  }
+
+  async validateProviderCredential(id: string): Promise<{ credential: ProviderCredential }> {
+    await this.delay(200);
+    if (!this.currentUser) {
+      throw new ApiException(401, 'UNAUTHORIZED', 'Session required');
+    }
+    const cred = this.credentials.find((c) => c.id === id);
+    if (!cred) {
+      throw new ApiException(404, 'NOT_FOUND', 'Credential not found');
+    }
+
+    const index = this.credentials.findIndex((c) => c.id === id);
+    if (this.mockValidateBehavior === 'transient_error') {
+      const now = new Date().toISOString();
+      this.credentials[index] = { ...cred, lastValidatedAt: now, updatedAt: now };
+      throw new ApiException(503, 'PROVIDER_UNAVAILABLE', 'Credential validation is temporarily unavailable');
+    }
+
+    if (this.mockValidateBehavior === 'rate_limit') {
+      const now = new Date().toISOString();
+      this.credentials[index] = { ...cred, lastValidatedAt: now, updatedAt: now };
+      throw new ApiException(429, 'PROVIDER_RATE_LIMIT', 'Credential validation is temporarily unavailable');
+    }
+
+    const isInvalid = this.mockValidateBehavior === 'invalid' || cred.displayHint.endsWith('0000');
+    const newStatus = isInvalid ? 'invalid' : 'valid';
+    const now = new Date().toISOString();
+
+    const updatedCred: ProviderCredential = {
+      ...cred,
+      status: newStatus,
+      lastValidatedAt: now,
+      updatedAt: now,
+    };
+
+    this.credentials[index] = updatedCred;
+
+    return { credential: { ...updatedCred } };
+  }
+
+  async getChatCredentialPreference(): Promise<ChatCredentialPreference> {
+    await this.delay(80);
+    if (!this.currentUser) {
+      throw new ApiException(401, 'UNAUTHORIZED', 'Session required');
+    }
+    return { ...this.credentialPreference };
+  }
+
+  async setChatCredentialPreference(dto: SetCredentialPreferenceDto): Promise<ChatCredentialPreference> {
+    await this.delay(120);
+    if (!this.currentUser) {
+      throw new ApiException(401, 'UNAUTHORIZED', 'Session required');
+    }
+    if (
+      (dto.mode !== 'platform' && dto.mode !== 'byok') ||
+      (dto.mode === 'platform' && dto.credentialId !== undefined && dto.credentialId !== null) ||
+      (dto.mode === 'byok' && typeof dto.credentialId !== 'string')
+    ) {
+      throw new ApiException(400, 'VALIDATION_ERROR', 'Invalid Chat credential preference');
+    }
+
+    if (dto.mode === 'byok') {
+      const exists = this.credentials.some((c) => c.id === dto.credentialId);
+      if (!exists) {
+        throw new ApiException(404, 'NOT_FOUND', 'Selected credential does not exist');
+      }
+    }
+
+    this.credentialPreference = {
+      mode: dto.mode,
+      credentialId: dto.mode === 'byok' ? (dto.credentialId as string) : null,
+    };
+
+    return { ...this.credentialPreference };
   }
 
   private delay(ms: number): Promise<void> {

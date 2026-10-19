@@ -129,4 +129,129 @@ describe('MockDataAdapter', () => {
       expect(res.run.status).toBe('cancelled');
     });
   });
+
+  describe('Provider Credentials & BYOK (17T-39)', () => {
+    beforeEach(async () => {
+      await adapter.login('trangthu@demo.giga.dev', 'CorrectPassword123!');
+      adapter.resetCredentials();
+    });
+
+    it('starts with empty credentials and default platform preference', async () => {
+      const creds = await adapter.getProviderCredentials();
+      expect(creds.items).toEqual([]);
+
+      const pref = await adapter.getChatCredentialPreference();
+      expect(pref).toEqual({ mode: 'platform', credentialId: null });
+    });
+
+    it('saves a valid Gemini credential and generates masked hint without storing plaintext', async () => {
+      const saved = await adapter.saveProviderCredential({
+        provider: 'gemini',
+        apiKey: 'AIzaSyDemoValidSecretKey1234567890',
+      });
+
+      expect(saved.credential.id).toBeDefined();
+      expect(saved.credential.provider).toBe('gemini');
+      expect(saved.credential.displayHint).toBe('••••7890');
+      expect(saved.credential.status).toBe('unverified');
+      expect(saved.credential.lastValidatedAt).toBeNull();
+
+      // Plaintext key is not on credential
+      expect((saved.credential as unknown as Record<string, unknown>).apiKey).toBeUndefined();
+
+      const list = await adapter.getProviderCredentials();
+      expect(list.items).toHaveLength(1);
+      expect(list.items[0].id).toBe(saved.credential.id);
+    });
+
+    it('rejects invalid or too short api keys', async () => {
+      await expect(
+        adapter.saveProviderCredential({
+          provider: 'gemini',
+          apiKey: 'short',
+        })
+      ).rejects.toThrow('Expected Gemini provider');
+    });
+
+    it('validates a saved credential and updates status and timestamp', async () => {
+      const saved = await adapter.saveProviderCredential({
+        provider: 'gemini',
+        apiKey: 'AIzaSyDemoValidSecretKey1234567890',
+      });
+
+      const validated = await adapter.validateProviderCredential(saved.credential.id);
+      expect(validated.credential.status).toBe('valid');
+      expect(validated.credential.lastValidatedAt).toBeDefined();
+    });
+
+    it('marks key invalid when validation fails', async () => {
+      const saved = await adapter.saveProviderCredential({
+        provider: 'gemini',
+        apiKey: 'AIzaSyDemoInvalidKeyEndingIn0000',
+      });
+
+      const validated = await adapter.validateProviderCredential(saved.credential.id);
+      expect(validated.credential.status).toBe('invalid');
+      expect(validated.credential.lastValidatedAt).toBeDefined();
+    });
+
+    it('handles transient validation failure with 503 while preserving status', async () => {
+      const saved = await adapter.saveProviderCredential({
+        provider: 'gemini',
+        apiKey: 'AIzaSyDemoValidSecretKey1234567890',
+      });
+      // First validate as valid
+      await adapter.validateProviderCredential(saved.credential.id);
+
+      adapter.mockValidateBehavior = 'transient_error';
+      await expect(adapter.validateProviderCredential(saved.credential.id)).rejects.toThrow(
+        'Credential validation is temporarily unavailable'
+      );
+
+      const list = await adapter.getProviderCredentials();
+      expect(list.items[0].status).toBe('valid');
+      expect(list.items[0].lastValidatedAt).toBeDefined();
+    });
+
+    it('switches preferences between platform and byok with valid credential', async () => {
+      const saved = await adapter.saveProviderCredential({
+        provider: 'gemini',
+        apiKey: 'AIzaSyDemoValidSecretKey1234567890',
+      });
+
+      // Switch to byok
+      const byokPref = await adapter.setChatCredentialPreference({
+        mode: 'byok',
+        credentialId: saved.credential.id,
+      });
+      expect(byokPref).toEqual({ mode: 'byok', credentialId: saved.credential.id });
+
+      // Switch back to platform
+      const platPref = await adapter.setChatCredentialPreference({
+        mode: 'platform',
+        credentialId: null,
+      });
+      expect(platPref).toEqual({ mode: 'platform', credentialId: null });
+    });
+
+    it('deleting credential in byok mode keeps mode byok and sets credentialId to null', async () => {
+      const saved = await adapter.saveProviderCredential({
+        provider: 'gemini',
+        apiKey: 'AIzaSyDemoValidSecretKey1234567890',
+      });
+      await adapter.setChatCredentialPreference({
+        mode: 'byok',
+        credentialId: saved.credential.id,
+      });
+
+      await adapter.deleteProviderCredential(saved.credential.id);
+
+      const creds = await adapter.getProviderCredentials();
+      expect(creds.items).toHaveLength(0);
+
+      const pref = await adapter.getChatCredentialPreference();
+      // Must NOT silently fall back to platform!
+      expect(pref).toEqual({ mode: 'byok', credentialId: null });
+    });
+  });
 });
