@@ -10,7 +10,8 @@ const RouterContext = createContext<RouterContextType | undefined>(undefined);
 
 // Pattern matcher for routes with parameters (e.g. /chat/:conversationId, /agent/runs/:runId)
 function matchRoute(currentPath: string, pattern: string): Record<string, string> | null {
-  const currentParts = currentPath.split('/').filter(Boolean);
+  const cleanPath = currentPath.split('?')[0];
+  const currentParts = cleanPath.split('/').filter(Boolean);
   const patternParts = pattern.split('/').filter(Boolean);
 
   if (currentParts.length !== patternParts.length) {
@@ -45,20 +46,22 @@ export const RouterProvider: React.FC<{ children: React.ReactNode; initialPath?:
       }
       return initialPath;
     }
-    return typeof window !== 'undefined' ? (window.location.pathname || '/login') : '/login';
+    return typeof window !== 'undefined' ? (window.location.pathname + window.location.search || '/login') : '/login';
   });
 
   useEffect(() => {
     const handlePopState = () => {
-      setPath(window.location.pathname || '/');
+      setPath(window.location.pathname + window.location.search || '/');
     };
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
   }, []);
 
   const navigate = useCallback((to: string) => {
-    if (to === window.location.pathname) return;
-    window.history.pushState({}, '', to);
+    if (typeof window !== 'undefined' && to === (window.location.pathname + window.location.search)) return;
+    if (typeof window !== 'undefined') {
+      window.history.pushState({}, '', to);
+    }
     setPath(to);
   }, []);
 
@@ -71,6 +74,10 @@ export const RouterProvider: React.FC<{ children: React.ReactNode; initialPath?:
   const runMatch = matchRoute(path, '/agent/runs/:runId');
   if (runMatch) {
     params = runMatch;
+  }
+  const workspaceMatch = matchRoute(path, '/agent/workspaces/:workspaceId');
+  if (workspaceMatch) {
+    params = workspaceMatch;
   }
 
   return (
