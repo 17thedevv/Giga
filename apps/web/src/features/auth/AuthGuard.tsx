@@ -21,9 +21,9 @@ export const AuthGuard: React.FC<{ children: React.ReactNode }> = ({ children })
           flexDirection: 'column',
           alignItems: 'center',
           justifyContent: 'center',
-          height: '100vh',
-          backgroundColor: '#090d16',
-          color: '#94a3b8',
+          height: '100dvh',
+          backgroundColor: 'var(--giga-bg)',
+          color: 'var(--giga-text-secondary)',
           gap: '12px',
         }}
       >

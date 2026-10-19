@@ -62,6 +62,7 @@ export const Composer: React.FC<ComposerProps> = ({
 
   return (
     <form
+      className="g-chat-composer"
       onSubmit={handleSubmit}
       style={{
         display: 'flex',
@@ -136,6 +137,7 @@ export const Composer: React.FC<ComposerProps> = ({
 
       {/* Input Box and Action Buttons */}
       <div
+        className="g-composer-input"
         style={{
           display: 'flex',
           alignItems: 'flex-end',
@@ -144,6 +146,7 @@ export const Composer: React.FC<ComposerProps> = ({
       >
         <div style={{ flex: 1, position: 'relative' }}>
           <textarea
+            aria-label="Message Giga"
             ref={textareaRef}
             value={content}
             onChange={(e) => setContent(e.target.value)}
@@ -153,7 +156,7 @@ export const Composer: React.FC<ComposerProps> = ({
                 ? 'Chat is disabled'
                 : isStreaming
                   ? 'Generating response...'
-                  : 'Ask Giga anything... (Enter to send, Shift+Enter for newline)'
+                  : 'Message Giga...'
             }
             disabled={disabled || isStreaming}
             rows={1}
@@ -198,6 +201,7 @@ export const Composer: React.FC<ComposerProps> = ({
           </Button>
         )}
       </div>
+      <p className="g-composer-hint">Giga can make mistakes. Give important details a second look.<span>Enter to send · Shift + Enter for a new line</span></p>
     </form>
   );
 };

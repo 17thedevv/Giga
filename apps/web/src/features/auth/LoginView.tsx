@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useAuth } from '../../app/context/AuthContext.js';
 import { useApiMode } from '../../app/context/ApiModeContext.js';
 import { useRouter } from '../../app/router.js';
@@ -6,6 +6,7 @@ import { Input } from '../../components/Input.js';
 import { Button } from '../../components/Button.js';
 import { Alert } from '../../components/Alert.js';
 import { Badge } from '../../components/Badge.js';
+import { realApiClient } from '../../lib/api/client.js';
 import { GigaLogo } from '../../components/GigaLogo.js';
 
 export const LoginView: React.FC = () => {
@@ -13,16 +14,34 @@ export const LoginView: React.FC = () => {
   const { mode, toggleMode } = useApiMode();
   const { navigate } = useRouter();
 
-  const [email, setEmail] = useState('trangthu@demo.giga.dev');
-  const [password, setPassword] = useState('CorrectPassword123!');
-  const [clientErrors, setClientErrors] = useState<{ email?: string; password?: string }>({});
+  const [email, setEmail] = useState(mode === 'mock' ? 'trangthu@demo.giga.dev' : '');
+  const [password, setPassword] = useState(mode === 'mock' ? 'CorrectPassword123!' : '');
+  const [isSignUp, setIsSignUp] = useState(false);
+  const [displayName, setDisplayName] = useState('');
+  const [registrationError, setRegistrationError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [clientErrors, setClientErrors] = useState<{ email?: string; password?: string; displayName?: string }>({});
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  useEffect(() => {
+    setEmail(mode === 'mock' ? 'trangthu@demo.giga.dev' : '');
+    setPassword(mode === 'mock' ? 'CorrectPassword123!' : '');
+    setRegistrationError(null);
+    setNotice(null);
+  }, [mode]);
+
+  const switchForm = () => {
+    setIsSignUp(!isSignUp); setClientErrors({}); setRegistrationError(null); setNotice(null); clearError(); setPassword('');
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     clearError();
+    setRegistrationError(null);
+    setNotice(null);
+    if (isSignUp && mode !== 'real') return;
 
-    const errors: { email?: string; password?: string } = {};
+    const errors: { email?: string; password?: string; displayName?: string } = {};
     if (!email.trim()) {
       errors.email = 'Email address is required';
     } else if (!email.includes('@')) {
@@ -35,6 +54,10 @@ export const LoginView: React.FC = () => {
       errors.password = 'Password must be at least 8 characters long';
     }
 
+    if (password.length > 128) errors.password = 'Password must not exceed 128 characters';
+    if (isSignUp && !displayName.trim()) errors.displayName = 'Display name is required';
+    if (isSignUp && displayName.trim().length > 64) errors.displayName = 'Display name must not exceed 64 characters';
+
     if (Object.keys(errors).length > 0) {
       setClientErrors(errors);
       return;
@@ -43,10 +66,17 @@ export const LoginView: React.FC = () => {
     setIsSubmitting(true);
 
     try {
-      await login(email, password);
-      navigate('/chat');
-    } catch {
-      // Error handled by AuthContext
+      if (isSignUp) {
+        await realApiClient.register(email.trim(), password, displayName.trim());
+        setIsSignUp(false);
+        setPassword('');
+        setNotice('Account created. Sign in with your new password to begin.');
+      } else {
+        await login(email.trim(), password);
+        navigate('/chat');
+      }
+    } catch (error) {
+      if (isSignUp) setRegistrationError(error instanceof Error ? error.message : 'Could not create account. Please try again.');
     } finally {
       setIsSubmitting(false);
     }
@@ -54,6 +84,7 @@ export const LoginView: React.FC = () => {
 
   return (
     <div
+      className="g-login-page"
       style={{
         display: 'flex',
         minHeight: '100vh',
@@ -64,7 +95,7 @@ export const LoginView: React.FC = () => {
       }}
     >
       <div
-        className="g-card"
+        className="g-card g-login-card"
         style={{
           width: '100%',
           maxWidth: '440px',
@@ -80,6 +111,7 @@ export const LoginView: React.FC = () => {
           <button
             type="button"
             onClick={toggleMode}
+            disabled={isSubmitting}
             style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: 0 }}
             title="Toggle between Real API and Mock Fixtures"
           >
@@ -91,10 +123,10 @@ export const LoginView: React.FC = () => {
 
         <div style={{ marginBottom: '24px' }}>
           <h1 style={{ fontSize: '20px', fontWeight: 700, color: 'var(--giga-text, #F8FAFC)', margin: '0 0 6px' }}>
-            Developer Workspace
+            {isSignUp ? 'Make room for your ideas.' : 'A little space for possibility.'}
           </h1>
           <p style={{ fontSize: '13px', color: 'var(--giga-text-secondary, #94A3B8)', margin: 0 }}>
-            Sign in to access AI Chat and Autonomous Coding Agent.
+            {isSignUp ? 'Create your account and start a conversation.' : 'Sign in to think, create, and build with Giga.'}
           </p>
         </div>
 
@@ -114,6 +146,9 @@ export const LoginView: React.FC = () => {
           </div>
         )}
 
+        {notice && <div style={{ marginBottom: 16 }}><Alert type="success" message={notice} /></div>}
+        {registrationError && <div style={{ marginBottom: 16 }}><Alert type="error" message={registrationError} onDismiss={() => setRegistrationError(null)} /></div>}
+        {isSignUp && mode === 'mock' && <div style={{ marginBottom: 16 }}><Alert type="info" message="Account creation uses the real API. Switch Mode to REAL above to continue." /></div>}
         {error && (
           <div style={{ marginBottom: '16px' }}>
             <Alert type="error" message={error} onDismiss={clearError} />
@@ -121,6 +156,7 @@ export const LoginView: React.FC = () => {
         )}
 
         <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+          {isSignUp && <Input id="displayName" label="Display name" value={displayName} onChange={event => setDisplayName(event.target.value)} autoComplete="nickname" maxLength={64} disabled={isSubmitting} error={clientErrors.displayName} placeholder="What should we call you?" />}
           <Input
             id="email"
             type="email"
@@ -141,18 +177,20 @@ export const LoginView: React.FC = () => {
             onChange={(e) => setPassword(e.target.value)}
             placeholder="••••••••••••"
             error={clientErrors.password}
-            autoComplete="current-password"
+            autoComplete={isSignUp ? 'new-password' : 'current-password'}
+            maxLength={128}
             disabled={isSubmitting}
           />
 
-          <Button type="submit" variant="primary" loading={isSubmitting} style={{ marginTop: '8px' }}>
-            Sign In to Workspace
+          <Button type="submit" variant="primary" disabled={isSignUp && mode !== 'real'} loading={isSubmitting} style={{ marginTop: '8px' }}>
+            {isSignUp ? 'Create account' : 'Sign In to Workspace'}
           </Button>
         </form>
+        <div className="g-auth-switch"><span>{isSignUp ? 'Already have an account?' : 'New to Giga?'}</span><button type="button" onClick={switchForm} disabled={isSubmitting}>{isSignUp ? 'Sign in' : 'Create account'}</button></div>
 
         <div style={{ marginTop: '28px', paddingTop: '16px', borderTop: '1px solid var(--giga-border, #1E293B)', textAlign: 'center' }}>
           <span style={{ fontSize: '12px', color: 'var(--giga-text-muted, #94A3B8)' }}>
-            GIGA AI Cloud • Design System v1.0 • Tráng A Thư
+            Your ideas, with room to grow.
           </span>
         </div>
       </div>

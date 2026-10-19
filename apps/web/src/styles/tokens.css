@@ -1,20 +1,22 @@
-/* GIGA AI Cloud — source of truth: ../tokens/design-tokens.json */
+/* Giga warm workspace palette. Keep both themes legible and semantic. */
 :root {
-  --giga-primary: #3B82F6; --giga-primary-hover: #2563EB; --giga-primary-subtle: #EFF6FF;
-  --giga-bg: #FAFAFB; --giga-surface: #FFFFFF; --giga-surface-muted: #F8FAFC;
-  --giga-text: #1F2937; --giga-text-secondary: #475569; --giga-text-muted: #94A3B8;
-  --giga-border: #E5E7EB; --giga-border-strong: #D1D5DB;
-  --giga-success: #16A34A; --giga-warning: #D97706; --giga-danger: #DC2626;
-  --giga-radius-sm: 4px; --giga-radius-md: 8px; --giga-radius-lg: 12px; --giga-radius-xl: 16px;
-  --giga-shadow-sm: 0 1px 2px rgba(0,0,0,.05); --giga-shadow-md: 0 4px 12px rgba(0,0,0,.08);
-  --giga-font-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
-  --giga-font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Consolas, monospace;
-  --giga-space-1: 4px; --giga-space-2: 8px; --giga-space-3: 12px; --giga-space-4: 16px;
-  --giga-space-5: 20px; --giga-space-6: 24px; --giga-space-8: 32px; --giga-space-10: 40px;
+  color-scheme: light;
+  --giga-primary:#986044;--giga-primary-hover:#7e4932;--giga-primary-subtle:#eee2d7;
+  --giga-bg:#faf9f6;--giga-surface:#fffefa;--giga-surface-muted:#f0eee7;
+  --giga-sidebar:#eeece5;--giga-text:#302e29;--giga-text-secondary:#6b675f;--giga-text-muted:#817b71;
+  --giga-border:#e5e1d8;--giga-border-strong:#cec7ba;
+  --giga-success:#42705b;--giga-warning:#98651e;--giga-danger:#b34339;
+  --giga-radius-sm:6px;--giga-radius-md:10px;--giga-radius-lg:16px;--giga-radius-xl:22px;
+  --giga-shadow-sm:0 1px 3px #302e2908;--giga-shadow-md:0 8px 32px #302e290a;
+  --giga-font-sans:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;
+  --giga-font-serif:Georgia,'Times New Roman',serif;
+  --giga-font-mono:ui-monospace,SFMono-Regular,Consolas,monospace;
+  --giga-space-1:4px;--giga-space-2:8px;--giga-space-3:12px;--giga-space-4:16px;--giga-space-5:20px;--giga-space-6:24px;--giga-space-8:32px;--giga-space-10:40px;
 }
 [data-theme="dark"] {
-  color-scheme: dark; --giga-bg: #0B1220; --giga-surface: #111C2D; --giga-surface-muted: #18263A;
-  --giga-text: #F8FAFC; --giga-text-secondary: #CBD5E1; --giga-text-muted: #94A3B8;
-  --giga-border: #334155; --giga-border-strong: #475569; --giga-primary-subtle: #172E55;
-  --giga-shadow-sm: 0 1px 2px rgba(0,0,0,.16); --giga-shadow-md: 0 4px 12px rgba(0,0,0,.22);
+  color-scheme:dark;--giga-primary:#ba896b;--giga-primary-hover:#cb9a7b;--giga-primary-subtle:#423328;
+  --giga-bg:#252420;--giga-surface:#302e29;--giga-surface-muted:#39362f;--giga-sidebar:#201f1c;
+  --giga-text:#eeeae1;--giga-text-secondary:#beb8ac;--giga-text-muted:#a39c90;--giga-border:#454138;--giga-border-strong:#625b4e;
+  --giga-success:#8ab89c;--giga-warning:#d6ad70;--giga-danger:#e08c80;
+  --giga-shadow-sm:0 1px 3px #0002;--giga-shadow-md:0 8px 32px #0002;
 }

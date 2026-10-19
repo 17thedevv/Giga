@@ -42,10 +42,10 @@ describe('Chat Stream Finalization Regression Tests', () => {
 
     // Wait for chat to load
     await waitFor(() => {
-      expect(screen.getByPlaceholderText(/Ask Giga anything/i)).toBeDefined();
+      expect(screen.getByPlaceholderText(/Message Giga/i)).toBeDefined();
     });
 
-    const input = screen.getByPlaceholderText(/Ask Giga anything/i) as HTMLTextAreaElement;
+    const input = screen.getByPlaceholderText(/Message Giga/i) as HTMLTextAreaElement;
     const form = input.closest('form')!;
 
     // Send a message
@@ -97,10 +97,10 @@ describe('Chat Stream Finalization Regression Tests', () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByPlaceholderText(/Ask Giga anything/i)).toBeDefined();
+      expect(screen.getByPlaceholderText(/Message Giga/i)).toBeDefined();
     });
 
-    const input = screen.getByPlaceholderText(/Ask Giga anything/i) as HTMLTextAreaElement;
+    const input = screen.getByPlaceholderText(/Message Giga/i) as HTMLTextAreaElement;
     const form = input.closest('form')!;
 
     fireEvent.change(input, { target: { value: 'Trigger stream error' } });
@@ -149,10 +149,10 @@ describe('Chat Stream Finalization Regression Tests', () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByPlaceholderText(/Ask Giga anything/i)).toBeDefined();
+      expect(screen.getByPlaceholderText(/Message Giga/i)).toBeDefined();
     });
 
-    const input = screen.getByPlaceholderText(/Ask Giga anything/i) as HTMLTextAreaElement;
+    const input = screen.getByPlaceholderText(/Message Giga/i) as HTMLTextAreaElement;
     const form = input.closest('form')!;
 
     fireEvent.change(input, { target: { value: 'Cancel midway' } });
