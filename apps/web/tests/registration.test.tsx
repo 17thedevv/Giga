@@ -47,4 +47,3 @@ describe('Real account creation',()=>{
     expect(screen.getByRole('button',{name:'Sign In to Workspace'})).toBeDefined();
   });
 });
-
