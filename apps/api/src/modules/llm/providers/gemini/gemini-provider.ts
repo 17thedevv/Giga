@@ -1,3 +1,4 @@
+import type { GeminiKeyPool } from '../../gemini-key-pool.js';
 import type { ProviderAdapter } from '../../adapter.js';
 import type { ProviderCredential } from '../../provider-credential.js';
 import { BYOKCredentialInvalidError, BYOKProviderError } from '../../errors.js';
@@ -94,7 +95,7 @@ async function* frames(reader: ReadableStreamDefaultReader<Uint8Array>, signal: 
 export class GeminiProvider implements ProviderAdapter {
   readonly providerId = 'gemini';
   readonly capabilities: ReadonlySet<Capability> = new Set(['text', 'streaming']);
-  constructor(private readonly transport: ProviderTransport = fetch, private readonly timeoutMs = 85000) {
+  constructor(private readonly transport: ProviderTransport = fetch, private readonly timeoutMs = 85000, private readonly platformPool?: GeminiKeyPool) {
     if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 85000) throw new Error('Invalid provider timeout configuration');
   }
 
@@ -151,7 +152,9 @@ export class GeminiProvider implements ProviderAdapter {
       if (req.providerId !== this.providerId || req.modelId !== CHAT_MODEL_ID || !Number.isInteger(req.maxOutputTokens) || req.maxOutputTokens < 1 || req.maxOutputTokens > 2048) throw failure();
       const system = req.messages.filter((m) => m.role === 'system');
       const thinkingConfig = this.mapReasoningEffort(req.reasoningEffort, req.modelId);
-      const pending = this.transport(GEMINI_CHAT_ENDPOINT, {
+      const send: ProviderTransport = credential.source === 'platform' && this.platformPool
+        ? (url, init) => this.platformPool!.request(this.transport, url, init) : this.transport;
+      const pending = send(GEMINI_CHAT_ENDPOINT, {
         method: 'POST', redirect: 'error', signal: controller.signal,
         headers: { ...credential.transportHeaders(), 'Content-Type': 'application/json', Accept: 'text/event-stream' },
         body: JSON.stringify({
