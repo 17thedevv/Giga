@@ -747,6 +747,94 @@ describe('Gemini BYOK Settings & Credential UX (17T-39)', () => {
         realSpy.mockRestore();
         getMeSpy.mockRestore();
       });
+
+      it('ignores delayed preference reconciliation from an older API mode when user switches modes during recovery', async () => {
+        const getMeSpy = vi.spyOn(realApiClient, 'getMe').mockResolvedValue({ user: MOCK_USER });
+        const realCredsSpy = vi.spyOn(realApiClient, 'getProviderCredentials').mockResolvedValue({
+          items: [
+            {
+              id: 'real_cred_byok_test',
+              provider: 'gemini',
+              displayHint: '••••REAL',
+              status: 'valid',
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+              lastValidatedAt: new Date().toISOString(),
+            },
+          ],
+        });
+
+        // Preference set rejects initially, simulating a dropped connection
+        const setPrefSpy = vi.spyOn(realApiClient, 'setChatCredentialPreference').mockRejectedValue(
+          new Error('Connection dropped during mode update')
+        );
+
+        let resolveDelayedRealPref: (val: any) => void;
+        const delayedRealPrefPromise = new Promise((resolve) => {
+          resolveDelayedRealPref = resolve;
+        });
+
+        let prefCallCount = 0;
+        const getPrefSpy = vi.spyOn(realApiClient, 'getChatCredentialPreference').mockImplementation(async () => {
+          prefCallCount++;
+          if (prefCallCount === 1) {
+            // Initial load returns platform mode
+            return { mode: 'platform', credentialId: null };
+          }
+          // Secondary recovery check returns delayed promise
+          return delayedRealPrefPromise as any;
+        });
+
+        renderWithProviders(
+          <>
+            <ModeSwitcher />
+            <SettingsView />
+          </>,
+          '/settings',
+          'real'
+        );
+
+        // 1. Initial Real mode loads with platform mode active and saved key
+        await waitFor(() => {
+          expect(screen.getByTestId('masked-credential-hint').textContent).toBe('••••REAL');
+        });
+        const byokRadio = screen.getByTestId('radio-mode-byok') as HTMLInputElement;
+        expect(byokRadio.checked).toBe(false);
+
+        // 2. Trigger mode change to BYOK in Real mode
+        fireEvent.click(byokRadio);
+
+        // setChatCredentialPreference rejects, triggering recovery getChatCredentialPreference
+        await waitFor(() => {
+          expect(getPrefSpy).toHaveBeenCalledTimes(2);
+        });
+
+        // 3. While delayed recovery is in-flight in Real mode, user switches to Mock mode
+        fireEvent.click(screen.getByTestId('switch-to-mock-btn'));
+        expect(screen.getByTestId('current-api-mode').textContent).toBe('mock');
+
+        // Mock mode completes loading
+        await waitFor(() => {
+          expect(screen.getByTestId('current-api-mode').textContent).toBe('mock');
+        });
+
+        // 4. Delayed Real mode recovery response now resolves with 'byok'
+        resolveDelayedRealPref!({
+          mode: 'byok',
+          credentialId: 'real_cred_byok_test',
+        });
+
+        // 5. Verify the delayed response did NOT contaminate Mock mode
+        await new Promise((r) => setTimeout(r, 60));
+
+        // Mock mode remains clean: no Real BYOK success banner
+        expect(screen.queryByText(/Switched to My Gemini Key \(BYOK\) for Chat\./i)).toBeNull();
+
+        realCredsSpy.mockRestore();
+        setPrefSpy.mockRestore();
+        getPrefSpy.mockRestore();
+        getMeSpy.mockRestore();
+      });
     });
 
     describe('P2 — Missing Initial Load Retry', () => {
@@ -787,6 +875,55 @@ describe('Gemini BYOK Settings & Credential UX (17T-39)', () => {
         expect(screen.getByTestId('settings-loading-state')).toBeDefined();
 
         // Success restores normal Settings UI
+        await waitFor(() => {
+          expect(screen.getByTestId('gemini-provider-card')).toBeDefined();
+        });
+        expect(screen.getByTestId('no-credential-state')).toBeDefined();
+        expect(screen.queryByTestId('settings-load-retry-btn')).toBeNull();
+
+        realSpy.mockRestore();
+        prefSpy.mockRestore();
+        getMeSpy.mockRestore();
+      });
+
+      it('dismissing initial-load error alert preserves visible Retry button and recovery state', async () => {
+        const getMeSpy = vi.spyOn(realApiClient, 'getMe').mockResolvedValue({ user: MOCK_USER });
+        let callCount = 0;
+        const realSpy = vi.spyOn(realApiClient, 'getProviderCredentials').mockImplementation(async () => {
+          callCount++;
+          if (callCount === 1) {
+            throw new ApiException(500, 'INTERNAL_SERVER_ERROR', 'Service temporarily down');
+          }
+          return { items: [] };
+        });
+        const prefSpy = vi.spyOn(realApiClient, 'getChatCredentialPreference').mockResolvedValue({
+          mode: 'platform',
+          credentialId: null,
+        });
+
+        renderWithProviders(<SettingsView />, '/settings', 'real');
+
+        // Wait for initial failure
+        await waitFor(() => {
+          expect(screen.getByTestId('settings-error-banner')).toBeDefined();
+        });
+        expect(screen.getByText('Service temporarily down')).toBeDefined();
+        expect(screen.getByTestId('settings-load-retry-btn')).toBeDefined();
+
+        // Dismiss the error banner alert
+        const dismissBtn = screen.getByRole('button', { name: 'Dismiss alert' });
+        fireEvent.click(dismissBtn);
+
+        // Error banner is dismissed from DOM
+        expect(screen.queryByTestId('settings-error-banner')).toBeNull();
+
+        // Crucial requirement: Retry button and initial error container remain persistent!
+        expect(screen.getByTestId('settings-initial-error-state')).toBeDefined();
+        expect(screen.getByTestId('settings-load-retry-btn')).toBeDefined();
+
+        // Clicking the persistent Retry button successfully recovers
+        fireEvent.click(screen.getByTestId('settings-load-retry-btn'));
+
         await waitFor(() => {
           expect(screen.getByTestId('gemini-provider-card')).toBeDefined();
         });
