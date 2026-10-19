@@ -1,10 +1,10 @@
 # Gemini BYOK Settings & Credential UX — Local Evidence
 
-Issue: [17T-39](https://linear.app/17thedev/issue/17T-39/implement-gemini-byok-settings-and-credential-ux).  
-Backend dependency: [17T-37](https://linear.app/17thedev/issue/17T-37/implement-backend-credential-storage-encryption-and-validation-apis) (merged in `main`, ADR-006).  
-PR: `feat(web): add Gemini BYOK settings UI`.  
-Branch: `feat/17t-39-byok-settings-ui`.  
-Date: 2026-10-19 (Asia/Saigon).  
+Issue: [17T-39](https://linear.app/17thedev/issue/17T-39/implement-gemini-byok-settings-and-credential-ux).
+Backend dependency: [17T-37](https://linear.app/17thedev/issue/17T-37/implement-backend-credential-storage-encryption-and-validation-apis) (merged in `main`, ADR-006).
+PR: `feat(web): add Gemini BYOK settings UI` ([PR #35](https://github.com/17thedevv/Giga/pull/35)).
+Branch: `feat/17t-39-byok-settings-ui`.
+Date: 2026-10-19 (Asia/Saigon).
 
 ---
 
@@ -24,46 +24,51 @@ Web frontend implementation for Bring Your Own Key (BYOK) credential management 
   - `PUT /api/v1/me/chat-credential-preference`: Updates mode to `platform` or `byok`.
 - **Zero Silent Fallback**: When `mode === 'byok'` and no usable credential exists (e.g. key deleted or missing), the UI displays a prominent `byok-configuration-error` banner notifying the user that BYOK is active without an active key. The system never silently falls back to the platform key when the user explicitly chose BYOK.
 - **Transient Failure Resilience**: Network errors and transient upstream failures (429 rate limit, 503 service unavailable) during validation do not overwrite or invalidate previously valid credentials.
-- **Dual Runtime Support**: Fully functional under both `mock` (demo mode with comprehensive mock adapter simulation) and `real` backend environments.
+- **Dual Runtime Support & Asynchronous Fencing**: Fully functional under both `mock` (demo mode with comprehensive mock adapter simulation) and `real` backend environments, with strict request fencing that isolates mode-specific metadata.
 
 ---
 
-## 2. Executed Validation Summary
+## 2. Review Follow-Up: Addressing PR #35 Review Findings
+
+Reviewed head: `a1e92cd`. Addressed review findings across components and test coverage:
+
+1. **P1 — Contradictory BYOK Fallback Messaging (`GeminiProviderCard.tsx`)**:
+   - Fixed the empty-state and details-row status messaging to cleanly distinguish:
+     * **Platform mode without credential**: `"Platform key selected. No custom Gemini API key configured."`
+     * **BYOK mode without credential**: `"My Gemini Key (BYOK) is selected, but no key is configured. Chat is unavailable until configuration is fixed."`
+     * **BYOK mode with invalid credential**: Dedicated `byok-invalid-notice` (`"Selected key is unusable. Chat is unavailable with no automatic fallback."`) and configuration error alert (`"Selected key is unusable; there is no automatic fallback to the platform key."`).
+   - Under no circumstance do missing or invalid BYOK states claim that platform mode is active or that Giga is using the platform key.
+
+2. **P1 — Stale Settings State Across Real/Mock Switching (`SettingsView.tsx`)**:
+   - Implemented strict asynchronous request fencing using incrementing `requestIdRef` and `activeModeRef`.
+   - Switching API mode immediately invalidates pending asynchronous loads and clears source-specific credential metadata.
+   - Stale or delayed responses from previous modes or unmounted components are discarded and ignored.
+   - On fetch failure in a newly selected mode, prior mode's metadata is never shown as verified current state.
+
+3. **P2 — Initial Load Failure & Visible Retry (`SettingsView.tsx`)**:
+   - When initial settings loading fails (HTTP 500/503), the view displays an initial error state with a prominent visible Retry button (`data-testid="settings-load-retry-btn"`).
+   - Clicking Retry triggers `loadSettings()`, showing the loading indicator and restoring the normal Settings UI upon authoritative success.
+
+4. **Additional Consistency Checks (Partial Success in Mutations)**:
+   - Handled partial success scenarios (saving succeeds but preference refresh fails, deleting succeeds but metadata refresh fails, mode change request response lost):
+   - The frontend reconciles authoritative backend state rather than reporting false failures or permitting repetitive destructive mutations.
+
+---
+
+## 3. Executed Validation Summary
 
 Environment: Windows, Node v24.12.0, npm 11.6.2. Base: `e86edd9` from `origin/main`.
 
 | Verification Check | Target | Result | Details |
 | --- | --- | --- | --- |
-| Unit & Integration Tests | `apps/web/tests/byok-settings.test.tsx` | **PASS (17/17)** | 17 focused BYOK settings & credential scenarios |
-| Mock Adapter Tests | `apps/web/tests/mock-adapter.test.ts` | **PASS (8/8)** | Credential CRUD, validation simulation & transient hooks |
-| Full Web Test Suite | `npm test --prefix apps/web` | **PASS (164/164)** | 12 test files passed, 0 failures, exit code 0 |
+| Unit & Integration Tests | `apps/web/tests/byok-settings.test.tsx` | **PASS (25/25)** | 17 base scenarios + 8 review regression tests |
+| Mock Adapter Tests | `apps/web/tests/mock-adapter.test.ts` | **PASS (21/21)** | Full adapter test suite including BYOK and credentials |
+| Full Web Test Suite | `npm test --prefix apps/web` | **PASS (172/172)** | 12 test files passed, 0 failures, exit code 0 |
 | Frontend Typecheck | `npm run typecheck --prefix apps/web` | **PASS (0 errors)** | Strict TypeScript validation |
-| Production Build | `npm run build --prefix apps/web` | **PASS** | Vite production bundle built in 861ms |
+| Production Build | `npm run build --prefix apps/web` | **PASS** | Vite production bundle built in 800ms |
 | Git Workflow Verification | `node --test .agents/scripts/validate-git-workflow.test.mjs` | **PASS (6/6)** | Verified branch name & conventional commit compliance |
 | Skill System Validation | `node .agents/scripts/validate-skills.mjs` | **PASS (8/8)** | All repo skills valid |
 | Git Whitespace / Diff Check | `git diff --check` | **PASS** | Clean diff, no trailing whitespace or formatting flaws |
-
----
-
-## 3. Detailed Test Matrix (`byok-settings.test.tsx`)
-
-1. **Empty State & Navigation**: Renders Settings view with Gemini Provider Card in empty state (`No key added`) and Platform key selected by default.
-2. **Settings Navigation Link**: Verifies desktop navigation rail and mobile drawer contain working Settings link with `SettingsIcon`.
-3. **Save Credential Modal**: Opens modal, validates input length (16–512 ASCII characters), disables submit on invalid input, and toggles password visibility.
-4. **Successful Key Save**: Submits valid key, calls `POST /api/v1/me/provider-credentials`, renders masked hint (`••••1234`), and displays `'valid'` badge.
-5. **Immediate Plaintext Wipeout**: Ensures plaintext state is purged immediately on submit and modal close.
-6. **Switch to BYOK Mode**: Allows switching to `My Gemini Key` when valid key exists, persisting preference via `PUT /api/v1/me/chat-credential-preference`.
-7. **Switch to Platform Mode**: Allows switching back to `Giga Platform Key` at any time.
-8. **Replace Existing Key**: Opens modal with existing key indicator, allows entering new key, and updates masked hint atomically.
-9. **Validate Credential Action**: Calls `POST /api/v1/me/provider-credentials/:id/validate` with `{}` and updates status badge and last validated timestamp.
-10. **Validation Failure Handling**: Renders `'invalid'` status badge and error feedback when backend returns validation failure.
-11. **Transient Validation Error (429/503)**: Preserves previous valid status badge and displays transient rate-limit / network notice without marking key invalid.
-12. **Delete Credential Confirmation**: Opens delete modal, requires confirmation, calls `DELETE /api/v1/me/provider-credentials/:id`, and resets card to empty state.
-13. **Delete Active BYOK Key Warning**: Displays explicit warning in delete modal when BYOK mode is currently active.
-14. **BYOK Configuration Error Banner**: Displays prominent error banner when BYOK mode is selected but no credential is configured (no silent fallback).
-15. **Backend Error Recovery**: Renders error alert with retry button when initial credential fetch fails; clicking retry recovers authoritative state.
-16. **Responsive Layout**: Renders clean responsive layout on mobile viewport (390px) with accessible touch targets.
-17. **Mock vs Real Isolation**: Exercises mock adapter without bleeding into real client requests or state.
 
 ---
 
@@ -104,5 +109,5 @@ All 7 browser evidence screenshots captured using headless Edge CDP automation a
 ## 5. Review Readiness
 
 - **Status**: **READY FOR INDEPENDENT REVIEW**.
-- **Pull Request**: Draft PR targeting `main`.
+- **Pull Request**: Draft PR #35 targeting `main`.
 - **Reviewer**: Assigned for peer review.

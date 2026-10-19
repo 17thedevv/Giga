@@ -161,8 +161,8 @@ export const GeminiProviderCard: React.FC<GeminiProviderCardProps> = ({
             title="Chat Configuration Error"
             message={
               !hasCredential || !preference.credentialId
-                ? 'My Gemini Key (BYOK) is active, but no credential is saved or available. Chat generations will fail until you add a valid key or switch to Giga Platform Key.'
-                : 'My Gemini Key (BYOK) is active, but your saved key was rejected by Google Gemini as invalid. Please replace or re-validate your key, or switch to Giga Platform Key.'
+                ? 'My Gemini Key (BYOK) is active, but no credential is saved or available. Chat is unavailable until configuration is fixed. Giga will not automatically fall back to the platform key.'
+                : 'My Gemini Key (BYOK) is active, but your saved key was rejected by Google Gemini as invalid. Selected key is unusable; there is no automatic fallback to the platform key. Please replace or re-validate your key, or switch to Giga Platform Key.'
             }
           />
         </div>
@@ -317,6 +317,14 @@ export const GeminiProviderCard: React.FC<GeminiProviderCardProps> = ({
             <div style={{ fontSize: '11px', color: 'var(--giga-text-secondary, #94A3B8)' }} data-testid="last-validated-time">
               Last validated: {formatTimestamp(credential.lastValidatedAt)}
             </div>
+            {activeMode === 'byok' && credential.status === 'invalid' && (
+              <div
+                style={{ fontSize: '12px', color: 'var(--giga-danger, #EF4444)', marginTop: '2px' }}
+                data-testid="byok-invalid-notice"
+              >
+                Selected key is unusable. Chat is unavailable with no automatic fallback.
+              </div>
+            )}
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -358,9 +366,22 @@ export const GeminiProviderCard: React.FC<GeminiProviderCardProps> = ({
           data-testid="no-credential-state"
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <ShieldIcon size={16} style={{ color: 'var(--giga-text-secondary, #94A3B8)' }} />
-            <span style={{ fontSize: '13px', color: 'var(--giga-text-secondary, #94A3B8)' }}>
-              No custom Gemini API key configured. Giga is using the platform key.
+            <ShieldIcon
+              size={16}
+              style={{
+                color: activeMode === 'byok' ? 'var(--giga-warning, #F59E0B)' : 'var(--giga-text-secondary, #94A3B8)',
+              }}
+            />
+            <span
+              style={{
+                fontSize: '13px',
+                color: activeMode === 'byok' ? 'var(--giga-warning, #F59E0B)' : 'var(--giga-text-secondary, #94A3B8)',
+              }}
+              data-testid="credential-status-description"
+            >
+              {activeMode === 'byok'
+                ? 'My Gemini Key (BYOK) is selected, but no key is configured. Chat is unavailable until configuration is fixed.'
+                : 'Platform key selected. No custom Gemini API key configured.'}
             </span>
           </div>
           <Button variant="primary" size="sm" onClick={onOpenSaveModal} icon={<KeyIcon size={14} />} data-testid="empty-add-key-btn">
