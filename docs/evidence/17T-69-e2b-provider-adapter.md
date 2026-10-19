@@ -280,3 +280,23 @@ The E2B Cloud Sandbox provider client is **strictly disabled by default**:
 ### Recommendation
 - **E2B Provider Adapter Code:** **GO** (Ready for peer review and merge behind disabled feature gate).
 - **Live Cloud Sandbox Execution:** **NO-GO** (Must remain disabled by default until ADR-003 adoption, network egress isolation infrastructure, and billing gates are approved).
+
+---
+
+## 7. Delivery Metadata & Next Steps
+
+- **Branch:** `feat/17t-69-e2b-provider-adapter`
+- **Base Branch:** `main` (commit `e86edd9f705ca49fea66a2cb6bbfe42e668d751e`)
+- **Implementation Commit SHA:** `2fbf70534051cb1ffc840eeb388114a34a52ebd8`
+- **Draft PR URL:** [https://github.com/17thedevv/Giga/pull/new/feat/17t-69-e2b-provider-adapter](https://github.com/17thedevv/Giga/pull/new/feat/17t-69-e2b-provider-adapter)
+- **Tracking Linear Issue:** [17T-69](https://linear.app/17thedev/issue/17T-69/implement-e2b-cloud-sandbox-provider-client-behind-disabled-feature)
+- **Peer Reviewer:** Tráng A Thư (Frontend / UX)
+- **Independent Reviewer:** ChatGPT
+
+### Logical Next Backend Tasks
+1. **Durable Background Execution Worker / Queue Polling:**
+   - Bridge run admission to durable execution: implement a background worker that polls/claims queued runs from PostgreSQL via `AgentRepository.claimRun()` with lease heartbeat, and orchestrates execution steps using `AgentOrchestrator`.
+2. **Workspace Run Cancellation Endpoint (`POST /api/v1/agent/runs/:id/cancel`):**
+   - Implement durable user-initiated cancellation route that updates run state to `cancel_requested` and signals active worker/adapter sessions to abort gracefully.
+3. **Artifact Storage & Checksummed ZIP Export Engine:**
+   - Implement durable storage adapter for immutable snapshot ZIP files with SHA-256 checksums, enabling workspace exports without requiring GitHub repository integration.
