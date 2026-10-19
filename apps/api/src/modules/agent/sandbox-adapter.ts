@@ -1038,3 +1038,17 @@ export class SimulatedCloudSandboxProviderClient implements CloudSandboxProvider
     return this.sandboxes.get(sandboxId);
   }
 }
+
+export {
+  E2bCloudSandboxProviderClient,
+  E2bProviderError,
+  MockE2bTransport,
+  validateE2bConfig,
+  loadE2bConfigFromEnv,
+  type E2bProviderConfig,
+  type E2bProviderErrorCode,
+  type E2bTransport,
+  type E2bSandboxHandle,
+  type E2bEntryInfo,
+  type E2bCreateOptions,
+} from './e2b-provider.js';
