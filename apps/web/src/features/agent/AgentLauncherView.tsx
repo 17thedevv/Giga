@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter } from '../../app/router.js';
 import { useApiMode } from '../../app/context/ApiModeContext.js';
 import { realApiClient } from '../../lib/api/client.js';
@@ -49,39 +49,59 @@ export const AgentLauncherView: React.FC = () => {
   const [realExecutionAvailable, setRealExecutionAvailable] = useState<boolean>(false);
   const [isLoadingCapabilities, setIsLoadingCapabilities] = useState<boolean>(false);
 
-  // Load Workspaces and Runs
-  const loadData = useCallback(async () => {
+  // Request Fencing Ref for Real/Mock Isolation
+  const activeRequestIdRef = useRef<number>(0);
+
+  // Load Workspaces and Runs with generation fencing
+  const loadData = useCallback(() => {
+    const requestId = ++activeRequestIdRef.current;
+
     if (apiMode === 'real') {
-      setIsLoadingCapabilities(true);
-      try {
-        const caps = await realApiClient.getAgentCapabilities();
-        const available = isAgentCapabilityAvailable(caps, 'runExecution');
-        setRealExecutionAvailable(available);
-      } catch (err) {
-        setRealExecutionAvailable(false);
-      } finally {
-        setIsLoadingCapabilities(false);
-      }
-      // Real mode does not fall back to mock data
+      // 1. Immediately clear Mock/Demo data upon entering Real mode (before awaiting)
       setWorkspaces([]);
       setRuns([]);
       setSelectedWorkspaceId('');
-    } else {
       setRealExecutionAvailable(false);
+      setIsLoadingCapabilities(true);
+
+      realApiClient
+        .getAgentCapabilities()
+        .then((caps) => {
+          if (activeRequestIdRef.current !== requestId) return;
+          const available = isAgentCapabilityAvailable(caps, 'runExecution');
+          setRealExecutionAvailable(available);
+        })
+        .catch(() => {
+          if (activeRequestIdRef.current !== requestId) return;
+          setRealExecutionAvailable(false);
+        })
+        .finally(() => {
+          if (activeRequestIdRef.current !== requestId) return;
+          setIsLoadingCapabilities(false);
+        });
+    } else {
+      // Mock / Demo mode
+      setRealExecutionAvailable(false);
+      setIsLoadingCapabilities(false);
       const wsList = workspaceFixtureStore.getWorkspaces();
       setWorkspaces(wsList);
       const targetWsId = params?.workspaceId || (typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('workspace') : null);
       if (targetWsId && wsList.some((w) => w.id === targetWsId)) {
         setSelectedWorkspaceId(targetWsId);
-      } else if (wsList.length > 0 && !selectedWorkspaceId) {
-        setSelectedWorkspaceId(wsList[0].id);
+      } else {
+        // P2: Default new-task flow clearly starts from a new blank workspace ('')
+        setSelectedWorkspaceId('');
       }
       setRuns(workspaceFixtureStore.getRuns());
     }
-  }, [apiMode, params?.workspaceId, selectedWorkspaceId]);
+  }, [apiMode, params?.workspaceId]);
 
   useEffect(() => {
     loadData();
+    return () => {
+      // Invalidate pending in-flight requests on unmount or deps change
+      activeRequestIdRef.current++;
+    };
   }, [loadData]);
 
   // Handle Workspace Source Switching (Blank vs Upload vs Import)
@@ -134,7 +154,12 @@ export const AgentLauncherView: React.FC = () => {
     setErrorBanner(null);
 
     try {
-      const activeWsId = selectedWorkspaceId || workspaces[0]?.id || 'ws-blank';
+      let activeWsId = selectedWorkspaceId;
+      if (!activeWsId) {
+        // Starts from a fresh blank workspace!
+        const freshWs = workspaceFixtureStore.createWorkspace();
+        activeWsId = freshWs.id;
+      }
       const newRun = workspaceFixtureStore.createDemoRun({
         workspaceId: activeWsId,
         task: trimmedTask,
@@ -158,7 +183,7 @@ export const AgentLauncherView: React.FC = () => {
     setNewWsName('');
   };
 
-  const selectedWorkspace = workspaces.find((w) => w.id === selectedWorkspaceId) || workspaces[0];
+  const selectedWorkspace = workspaces.find((w) => w.id === selectedWorkspaceId) || null;
 
   return (
     <div
@@ -226,7 +251,7 @@ export const AgentLauncherView: React.FC = () => {
               message={
                 isLoadingCapabilities
                   ? 'Checking Real Mode agent capabilities...'
-                  : 'Backend Agent execution is currently unavailable in Real Mode (control-plane foundation implemented; Cloud sandbox execution pending under Linear 17T-48). Run launching is disabled. Switch to Demo Mode (Mock) in the header to interact with the workspace-first agent experience.'
+                  : 'Backend Agent execution is currently unavailable in Real Mode (Frontend control-plane integration is tracked under Linear 17T-48; Cloud sandbox execution runtime requires separate backend infrastructure readiness). Run launching is disabled. Switch to Demo Mode (Mock) in the header to interact with the workspace-first agent experience.'
               }
             />
           </div>
@@ -271,7 +296,7 @@ export const AgentLauncherView: React.FC = () => {
               </label>
               {workspaces.length > 0 && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <span style={{ fontSize: '12px', color: 'var(--giga-text-secondary, #94A3B8)' }}>Active:</span>
+                  <span style={{ fontSize: '12px', color: 'var(--giga-text-secondary, #94A3B8)' }}>Target:</span>
                   <select
                     value={selectedWorkspaceId}
                     onChange={(e) => setSelectedWorkspaceId(e.target.value)}
@@ -285,6 +310,7 @@ export const AgentLauncherView: React.FC = () => {
                     }}
                     data-testid="active-workspace-select"
                   >
+                    <option value="">New Blank Workspace (Default)</option>
                     {workspaces.map((ws) => (
                       <option key={ws.id} value={ws.id}>
                         {ws.name}
@@ -593,7 +619,7 @@ export const AgentLauncherView: React.FC = () => {
           {/* Submit Action */}
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '12px', marginTop: '6px' }}>
             <span style={{ fontSize: '12px', color: 'var(--giga-text-muted, #94A3B8)' }}>
-              Workspace: <strong>{selectedWorkspace?.name || 'Blank Workspace'}</strong>
+              Workspace Target: <strong style={{ color: 'var(--giga-text, #F8FAFC)' }} data-testid="target-workspace-label">{selectedWorkspace ? `${selectedWorkspace.name} (Existing)` : 'New Blank Workspace'}</strong>
             </span>
 
             <Button
@@ -634,7 +660,7 @@ export const AgentLauncherView: React.FC = () => {
               return (
                 <div
                   key={ws.id}
-                  onClick={() => setSelectedWorkspaceId(ws.id)}
+                  onClick={() => setSelectedWorkspaceId(isSelected ? '' : ws.id)}
                   style={{
                     backgroundColor: isSelected ? 'rgba(59, 130, 246, 0.08)' : 'var(--giga-surface, #111C2D)',
                     border: `1px solid ${isSelected ? 'var(--giga-primary, #3B82F6)' : 'var(--giga-border, #1E293B)'}`,
@@ -654,11 +680,12 @@ export const AgentLauncherView: React.FC = () => {
                         fontSize: '11px',
                         padding: '2px 6px',
                         borderRadius: '4px',
-                        backgroundColor: 'var(--giga-surface-muted, #18263A)',
-                        color: 'var(--giga-text-secondary, #94A3B8)',
+                        backgroundColor: isSelected ? 'var(--giga-primary, #3B82F6)' : 'var(--giga-surface-muted, #18263A)',
+                        color: isSelected ? '#FFFFFF' : 'var(--giga-text-secondary, #94A3B8)',
+                        fontWeight: isSelected ? 700 : 500,
                       }}
                     >
-                      rev {ws.revision}
+                      {isSelected ? 'ACTIVE' : `rev ${ws.revision}`}
                     </span>
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '12px', color: 'var(--giga-text-secondary, #94A3B8)' }}>

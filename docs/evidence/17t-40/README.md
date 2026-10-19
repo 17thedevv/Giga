@@ -31,17 +31,23 @@ Web frontend redesign aligning the GigaAgent user experience with Giga's workspa
    - File edits and creations execute entirely within the isolated cloud workspace sandbox.
    - Expandable syntax-highlighted diffs (`file-diff-viewer`) display additions and deletions per file directly in the web UI.
 
-5. **Human Approval Gate (Invariant INV-07)**:
+5. **Human Approval Gate (Invariant INV-07) & Real Mode Capability Gating**:
    - Ordinary sandbox operations (file edits, running test suites, internal builds) execute automatically within container boundaries without requiring approval.
    - The sensitive human approval card renders **only** when an out-of-sandbox side effect is requested (`awaiting_approval` status), clearly detailing the external action, risk level, and parameters.
    - Simulated approval transitions state to `applying` before `completed`, strictly preserving lifecycle invariants.
+   - In Real API Mode, Cancel and External Approval action controls are dynamically disabled when public API capabilities (`cancellation`, `externalApproval`) are not operational.
 
-6. **Real Mode Truthfulness & Zero Silent Fallback**:
+6. **Real Mode Truthfulness, Request Fencing & Zero Silent Fallback**:
    - In Real API Mode (`apiMode === 'real'`), the launcher checks capability discovery via `getAgentCapabilities()`.
-   - Because Cloud sandbox execution is pending under Linear 17T-48, the launcher displays a clear warning banner (`real-mode-runtime-warning`), disables the launch button (`Execution Unavailable (Real Mode)`), and **never fabricates mock workspaces or runs**.
-   - In `AgentRunView`, real runs reflect backend admission status and error details (`RUNTIME_UNAVAILABLE`) with empty file lists and zero fake artifacts.
+   - Mock workspaces, runs, and selections are immediately cleared synchronously upon switching to Real mode. Generation fencing (`activeRequestIdRef`) ensures late responses from prior mode switches or unmounted components never leak or overwrite active state.
+   - Accurately distinguishes frontend control-plane integration (Linear 17T-48) from backend Cloud runtime readiness. When runtime is unavailable, the launcher displays a clear warning banner (`real-mode-runtime-warning`), disables the launch button (`Execution Unavailable (Real Mode)`), and **never fabricates mock workspaces or runs**.
+   - In `AgentRunView`, request generation fencing (`activeRunRequestIdRef`) prevents late responses from earlier runs or modes from overwriting current state. Real runs reflect backend admission status and error details (`RUNTIME_UNAVAILABLE`) with empty file lists and zero fake artifacts.
 
-7. **Demo Simulation Transparency**:
+7. **Default Blank Workspace & Fixture Isolation**:
+   - The default new-task flow clearly targets a fresh blank workspace (`selectedWorkspaceId = ''`, labeled `New Blank Workspace (Default)` in target selector and composer).
+   - Launching with blank workspace creates a brand new workspace without mutating or attaching to existing fixtures (`ws-react-task-manager`, `ws-csv-analytics`, `ws-doc-site`). Existing workspace cards allow clear toggling of target selection.
+
+8. **Demo Simulation Transparency**:
    - In Demo Mode (`?demo=1`), simulated sandbox execution, verification, and artifact metadata are prominently labeled (`DEMO SIMULATION`, `SIMULATED SANDBOX FILES`, `SIMULATED EVIDENCE`, `DEMO LABELED`).
    - Artifact downloads are disabled with explicit notice that downloads are not supported or advertised in Demo Mode.
 
@@ -51,16 +57,16 @@ Web frontend redesign aligning the GigaAgent user experience with Giga's workspa
 
 ### Frontend Test Results
 - **Suite**: `vitest run`
-- **Results**: **196 / 196 tests passing** across 13 test files.
-- **Dedicated Test File**: `apps/web/tests/agent-workspace-ux.test.tsx` (20 scenarios covering Blank Workspace defaults, prompt validation, gated sources, mode toggling, runtime boundaries, Golden Flow execution, Ask/Plan modes, failed runs, cancellation, INV-07 approval gates, Real mode truthfulness, and subpath routing).
+- **Results**: **205 / 205 tests passing** across 13 test files (zero failures, zero regressions).
+- **Dedicated Test File**: `apps/web/tests/agent-workspace-ux.test.tsx` (29 scenarios covering Blank Workspace defaults, prompt validation, gated sources, mode toggling, runtime boundaries, Golden Flow execution, Ask/Plan modes, failed runs, cancellation, INV-07 approval gates, Real mode truthfulness, subpath routing, and PR #36 review finding regressions).
 
 ### Compiler & Production Build
 - **Typecheck**: `npm run typecheck --prefix apps/web` (0 errors, clean TypeScript emit).
-- **Production Build**: `npm run build --prefix apps/web` (Clean production bundle built in 1.49s).
+- **Production Build**: `npm run build --prefix apps/web` (Clean production bundle built with Vite).
 
 ### Repository Workflow & Skill Validation
 - **Skills Validation**: `.agents/scripts/validate-skills.mjs` (PASSED).
-- **Git Workflow Validation**: `.agents/scripts/validate-git-workflow.mjs` (Branch, PR Title, Commit Header valid).
+- **Git Workflow Validation**: `node --test .agents/scripts/validate-git-workflow.test.mjs` (PASSED: 6/6 tests).
 
 ---
 

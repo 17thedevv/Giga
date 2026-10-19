@@ -4,10 +4,10 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { AgentLauncherView } from '../src/features/agent/AgentLauncherView.js';
 import { AgentRunView } from '../src/features/agent/AgentRunView.js';
 import { AppRoutes } from '../src/app/App.js';
-import { ApiModeProvider } from '../src/app/context/ApiModeContext.js';
+import { ApiModeProvider, useApiMode } from '../src/app/context/ApiModeContext.js';
 import { ThemeProvider } from '../src/app/context/ThemeContext.js';
 import { AuthProvider } from '../src/app/context/AuthContext.js';
-import { RouterProvider } from '../src/app/router.js';
+import { RouterProvider, useRouter } from '../src/app/router.js';
 import { workspaceFixtureStore } from '../src/features/agent/workspace-fixtures.js';
 import { mockDataAdapter, MOCK_USER } from '../src/lib/api/mock-adapter.js';
 import { realApiClient } from '../src/lib/api/client.js';
@@ -584,6 +584,398 @@ describe('Workspace-First GigaAgent UX (17T-40)', () => {
       await waitFor(() => {
         expect(screen.getByTestId('agent-run-view')).toBeDefined();
       });
+    });
+  });
+
+  describe('PR #36 Review Findings Regressions', () => {
+    function ModeSwitcher() {
+      const { mode, setMode } = useApiMode();
+      return (
+        <div>
+          <span data-testid="current-api-mode">{mode}</span>
+          <button data-testid="switch-to-real-btn" onClick={() => setMode('real')}>
+            Switch to Real
+          </button>
+          <button data-testid="switch-to-mock-btn" onClick={() => setMode('mock')}>
+            Switch to Mock
+          </button>
+        </div>
+      );
+    }
+
+    function RouteSwitcher() {
+      const { navigate } = useRouter();
+      return (
+        <div>
+          <button data-testid="nav-to-run-1" onClick={() => navigate('/agent/runs/real-run-1')}>
+            Run 1
+          </button>
+          <button data-testid="nav-to-run-2" onClick={() => navigate('/agent/runs/real-run-2')}>
+            Run 2
+          </button>
+        </div>
+      );
+    }
+
+    function createDeferred<T>() {
+      let resolve!: (value: T | PromiseLike<T>) => void;
+      let reject!: (reason?: any) => void;
+      const promise = new Promise<T>((res, rej) => {
+        resolve = res;
+        reject = rej;
+      });
+      return { promise, resolve, reject };
+    }
+
+    const defaultUnavailableCaps = {
+      schemaVersion: 1 as const,
+      capabilities: {
+        workspaceManagement: { available: true as const },
+        runAdmission: { available: true as const },
+        runHistory: { available: true as const },
+        runExecution: { available: false as const, reason: 'runtime_unavailable' as const },
+        ask: { available: true as const },
+        plan: { available: true as const },
+        execute: { available: false as const, reason: 'runtime_unavailable' as const },
+        durableMessages: { available: true as const },
+        followUp: { available: false as const, reason: 'runtime_unavailable' as const },
+        eventReplay: { available: false as const, reason: 'runtime_unavailable' as const },
+        cancellation: { available: false as const, reason: 'not_implemented' as const },
+        sandboxFiles: { available: false as const, reason: 'runtime_unavailable' as const },
+        artifacts: { available: false as const, reason: 'runtime_unavailable' as const },
+        artifactDownload: { available: false as const, reason: 'runtime_unavailable' as const },
+        externalApproval: { available: false as const, reason: 'not_implemented' as const },
+        cloudRuntime: { available: false as const, reason: 'runtime_unavailable' as const },
+      },
+    };
+
+    it('P1 Launcher: switching Mock -> Real clears mock workspaces immediately before capability request resolves', async () => {
+      const deferredCaps = createDeferred<any>();
+      vi.spyOn(realApiClient, 'getAgentCapabilities').mockImplementation(() => deferredCaps.promise);
+
+      renderWithProviders(
+        <>
+          <ModeSwitcher />
+          <AgentLauncherView />
+        </>,
+        '/agent',
+        'mock'
+      );
+
+      // Verify Mock workspaces are initially present
+      await waitFor(() => {
+        expect(screen.getByRole('option', { name: 'React Task Manager' })).toBeDefined();
+      });
+      expect(screen.getByTestId('active-workspace-select')).toBeDefined();
+
+      // Switch to Real mode
+      fireEvent.click(screen.getByTestId('switch-to-real-btn'));
+      expect(screen.getByTestId('current-api-mode').textContent).toBe('real');
+
+      // Assert mock workspaces are immediately cleared WITHOUT waiting for deferredCaps to resolve
+      expect(screen.queryByRole('option', { name: 'React Task Manager' })).toBeNull();
+      expect(screen.queryByTestId('active-workspace-select')).toBeNull();
+
+      // Now resolve deferredCaps
+      deferredCaps.resolve(defaultUnavailableCaps);
+
+      await waitFor(() => {
+        expect(screen.getByTestId('real-mode-runtime-warning')).toBeDefined();
+      });
+      // Mock data was never leaked back
+      expect(screen.queryByRole('option', { name: 'React Task Manager' })).toBeNull();
+      expect(screen.queryByTestId('active-workspace-select')).toBeNull();
+    });
+
+    it('P1 Launcher: Real -> Mock before old Real request resolves prevents late Real response from clearing newly loaded Mock state', async () => {
+      const deferredCaps1 = createDeferred<any>();
+      vi.spyOn(realApiClient, 'getAgentCapabilities').mockImplementation(async () => deferredCaps1.promise);
+
+      renderWithProviders(
+        <>
+          <ModeSwitcher />
+          <AgentLauncherView />
+        </>,
+        '/agent',
+        'real'
+      );
+
+      // In Real mode, initial capability request is pending
+      expect(screen.getByTestId('current-api-mode').textContent).toBe('real');
+      expect(screen.queryByRole('option', { name: 'React Task Manager' })).toBeNull();
+      expect(screen.queryByTestId('active-workspace-select')).toBeNull();
+
+      // Switch to Mock mode before deferredCaps1 resolves
+      fireEvent.click(screen.getByTestId('switch-to-mock-btn'));
+      expect(screen.getByTestId('current-api-mode').textContent).toBe('mock');
+
+      // Mock mode loads fixture workspaces
+      await waitFor(() => {
+        expect(screen.getByRole('option', { name: 'React Task Manager' })).toBeDefined();
+      });
+
+      // Now late Real capability request resolves
+      deferredCaps1.resolve(defaultUnavailableCaps);
+
+      // Wait a tick and verify Mock workspaces are NOT cleared by late Real response
+      await new Promise((r) => setTimeout(r, 50));
+      expect(screen.getByRole('option', { name: 'React Task Manager' })).toBeDefined();
+      expect(screen.getByTestId('active-workspace-select')).toBeDefined();
+    });
+
+    it('P1 Launcher: Real capability rejection leaves Real mode isolated without uncaught errors or mock leakage', async () => {
+      vi.spyOn(realApiClient, 'getAgentCapabilities').mockRejectedValue(new Error('Network error or 500'));
+
+      renderWithProviders(
+        <AgentLauncherView />,
+        '/agent',
+        'real'
+      );
+
+      await waitFor(() => {
+        expect(screen.getByTestId('real-mode-runtime-warning')).toBeDefined();
+      });
+
+      // Execution button disabled
+      const launchBtn = screen.getByTestId('launch-agent-btn') as HTMLButtonElement;
+      expect(launchBtn.disabled).toBe(true);
+      expect(launchBtn.textContent).toContain('Execution Unavailable (Real Mode)');
+
+      // No mock data leak
+      expect(screen.queryByRole('option', { name: 'React Task Manager' })).toBeNull();
+      expect(screen.queryByTestId('active-workspace-select')).toBeNull();
+    });
+
+    it('P1 Launcher: unmount during pending capability request is safely ignored by request fencing', async () => {
+      const deferredCaps = createDeferred<any>();
+      vi.spyOn(realApiClient, 'getAgentCapabilities').mockImplementation(() => deferredCaps.promise);
+
+      const { unmount } = renderWithProviders(<AgentLauncherView />, '/agent', 'real');
+      unmount();
+
+      // Resolve after unmount
+      expect(() => {
+        deferredCaps.resolve(defaultUnavailableCaps);
+      }).not.toThrow();
+    });
+
+    it('P1 RunView: switching run IDs during delayed getAgentRun ignores stale older run response', async () => {
+      const deferredRun1 = createDeferred<any>();
+      const deferredRun2 = createDeferred<any>();
+
+      vi.spyOn(realApiClient, 'getAgentCapabilities').mockResolvedValue(defaultUnavailableCaps as any);
+
+      vi.spyOn(realApiClient, 'getAgentRun').mockImplementation(async (id: string) => {
+        if (id === 'real-run-1') return deferredRun1.promise;
+        if (id === 'real-run-2') return deferredRun2.promise;
+        throw new Error('Unexpected run id: ' + id);
+      });
+
+      renderWithProviders(
+        <>
+          <RouteSwitcher />
+          <AgentRunView />
+        </>,
+        '/agent/runs/real-run-1',
+        'real'
+      );
+
+      // Loading state for run 1
+      expect(screen.getByTestId('agent-run-loading')).toBeDefined();
+
+      // Switch route to run 2 while run 1 is still pending
+      fireEvent.click(screen.getByTestId('nav-to-run-2'));
+
+      // Resolve run 2 first
+      deferredRun2.resolve({
+        run: {
+          id: 'real-run-2',
+          task: 'Task Number Two - Newer Request',
+          status: 'running',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+      });
+
+      await waitFor(() => {
+        expect(screen.getByTestId('run-task-title')).toBeDefined();
+      });
+      expect(screen.getByTestId('run-task-title').textContent).toBe('Task Number Two - Newer Request');
+
+      // Now resolve older run 1
+      deferredRun1.resolve({
+        run: {
+          id: 'real-run-1',
+          task: 'Task Number One - Stale Older Request',
+          status: 'completed',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+      });
+
+      // Wait a tick and verify Run 2 is still shown, NOT overwritten by stale Run 1
+      await new Promise((r) => setTimeout(r, 50));
+      expect(screen.getByTestId('run-task-title').textContent).toBe('Task Number Two - Newer Request');
+    });
+
+    it('P1 RunView: Real -> Mock with pending Real run fetch does not allow late Real response to overwrite Mock run', async () => {
+      const deferredRealRun = createDeferred<any>();
+      vi.spyOn(realApiClient, 'getAgentRun').mockImplementation(() => deferredRealRun.promise);
+      vi.spyOn(realApiClient, 'getAgentCapabilities').mockResolvedValue(defaultUnavailableCaps as any);
+
+      renderWithProviders(
+        <>
+          <ModeSwitcher />
+          <AgentRunView />
+        </>,
+        '/agent/runs/run-golden-react',
+        'real'
+      );
+
+      // In Real mode, run fetch is in-flight
+      expect(screen.getByTestId('current-api-mode').textContent).toBe('real');
+      expect(screen.getByTestId('agent-run-loading')).toBeDefined();
+
+      // Switch to Mock mode before Real fetch resolves
+      fireEvent.click(screen.getByTestId('switch-to-mock-btn'));
+      expect(screen.getByTestId('current-api-mode').textContent).toBe('mock');
+
+      // Mock run loads
+      await waitFor(() => {
+        expect(screen.getByTestId('agent-run-view')).toBeDefined();
+        expect(screen.getByTestId('run-task-title').textContent).toContain('Build a responsive React task manager');
+      });
+
+      // Late Real run resolves with different data
+      deferredRealRun.resolve({
+        run: {
+          id: 'run-golden-react',
+          task: 'Stale Real Task That Should Be Ignored',
+          status: 'failed',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+      });
+
+      await new Promise((r) => setTimeout(r, 50));
+      // Mock run data remains active
+      expect(screen.getByTestId('run-task-title').textContent).toContain('Build a responsive React task manager');
+    });
+
+    it('P1 RunView: Real mode disables Cancel and Approval controls when capabilities are unavailable', async () => {
+      // Mock capabilities with cancellation: false and externalApproval: false
+      vi.spyOn(realApiClient, 'getAgentCapabilities').mockResolvedValue(defaultUnavailableCaps as any);
+
+      // 1. Running status -> Cancel button disabled
+      vi.spyOn(realApiClient, 'getAgentRun').mockResolvedValue({
+        run: {
+          id: 'real-run-active',
+          task: 'Active Real Run for Cancellation Gating',
+          status: 'running',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        } as any,
+      });
+
+      const firstMount = renderWithProviders(<AgentRunView />, '/agent/runs/real-run-active', 'real');
+
+      await waitFor(() => {
+        expect(screen.getByTestId('cancel-run-btn')).toBeDefined();
+      });
+
+      const cancelBtn = screen.getByTestId('cancel-run-btn') as HTMLButtonElement;
+      expect(cancelBtn.disabled).toBe(true);
+      expect(cancelBtn.title).toBe('Run cancellation is unavailable in Real Mode');
+      firstMount.unmount();
+
+      // 2. Awaiting Approval status -> Approval action buttons disabled
+      vi.spyOn(realApiClient, 'getAgentRun').mockResolvedValue({
+        run: {
+          id: 'real-run-approval',
+          task: 'Approval Real Run for Approval Gating',
+          status: 'awaiting_approval',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          approvalRequest: {
+            id: 'appr-req-1',
+            action: 'Execute Production Database Migration',
+            target: 'postgres-primary.prod',
+            risk: 'high',
+            reason: 'Irreversible database mutation requires human confirmation',
+            scope: 'database-migration',
+          },
+        } as any,
+      });
+
+      const secondMount = renderWithProviders(<AgentRunView />, '/agent/runs/real-run-approval', 'real');
+
+      await waitFor(() => {
+        expect(screen.getByTestId('approval-action-card')).toBeDefined();
+      });
+
+      const rejectBtn = screen.getByTestId('reject-approval-btn') as HTMLButtonElement;
+      const confirmBtn = screen.getByTestId('confirm-approval-btn') as HTMLButtonElement;
+
+      expect(rejectBtn.disabled).toBe(true);
+      expect(rejectBtn.title).toBe('Action approval is unavailable in Real Mode');
+
+      expect(confirmBtn.disabled).toBe(true);
+      expect(confirmBtn.title).toBe('Action approval is unavailable in Real Mode');
+
+      secondMount.unmount();
+    });
+
+    it('P2 Launcher: default blank workspace creates a fresh workspace on launch without mutating existing fixtures', async () => {
+      const initialWsCount = workspaceFixtureStore.getWorkspaces().length;
+      expect(initialWsCount).toBe(3); // React Task Manager, CSV Analytics, Doc Site
+
+      renderWithProviders(<AgentLauncherView />);
+
+      await waitFor(() => {
+        expect(screen.getByTestId('active-workspace-select')).toBeDefined();
+      });
+
+      // Default selectedWorkspaceId is empty string ("New Blank Workspace (Default)")
+      const select = screen.getByTestId('active-workspace-select') as HTMLSelectElement;
+      expect(select.value).toBe('');
+
+      // Enter a valid task
+      const input = screen.getByTestId('agent-task-input');
+      fireEvent.change(input, { target: { value: 'Create a brand new standalone utility script' } });
+
+      // Submit launch
+      const form = screen.getByTestId('task-composer-card');
+      fireEvent.submit(form);
+
+      // Verify a fresh workspace was created
+      const currentWorkspaces = workspaceFixtureStore.getWorkspaces();
+      expect(currentWorkspaces.length).toBe(initialWsCount + 1);
+
+      // The new workspace is a blank workspace and was prepended to the fixtures list
+      const newWs = currentWorkspaces[0];
+      expect(newWs.id).not.toBe('ws-react-task-manager');
+      expect(newWs.id).not.toBe('ws-csv-analytics');
+      expect(newWs.id).not.toBe('ws-doc-site');
+      expect(newWs.name).toContain('Blank Workspace');
+
+      // The 3 initial fixtures remain unmutated
+      expect(workspaceFixtureStore.getWorkspace('ws-react-task-manager')?.name).toBe('React Task Manager');
+      expect(workspaceFixtureStore.getWorkspace('ws-csv-analytics')?.name).toBe('CSV Dataset Analytics');
+      expect(workspaceFixtureStore.getWorkspace('ws-doc-site')?.name).toBe('Documentation Website');
+    });
+
+    it('Linear 17T-48 description: accurately describes 17T-48 as frontend control-plane integration and separates it from backend runtime readiness', async () => {
+      vi.spyOn(realApiClient, 'getAgentCapabilities').mockResolvedValue(defaultUnavailableCaps as any);
+
+      renderWithProviders(<AgentLauncherView />, '/agent', 'real');
+
+      await waitFor(() => {
+        expect(screen.getByTestId('real-mode-runtime-warning')).toBeDefined();
+      });
+
+      const warningText = screen.getByTestId('real-mode-runtime-warning').textContent;
+      expect(warningText).toContain('Frontend control-plane integration is tracked under Linear 17T-48');
+      expect(warningText).toContain('Cloud sandbox execution runtime requires separate backend infrastructure readiness');
     });
   });
 });

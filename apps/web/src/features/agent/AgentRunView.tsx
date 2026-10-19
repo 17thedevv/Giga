@@ -1,7 +1,8 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter } from '../../app/router.js';
 import { useApiMode } from '../../app/context/ApiModeContext.js';
 import { realApiClient, ApiException } from '../../lib/api/client.js';
+import { isAgentCapabilityAvailable } from '../../lib/api/agent-contract.js';
 import {
   workspaceFixtureStore,
   type AgentRunDetail,
@@ -31,74 +32,113 @@ export const AgentRunView: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'plan' | 'timeline' | 'files' | 'verification' | 'artifacts'>('plan');
   const [expandedDiffs, setExpandedDiffs] = useState<Record<string, boolean>>({});
 
-  const loadRunData = useCallback(async () => {
-    if (!runId) return;
+  // Real Mode Capabilities for Action Buttons
+  const [canCancel, setCanCancel] = useState<boolean>(true);
+  const [canApprove, setCanApprove] = useState<boolean>(true);
+
+  // Request Fencing Ref for Run Loading
+  const activeRunRequestIdRef = useRef<number>(0);
+
+  const loadRunData = useCallback(() => {
+    if (!runId) {
+      setRun(null);
+      setIsLoading(false);
+      return;
+    }
+
+    const requestId = ++activeRunRequestIdRef.current;
+    // 1. Immediately clear outdated run data & error banner on change
+    setRun(null);
     setIsLoading(true);
     setErrorBanner(null);
 
-    try {
-      if (apiMode === 'real') {
-        // Query real API. Notice real backend returns admitted run with status: failed, RUNTIME_UNAVAILABLE
-        try {
-          const res = await realApiClient.getAgentRun(runId);
-          // Convert to AgentRunDetail without fabricating files or artifacts
-          const realRun: AgentRunDetail = {
-            id: res.run.id,
-            workspaceId: (res.run as any).workspaceId || 'workspace-real',
-            workspaceName: 'Real Workspace',
-            task: res.run.task,
-            mode: (res.run as any).mode || 'execute',
-            runtime: 'cloud',
-            modelId: (res.run as any).modelId || 'giga-agent-default',
-            status: res.run.status,
-            phase: (res.run as any).phase,
-            createdAt: res.run.createdAt,
-            updatedAt: res.run.updatedAt,
-            finishedAt: (res.run as any).finishedAt,
-            error: res.run.error,
-            result: res.run.result ? {
-              summary: (res.run.result as any).summary || 'Run completed',
-              artifactIds: (res.run.result as any).artifactIds || [],
-              verifiedChecks: (res.run.result as any).verifiedChecks || [],
-            } : undefined,
-            plan: [],
-            timeline: [],
-            fileChanges: [],
-            verifications: [],
-            artifacts: [],
-            isDemo: false,
-          };
-          setRun(realRun);
-        } catch (err: unknown) {
-          if (err instanceof ApiException && err.status === 404) {
-            setErrorBanner('Run not found on real backend.');
+    if (apiMode === 'real') {
+      setCanCancel(false);
+      setCanApprove(false);
+
+      Promise.allSettled([
+        realApiClient.getAgentRun(runId),
+        realApiClient.getAgentCapabilities(),
+      ])
+        .then(([runResult, capsResult]) => {
+          if (activeRunRequestIdRef.current !== requestId) return;
+
+          if (capsResult.status === 'fulfilled') {
+            const caps = capsResult.value;
+            setCanCancel(isAgentCapabilityAvailable(caps, 'cancellation'));
+            setCanApprove(isAgentCapabilityAvailable(caps, 'externalApproval'));
           } else {
-            setErrorBanner(
-              'Real Cloud execution runtime is unavailable (Linear 17T-48). Run data cannot be loaded in Real Mode without an admitted run.'
-            );
+            setCanCancel(false);
+            setCanApprove(false);
           }
-          setRun(null);
-        }
+
+          if (runResult.status === 'fulfilled') {
+            const res = runResult.value;
+            // Convert to AgentRunDetail without fabricating files or artifacts
+            const realRun: AgentRunDetail = {
+              id: res.run.id,
+              workspaceId: (res.run as any).workspaceId || 'workspace-real',
+              workspaceName: 'Real Workspace',
+              task: res.run.task,
+              mode: (res.run as any).mode || 'execute',
+              runtime: 'cloud',
+              modelId: (res.run as any).modelId || 'giga-agent-default',
+              status: res.run.status,
+              phase: (res.run as any).phase,
+              createdAt: res.run.createdAt,
+              updatedAt: res.run.updatedAt,
+              finishedAt: (res.run as any).finishedAt,
+              error: res.run.error,
+              result: res.run.result ? {
+                summary: (res.run.result as any).summary || 'Run completed',
+                artifactIds: (res.run.result as any).artifactIds || [],
+                verifiedChecks: (res.run.result as any).verifiedChecks || [],
+              } : undefined,
+              plan: [],
+              timeline: [],
+              fileChanges: [],
+              verifications: [],
+              artifacts: [],
+              approvalRequest: (res.run as any).approvalRequest,
+              isDemo: false,
+            };
+            setRun(realRun);
+          } else {
+            const err = runResult.reason;
+            if (err instanceof ApiException && err.status === 404) {
+              setErrorBanner('Run not found on real backend.');
+            } else {
+              setErrorBanner(
+                'Real Cloud execution runtime is unavailable (Frontend control-plane integration is tracked under Linear 17T-48; Cloud sandbox runtime requires separate backend readiness). Run data cannot be loaded in Real Mode without an admitted run.'
+              );
+            }
+            setRun(null);
+          }
+        })
+        .finally(() => {
+          if (activeRunRequestIdRef.current !== requestId) return;
+          setIsLoading(false);
+        });
+    } else {
+      // Demo Mock Mode
+      setCanCancel(true);
+      setCanApprove(true);
+      const found = workspaceFixtureStore.getRun(runId);
+      if (found) {
+        setRun(found);
       } else {
-        // Demo Mock Mode
-        const found = workspaceFixtureStore.getRun(runId);
-        if (found) {
-          setRun(found);
-        } else {
-          setErrorBanner('Run not found in workspace session.');
-          setRun(null);
-        }
+        setErrorBanner('Run not found in workspace session.');
+        setRun(null);
       }
-    } catch (err) {
-      setErrorBanner(err instanceof Error ? err.message : 'Failed to load agent run');
-      setRun(null);
-    } finally {
       setIsLoading(false);
     }
   }, [runId, apiMode]);
 
   useEffect(() => {
     loadRunData();
+    return () => {
+      activeRunRequestIdRef.current++;
+    };
   }, [loadRunData]);
 
   // Handle Cancel Run
@@ -245,6 +285,8 @@ export const AgentRunView: React.FC = () => {
                 size="sm"
                 variant="danger"
                 onClick={handleCancel}
+                disabled={apiMode === 'real' && !canCancel}
+                title={apiMode === 'real' && !canCancel ? 'Run cancellation is unavailable in Real Mode' : undefined}
                 data-testid="cancel-run-btn"
               >
                 Cancel Run
@@ -400,6 +442,8 @@ export const AgentRunView: React.FC = () => {
                 variant="outline"
                 size="sm"
                 onClick={() => handleApprovalDecision('reject')}
+                disabled={apiMode === 'real' && !canApprove}
+                title={apiMode === 'real' && !canApprove ? 'Action approval is unavailable in Real Mode' : undefined}
                 data-testid="reject-approval-btn"
               >
                 Reject Action
@@ -408,6 +452,8 @@ export const AgentRunView: React.FC = () => {
                 variant="primary"
                 size="sm"
                 onClick={() => handleApprovalDecision('approve')}
+                disabled={apiMode === 'real' && !canApprove}
+                title={apiMode === 'real' && !canApprove ? 'Action approval is unavailable in Real Mode' : undefined}
                 data-testid="confirm-approval-btn"
               >
                 Approve Action
