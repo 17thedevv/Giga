@@ -17,8 +17,14 @@ import { SpinnerIcon, SettingsIcon, KeyIcon, RefreshCwIcon } from '../../compone
 export const SettingsView: React.FC = () => {
   const { mode } = useApiMode();
   const activeModeRef = useRef(mode);
-  const activeOperationIdRef = useRef(0);
   const isMountedRef = useRef(true);
+
+  // Independently scoped operation IDs to prevent concurrent allowed actions from invalidating each other
+  const loadOpIdRef = useRef(0);
+  const validateOpIdRef = useRef(0);
+  const modeOpIdRef = useRef(0);
+  const saveOpIdRef = useRef(0);
+  const deleteOpIdRef = useRef(0);
 
   const [loading, setLoading] = useState(true);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
@@ -50,9 +56,25 @@ export const SettingsView: React.FC = () => {
     };
   }, []);
 
-  // Operation identity and mode fencing helper
-  const isOperationActive = useCallback((opId: number, opMode: 'real' | 'mock'): boolean => {
-    return isMountedRef.current && opId === activeOperationIdRef.current && opMode === activeModeRef.current;
+  // Operation identity and mode fencing helpers
+  const isValidateOpActive = useCallback((opId: number, opMode: 'real' | 'mock'): boolean => {
+    return isMountedRef.current && opId === validateOpIdRef.current && opMode === activeModeRef.current;
+  }, []);
+
+  const isModeOpActive = useCallback((opId: number, opMode: 'real' | 'mock'): boolean => {
+    return isMountedRef.current && opId === modeOpIdRef.current && opMode === activeModeRef.current;
+  }, []);
+
+  const isLoadOpActive = useCallback((opId: number, opMode: 'real' | 'mock'): boolean => {
+    return isMountedRef.current && opId === loadOpIdRef.current && opMode === activeModeRef.current;
+  }, []);
+
+  const isSaveOpActive = useCallback((opId: number, opMode: 'real' | 'mock'): boolean => {
+    return isMountedRef.current && opId === saveOpIdRef.current && opMode === activeModeRef.current;
+  }, []);
+
+  const isDeleteOpActive = useCallback((opId: number, opMode: 'real' | 'mock'): boolean => {
+    return isMountedRef.current && opId === deleteOpIdRef.current && opMode === activeModeRef.current;
   }, []);
 
   // Helper to reconcile authoritative state from active API
@@ -64,8 +86,8 @@ export const SettingsView: React.FC = () => {
         currentApi.getChatCredentialPreference(),
       ]);
 
-      // Check if stale, cancelled by newer operation, or mode changed
-      if (!isOperationActive(opId, targetMode)) {
+      // Check if stale, cancelled by newer load, or mode changed
+      if (!isLoadOpActive(opId, targetMode)) {
         return null;
       }
 
@@ -76,14 +98,14 @@ export const SettingsView: React.FC = () => {
       setInitialLoadFailed(false);
       return { credential: activeCred, preference: prefRes };
     },
-    [isOperationActive]
+    [isLoadOpActive]
   );
 
   // Load authoritative credentials and preference from active backend
   const loadSettings = useCallback(
     async (targetMode?: 'real' | 'mock') => {
       const opMode = targetMode ?? activeModeRef.current;
-      const opId = ++activeOperationIdRef.current;
+      const opId = ++loadOpIdRef.current;
       activeModeRef.current = opMode;
 
       setLoading(true);
@@ -92,7 +114,7 @@ export const SettingsView: React.FC = () => {
       try {
         await reconcileState(opMode, opId);
       } catch (err: unknown) {
-        if (!isOperationActive(opId, opMode)) {
+        if (!isLoadOpActive(opId, opMode)) {
           return;
         }
 
@@ -105,18 +127,22 @@ export const SettingsView: React.FC = () => {
         const message = err instanceof Error ? err.message : 'Failed to load provider credentials';
         setErrorBanner(message);
       } finally {
-        if (isOperationActive(opId, opMode)) {
+        if (isLoadOpActive(opId, opMode)) {
           setLoading(false);
         }
       }
     },
-    [reconcileState, isOperationActive]
+    [reconcileState, isLoadOpActive]
   );
 
   // Mode change effect: invalidate pending operations and clear source-specific metadata immediately
   useEffect(() => {
-    activeOperationIdRef.current += 1;
     activeModeRef.current = mode;
+    loadOpIdRef.current += 1;
+    validateOpIdRef.current += 1;
+    modeOpIdRef.current += 1;
+    saveOpIdRef.current += 1;
+    deleteOpIdRef.current += 1;
 
     // Clear source-specific credential metadata immediately when changing API mode
     setCredential(null);
@@ -134,7 +160,7 @@ export const SettingsView: React.FC = () => {
 
   // Handle Save / Replace API Key
   const handleSaveCredential = async (apiKey: string) => {
-    const opId = ++activeOperationIdRef.current;
+    const opId = ++saveOpIdRef.current;
     const opMode = activeModeRef.current;
     const currentApi = opMode === 'real' ? realApiClient : mockDataAdapter;
 
@@ -145,7 +171,11 @@ export const SettingsView: React.FC = () => {
         apiKey,
       });
 
-      if (!isOperationActive(opId, opMode)) return;
+      if (!isSaveOpActive(opId, opMode)) return;
+
+      // Invalidate any pending validation on the replaced credential
+      validateOpIdRef.current += 1;
+      setIsValidating(false);
 
       // Refresh preference because saving may rebind BYOK preference
       let updatedPref: ChatCredentialPreference | null = null;
@@ -156,7 +186,7 @@ export const SettingsView: React.FC = () => {
         refreshFailed = true;
       }
 
-      if (!isOperationActive(opId, opMode)) return;
+      if (!isSaveOpActive(opId, opMode)) return;
 
       if (refreshFailed) {
         // Retain mode with updated credential ID if BYOK
@@ -184,7 +214,7 @@ export const SettingsView: React.FC = () => {
 
   // Handle Validate Key
   const handleValidateCredential = async (id: string) => {
-    const opId = ++activeOperationIdRef.current;
+    const opId = ++validateOpIdRef.current;
     const opMode = activeModeRef.current;
     const currentApi = opMode === 'real' ? realApiClient : mockDataAdapter;
 
@@ -193,7 +223,7 @@ export const SettingsView: React.FC = () => {
       setValidationFeedback(null);
       const res = await currentApi.validateProviderCredential(id);
 
-      if (!isOperationActive(opId, opMode)) return;
+      if (!isValidateOpActive(opId, opMode)) return;
 
       setCredential(res.credential);
 
@@ -209,7 +239,7 @@ export const SettingsView: React.FC = () => {
         });
       }
     } catch (err: unknown) {
-      if (!isOperationActive(opId, opMode)) return;
+      if (!isValidateOpActive(opId, opMode)) return;
 
       if (err instanceof ApiException) {
         if (err.status === 429 || err.code === 'PROVIDER_RATE_LIMIT') {
@@ -238,14 +268,14 @@ export const SettingsView: React.FC = () => {
       // Re-fetch credentials to synchronize lastValidatedAt timestamp if recorded
       try {
         const credsRes = await currentApi.getProviderCredentials();
-        if (isOperationActive(opId, opMode) && credsRes.items[0]) {
+        if (isValidateOpActive(opId, opMode) && credsRes.items[0]) {
           setCredential(credsRes.items[0]);
         }
       } catch {
         // Ignore secondary refresh failure
       }
     } finally {
-      if (isOperationActive(opId, opMode)) {
+      if (isValidateOpActive(opId, opMode)) {
         setIsValidating(false);
       }
     }
@@ -254,16 +284,20 @@ export const SettingsView: React.FC = () => {
   // Handle Delete Key
   const handleDeleteCredential = async () => {
     if (!credential) return;
-    const opId = ++activeOperationIdRef.current;
+    const opId = ++deleteOpIdRef.current;
     const opMode = activeModeRef.current;
     const currentApi = opMode === 'real' ? realApiClient : mockDataAdapter;
     const credentialId = credential.id;
+
+    // Invalidate any pending validation for this credential so it cannot resurrect it
+    validateOpIdRef.current += 1;
+    setIsValidating(false);
 
     try {
       setErrorBanner(null);
       await currentApi.deleteProviderCredential(credentialId);
 
-      if (!isOperationActive(opId, opMode)) return;
+      if (!isDeleteOpActive(opId, opMode)) return;
 
       // Reconcile authoritative state after deletion
       let freshCred: ProviderCredential | null = null;
@@ -281,7 +315,7 @@ export const SettingsView: React.FC = () => {
         freshPref = { mode: preference.mode, credentialId: null };
       }
 
-      if (!isOperationActive(opId, opMode)) return;
+      if (!isDeleteOpActive(opId, opMode)) return;
 
       setCredential(freshCred);
       if (freshPref) {
@@ -290,12 +324,12 @@ export const SettingsView: React.FC = () => {
       setValidationFeedback(null);
       setSuccessBanner('Gemini API key has been deleted.');
     } catch (err: unknown) {
-      if (!isOperationActive(opId, opMode)) return;
+      if (!isDeleteOpActive(opId, opMode)) return;
 
       // Check if already deleted before failing
       try {
         const currentCreds = await currentApi.getProviderCredentials();
-        if (!isOperationActive(opId, opMode)) return;
+        if (!isDeleteOpActive(opId, opMode)) return;
 
         if (!currentCreds.items.some((item) => item.id === credentialId)) {
           setCredential(null);
@@ -307,7 +341,7 @@ export const SettingsView: React.FC = () => {
         // Ignore check failure
       }
 
-      if (!isOperationActive(opId, opMode)) return;
+      if (!isDeleteOpActive(opId, opMode)) return;
       throw err;
     }
   };
@@ -321,7 +355,7 @@ export const SettingsView: React.FC = () => {
       return;
     }
 
-    const opId = ++activeOperationIdRef.current;
+    const opId = ++modeOpIdRef.current;
     const opMode = activeModeRef.current;
     const currentApi = opMode === 'real' ? realApiClient : mockDataAdapter;
 
@@ -333,7 +367,7 @@ export const SettingsView: React.FC = () => {
         credentialId: newMode === 'byok' ? credential?.id : null,
       });
 
-      if (!isOperationActive(opId, opMode)) return;
+      if (!isModeOpActive(opId, opMode)) return;
 
       setPreference(updatedPref);
       setSuccessBanner(
@@ -342,12 +376,12 @@ export const SettingsView: React.FC = () => {
           : 'Switched to Giga Platform Key for Chat.'
       );
     } catch (err: unknown) {
-      if (!isOperationActive(opId, opMode)) return;
+      if (!isModeOpActive(opId, opMode)) return;
 
       // Check if update succeeded on server despite lost response
       try {
         const currentPref = await currentApi.getChatCredentialPreference();
-        if (!isOperationActive(opId, opMode)) return;
+        if (!isModeOpActive(opId, opMode)) return;
 
         if (currentPref.mode === newMode) {
           setPreference(currentPref);
@@ -362,12 +396,12 @@ export const SettingsView: React.FC = () => {
         // Ignore check error
       }
 
-      if (!isOperationActive(opId, opMode)) return;
+      if (!isModeOpActive(opId, opMode)) return;
 
       const message = err instanceof Error ? err.message : 'Failed to update Chat credential preference';
       setErrorBanner(message);
     } finally {
-      if (isOperationActive(opId, opMode)) {
+      if (isModeOpActive(opId, opMode)) {
         setIsSavingMode(false);
       }
     }

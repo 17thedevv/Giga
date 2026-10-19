@@ -1033,5 +1033,192 @@ describe('Gemini BYOK Settings & Credential UX (17T-39)', () => {
         setPrefSpy.mockRestore();
       });
     });
+
+    describe('Concurrent Action & Operation Scoping Regressions', () => {
+      it('Validate -> Mode Change with deferred responses: loading indicators recover and preference matches backend state', async () => {
+        const getMeSpy = vi.spyOn(realApiClient, 'getMe').mockResolvedValue({ user: MOCK_USER });
+        const initialCred = {
+          id: 'real_cred_concurrent_1',
+          provider: 'gemini' as const,
+          displayHint: '••••CON1',
+          status: 'unverified' as const,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          lastValidatedAt: null,
+        };
+
+        const realCredsSpy = vi.spyOn(realApiClient, 'getProviderCredentials').mockResolvedValue({
+          items: [initialCred],
+        });
+        const getPrefSpy = vi.spyOn(realApiClient, 'getChatCredentialPreference').mockResolvedValue({
+          mode: 'platform',
+          credentialId: null,
+        });
+
+        let resolveValidate: (val: any) => void;
+        const validatePromise = new Promise((resolve) => {
+          resolveValidate = resolve;
+        });
+        const validateSpy = vi.spyOn(realApiClient, 'validateProviderCredential').mockImplementation(() => validatePromise as any);
+
+        let resolveSetPref: (val: any) => void;
+        const setPrefPromise = new Promise((resolve) => {
+          resolveSetPref = resolve;
+        });
+        const setPrefSpy = vi.spyOn(realApiClient, 'setChatCredentialPreference').mockImplementation(() => setPrefPromise as any);
+
+        renderWithProviders(<SettingsView />, '/settings', 'real');
+
+        await waitFor(() => {
+          expect(screen.getByTestId('masked-credential-hint').textContent).toBe('••••CON1');
+        });
+
+        const validateBtn = screen.getByTestId('validate-key-btn');
+        const byokRadio = screen.getByTestId('radio-mode-byok') as HTMLInputElement;
+
+        // 1. Click Validate -> isValidating = true
+        fireEvent.click(validateBtn);
+        expect(validateBtn.textContent).toContain('Validating');
+
+        // 2. While Validate is pending, click Mode Change (switch to BYOK) -> isSavingMode = true
+        fireEvent.click(byokRadio);
+        expect(byokRadio.disabled).toBe(true);
+
+        // 3. Resolve Mode Change first
+        resolveSetPref!({
+          mode: 'byok',
+          credentialId: 'real_cred_concurrent_1',
+        });
+
+        // Mode change finishes: radio button updates to checked, isSavingMode cleared
+        await waitFor(() => {
+          expect(byokRadio.checked).toBe(true);
+          expect(byokRadio.disabled).toBe(false);
+        });
+
+        // Validate is still pending
+        expect(validateBtn.textContent).toContain('Validating');
+
+        // 4. Resolve Validate second
+        const validatedTime = new Date().toISOString();
+        resolveValidate!({
+          credential: {
+            ...initialCred,
+            status: 'valid',
+            lastValidatedAt: validatedTime,
+          },
+        });
+
+        // Validate finishes: isValidating cleared, status badge updated to Valid
+        await waitFor(() => {
+          expect(validateBtn.textContent).toBe('Validate');
+          expect(screen.getByTestId('credential-status-badge').textContent).toBe('Valid');
+        });
+
+        // 5. Final state verification
+        expect(byokRadio.checked).toBe(true);
+        expect(validateBtn.hasAttribute('disabled')).toBe(false);
+        expect(screen.getByTestId('last-validated-time').textContent).not.toContain('Never validated');
+        expect(screen.getByTestId('last-validated-time').textContent).toContain('Last validated:');
+
+        getMeSpy.mockRestore();
+        realCredsSpy.mockRestore();
+        getPrefSpy.mockRestore();
+        validateSpy.mockRestore();
+        setPrefSpy.mockRestore();
+      });
+
+      it('Mode Change -> Validate with deferred responses: loading indicators recover and preference matches backend state', async () => {
+        const getMeSpy = vi.spyOn(realApiClient, 'getMe').mockResolvedValue({ user: MOCK_USER });
+        const initialCred = {
+          id: 'real_cred_concurrent_2',
+          provider: 'gemini' as const,
+          displayHint: '••••CON2',
+          status: 'unverified' as const,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          lastValidatedAt: null,
+        };
+
+        const realCredsSpy = vi.spyOn(realApiClient, 'getProviderCredentials').mockResolvedValue({
+          items: [initialCred],
+        });
+        const getPrefSpy = vi.spyOn(realApiClient, 'getChatCredentialPreference').mockResolvedValue({
+          mode: 'platform',
+          credentialId: null,
+        });
+
+        let resolveSetPref: (val: any) => void;
+        const setPrefPromise = new Promise((resolve) => {
+          resolveSetPref = resolve;
+        });
+        const setPrefSpy = vi.spyOn(realApiClient, 'setChatCredentialPreference').mockImplementation(() => setPrefPromise as any);
+
+        let resolveValidate: (val: any) => void;
+        const validatePromise = new Promise((resolve) => {
+          resolveValidate = resolve;
+        });
+        const validateSpy = vi.spyOn(realApiClient, 'validateProviderCredential').mockImplementation(() => validatePromise as any);
+
+        renderWithProviders(<SettingsView />, '/settings', 'real');
+
+        await waitFor(() => {
+          expect(screen.getByTestId('masked-credential-hint').textContent).toBe('••••CON2');
+        });
+
+        const validateBtn = screen.getByTestId('validate-key-btn');
+        const byokRadio = screen.getByTestId('radio-mode-byok') as HTMLInputElement;
+
+        // 1. Click Mode Change -> isSavingMode = true
+        fireEvent.click(byokRadio);
+        expect(byokRadio.disabled).toBe(true);
+
+        // 2. While Mode Change is pending, click Validate -> isValidating = true
+        fireEvent.click(validateBtn);
+        expect(validateBtn.textContent).toContain('Validating');
+
+        // 3. Resolve Validate first
+        const validatedTime = new Date().toISOString();
+        resolveValidate!({
+          credential: {
+            ...initialCred,
+            status: 'valid',
+            lastValidatedAt: validatedTime,
+          },
+        });
+
+        // Validate finishes: isValidating cleared, badge is Valid
+        await waitFor(() => {
+          expect(validateBtn.textContent).toBe('Validate');
+          expect(screen.getByTestId('credential-status-badge').textContent).toBe('Valid');
+        });
+
+        // Mode change is still pending
+        expect(byokRadio.disabled).toBe(true);
+
+        // 4. Resolve Mode Change second
+        resolveSetPref!({
+          mode: 'byok',
+          credentialId: 'real_cred_concurrent_2',
+        });
+
+        // Mode change finishes: radio button updates to checked, isSavingMode cleared
+        await waitFor(() => {
+          expect(byokRadio.checked).toBe(true);
+          expect(byokRadio.disabled).toBe(false);
+        });
+
+        // 5. Final state verification: both recovered, preference is BYOK, validate is not disabled
+        expect(byokRadio.checked).toBe(true);
+        expect(validateBtn.hasAttribute('disabled')).toBe(false);
+        expect(screen.getByTestId('credential-status-badge').textContent).toBe('Valid');
+
+        getMeSpy.mockRestore();
+        realCredsSpy.mockRestore();
+        getPrefSpy.mockRestore();
+        validateSpy.mockRestore();
+        setPrefSpy.mockRestore();
+      });
+    });
   });
 });

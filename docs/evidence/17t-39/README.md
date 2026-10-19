@@ -30,7 +30,7 @@ Web frontend implementation for Bring Your Own Key (BYOK) credential management 
 
 ## 2. Review Follow-Up: Addressing PR #35 Review Findings
 
-Reviewed head: `adb35bd`. Addressed review findings across components and test coverage:
+Reviewed head: `5f45a19`. Addressed review findings across components and test coverage:
 
 1. **P1 — Contradictory BYOK Fallback Messaging (`GeminiProviderCard.tsx`)**:
    - Fixed the empty-state and details-row status messaging to cleanly distinguish:
@@ -39,11 +39,12 @@ Reviewed head: `adb35bd`. Addressed review findings across components and test c
      * **BYOK mode with invalid credential**: Dedicated `byok-invalid-notice` (`"Selected key is unusable. Chat is unavailable with no automatic fallback."`) and configuration error alert (`"Selected key is unusable; there is no automatic fallback to the platform key."`).
    - Under no circumstance do missing or invalid BYOK states claim that platform mode is active or that Giga is using the platform key.
 
-2. **P1 — Stale Preference Reconciliation Across API Mode Changes (`SettingsView.tsx`)**:
-   - Implemented strict asynchronous request and mutation fencing using `activeOperationIdRef` and `isOperationActive(opId, opMode)`.
-   - Every asynchronous operation (`handleModeChange`, `handleSaveCredential`, `handleValidateCredential`, `handleDeleteCredential`, and `loadSettings`) validates operation identity after every `await` (including catch block recovery fetches such as `getChatCredentialPreference()`).
-   - Stale or delayed responses from previous modes or older mutations are safely ignored and cannot mutate state or display misleading success/error banners in the active mode.
-   - `finally` blocks are fenced to ensure older settled promises cannot prematurely unlock mutation locks (`isSavingMode`, `isValidating`) on a newer operation.
+2. **P1 — Independently Scoped Operation Identities & Concurrent Action Protection (`SettingsView.tsx`)**:
+   - Replaced single global operation counter with independently scoped operation identity refs (`loadOpIdRef`, `validateOpIdRef`, `modeOpIdRef`, `saveOpIdRef`, `deleteOpIdRef`).
+   - Allowed concurrent actions (such as Validate &rarr; Mode Change or Mode Change &rarr; Validate) no longer invalidate one another.
+   - Each action's `finally` block verifies its own scoped identity, guaranteeing that loading indicators (`isValidating`, `isSavingMode`, `loading`) always recover and never remain stuck.
+   - Authoritative backend state is reflected accurately regardless of promise resolution ordering.
+   - Full Real/Mock stale-response protection is preserved via `activeModeRef` and synchronous mode invalidation.
 
 3. **P2 — Persistent Initial Load Failure & Visible Retry (`SettingsView.tsx`)**:
    - When initial settings loading fails (HTTP 500/503), the view displays an initial error state with a prominent visible Retry button (`data-testid="settings-load-retry-btn"`).
@@ -61,11 +62,11 @@ Environment: Windows, Node v24.12.0, npm 11.6.2. Base: `e86edd9` from `origin/ma
 
 | Verification Check | Target | Result | Details |
 | --- | --- | --- | --- |
-| Unit & Integration Tests | `apps/web/tests/byok-settings.test.tsx` | **PASS (27/27)** | 17 base scenarios + 10 review regression tests |
+| Unit & Integration Tests | `apps/web/tests/byok-settings.test.tsx` | **PASS (29/29)** | 17 base scenarios + 12 review regression tests |
 | Mock Adapter Tests | `apps/web/tests/mock-adapter.test.ts` | **PASS (21/21)** | Full adapter test suite including BYOK and credentials |
-| Full Web Test Suite | `npm test --prefix apps/web` | **PASS (174/174)** | 12 test files passed, 0 failures, exit code 0 |
+| Full Web Test Suite | `npm test --prefix apps/web` | **PASS (176/176)** | 12 test files passed, 0 failures, exit code 0 |
 | Frontend Typecheck | `npm run typecheck --prefix apps/web` | **PASS (0 errors)** | Strict TypeScript validation |
-| Production Build | `npm run build --prefix apps/web` | **PASS** | Vite production bundle built in 800ms |
+| Production Build | `npm run build --prefix apps/web` | **PASS** | Vite production bundle built in 809ms |
 | Git Workflow Verification | `node --test .agents/scripts/validate-git-workflow.test.mjs` | **PASS (6/6)** | Verified branch name & conventional commit compliance |
 | Skill System Validation | `node .agents/scripts/validate-skills.mjs` | **PASS (8/8)** | All repo skills valid |
 | Git Whitespace / Diff Check | `git diff --check` | **PASS** | Clean diff, no trailing whitespace or formatting flaws |
