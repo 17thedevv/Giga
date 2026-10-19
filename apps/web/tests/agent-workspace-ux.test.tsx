@@ -13,6 +13,9 @@ import {
   DEMO_STORAGE_KEY_WORKSPACES,
   DEMO_STORAGE_KEY_RUNS,
   MAX_USER_DEMO_WORKSPACES,
+  CANONICAL_AGENT_STATUSES,
+  isValidRunDetail,
+  isValidWorkspace,
 } from '../src/features/agent/workspace-fixtures.js';
 import { mockDataAdapter, MOCK_USER } from '../src/lib/api/mock-adapter.js';
 import { realApiClient, ApiException } from '../src/lib/api/client.js';
@@ -1230,6 +1233,231 @@ describe('Workspace-First GigaAgent UX (17T-40)', () => {
       const refreshed = workspaceFixtureStore.getRun(customRun.id);
       expect(refreshed?.status).toBe('cancelled');
       expect(refreshed?.error?.code).toBe('CANCELLED');
+    });
+
+    it('P1 Contract: persists and restores queued and applying runs, and renders canonical badges', async () => {
+      const now = new Date().toISOString();
+      const queuedRun = {
+        id: 'run-custom-queued',
+        workspaceId: 'ws-react-task-manager',
+        workspaceName: 'React Task Manager',
+        task: 'Queue run for execution when runner becomes available',
+        mode: 'execute' as const,
+        runtime: 'cloud' as const,
+        modelId: 'giga-agent-default',
+        status: 'queued' as const,
+        phase: 'waiting_runtime' as const,
+        createdAt: now,
+        updatedAt: now,
+        plan: [{ id: 'p1', stepNumber: 1, title: 'Queue task', description: 'Wait for admission', status: 'pending' as const }],
+        timeline: [{ id: 't1', timestamp: '10:00:00', category: 'Admission', label: 'Enqueued', status: 'completed' as const }],
+        fileChanges: [],
+        verifications: [],
+        artifacts: [],
+        isDemo: true as const,
+      };
+
+      const applyingRun = {
+        id: 'run-custom-applying',
+        workspaceId: 'ws-react-task-manager',
+        workspaceName: 'React Task Manager',
+        task: 'Apply approved modifications to sandbox workspace files',
+        mode: 'execute' as const,
+        runtime: 'cloud' as const,
+        modelId: 'giga-agent-default',
+        status: 'applying' as const,
+        phase: 'executing' as const,
+        createdAt: now,
+        updatedAt: now,
+        plan: [{ id: 'p1', stepNumber: 1, title: 'Applying diffs', description: 'Write changes', status: 'running' as const }],
+        timeline: [{ id: 't1', timestamp: '10:05:00', category: 'Apply', label: 'Applying', status: 'running' as const }],
+        fileChanges: [{ path: 'src/config.ts', status: 'modified' as const, additions: 2, deletions: 1 }],
+        verifications: [],
+        artifacts: [],
+        isDemo: true as const,
+      };
+
+      localStorage.setItem(DEMO_STORAGE_KEY_RUNS, JSON.stringify([queuedRun, applyingRun]));
+
+      // Rehydrate
+      workspaceFixtureStore.rehydrateFromStorage();
+
+      // Verify both canonical statuses restored
+      const restoredQueued = workspaceFixtureStore.getRun('run-custom-queued');
+      expect(restoredQueued).toBeDefined();
+      expect(restoredQueued?.status).toBe('queued');
+      expect(restoredQueued?.phase).toBe('waiting_runtime');
+
+      const restoredApplying = workspaceFixtureStore.getRun('run-custom-applying');
+      expect(restoredApplying).toBeDefined();
+      expect(restoredApplying?.status).toBe('applying');
+      expect(restoredApplying?.phase).toBe('executing');
+
+      // Mount AgentRunView for queued run
+      const mountQueued = renderWithProviders(<AgentRunView />, '/agent/runs/run-custom-queued');
+      await waitFor(() => {
+        expect(screen.getByTestId('run-status-badge')).toBeDefined();
+      });
+      expect(screen.getByTestId('run-status-badge').textContent).toContain('Queued');
+      mountQueued.unmount();
+
+      // Mount AgentRunView for applying run
+      const mountApplying = renderWithProviders(<AgentRunView />, '/agent/runs/run-custom-applying');
+      await waitFor(() => {
+        expect(screen.getByTestId('run-status-badge')).toBeDefined();
+      });
+      expect(screen.getByTestId('run-status-badge').textContent).toContain('Applying Changes...');
+      mountApplying.unmount();
+    });
+
+    it('P1 Contract: rejects invalid public statuses (planning, executing, verifying, pending) on rehydration', async () => {
+      const now = new Date().toISOString();
+      const validBase = {
+        workspaceId: 'ws-react-task-manager',
+        workspaceName: 'React Task Manager',
+        task: 'Invalid status test run',
+        mode: 'execute' as const,
+        createdAt: now,
+        plan: [],
+        timeline: [],
+        fileChanges: [],
+        verifications: [],
+        artifacts: [],
+        isDemo: true as const,
+      };
+
+      // Direct validator assertions
+      expect(isValidRunDetail({ ...validBase, id: 'r1', status: 'planning' })).toBe(false);
+      expect(isValidRunDetail({ ...validBase, id: 'r2', status: 'executing' })).toBe(false);
+      expect(isValidRunDetail({ ...validBase, id: 'r3', status: 'verifying' })).toBe(false);
+      expect(isValidRunDetail({ ...validBase, id: 'r4', status: 'pending' })).toBe(false);
+      expect(isValidRunDetail({ ...validBase, id: 'r5', status: 'arbitrary_status' })).toBe(false);
+
+      // Verify all canonical statuses are accepted
+      for (const st of CANONICAL_AGENT_STATUSES) {
+        expect(isValidRunDetail({ ...validBase, id: `r-${st}`, status: st })).toBe(true);
+      }
+
+      // Rehydration ignores all runs with invalid status
+      const invalidRuns = [
+        { ...validBase, id: 'run-bad-1', status: 'planning' },
+        { ...validBase, id: 'run-bad-2', status: 'executing' },
+        { ...validBase, id: 'run-bad-3', status: 'verifying' },
+        { ...validBase, id: 'run-bad-4', status: 'pending' },
+      ];
+      localStorage.setItem(DEMO_STORAGE_KEY_RUNS, JSON.stringify(invalidRuns));
+
+      workspaceFixtureStore.rehydrateFromStorage();
+      expect(workspaceFixtureStore.getRun('run-bad-1')).toBeNull();
+      expect(workspaceFixtureStore.getRun('run-bad-2')).toBeNull();
+      expect(workspaceFixtureStore.getRun('run-bad-3')).toBeNull();
+      expect(workspaceFixtureStore.getRun('run-bad-4')).toBeNull();
+    });
+
+    it('P1 Contract: aligns workspace sourceKind validation with canonical contract (blank only)', async () => {
+      const now = new Date().toISOString();
+
+      // Direct validator assertions
+      expect(isValidWorkspace({ id: 'w1', name: 'Blank WS', sourceKind: 'blank', revision: 1, createdAt: now, updatedAt: now })).toBe(true);
+      expect(isValidWorkspace({ id: 'w2', name: 'GitHub WS', sourceKind: 'github', revision: 1, createdAt: now, updatedAt: now })).toBe(false);
+      expect(isValidWorkspace({ id: 'w3', name: 'Template WS', sourceKind: 'template', revision: 1, createdAt: now, updatedAt: now })).toBe(false);
+
+      // Rehydration test
+      const workspaces = [
+        { id: 'ws-valid-blank', name: 'Valid Blank Workspace', sourceKind: 'blank', revision: 1, createdAt: now, updatedAt: now },
+        { id: 'ws-invalid-github', name: 'Invalid GitHub Workspace', sourceKind: 'github', revision: 1, createdAt: now, updatedAt: now },
+        { id: 'ws-invalid-template', name: 'Invalid Template Workspace', sourceKind: 'template', revision: 1, createdAt: now, updatedAt: now },
+      ];
+      localStorage.setItem(DEMO_STORAGE_KEY_WORKSPACES, JSON.stringify(workspaces));
+
+      workspaceFixtureStore.rehydrateFromStorage();
+      expect(workspaceFixtureStore.getWorkspace('ws-valid-blank')).toBeDefined();
+      expect(workspaceFixtureStore.getWorkspace('ws-invalid-github')).toBeNull();
+      expect(workspaceFixtureStore.getWorkspace('ws-invalid-template')).toBeNull();
+    });
+
+    it('P2 Deep Validation: rejects malformed nested presentation structures without crashing', async () => {
+      const now = new Date().toISOString();
+      const validBase = {
+        workspaceId: 'ws-react-task-manager',
+        workspaceName: 'React Task Manager',
+        task: 'Deep validation test',
+        mode: 'execute' as const,
+        status: 'completed' as const,
+        createdAt: now,
+        plan: [],
+        timeline: [],
+        fileChanges: [],
+        verifications: [],
+        artifacts: [],
+        isDemo: true as const,
+      };
+
+      // 1. Malformed plan step (missing stepNumber and invalid status)
+      expect(isValidRunDetail({
+        ...validBase,
+        id: 'r-bad-plan',
+        plan: [{ id: 'p1', title: 'Test', status: 'bad_status' }],
+      })).toBe(false);
+
+      // 2. Malformed timeline event (missing category and label)
+      expect(isValidRunDetail({
+        ...validBase,
+        id: 'r-bad-timeline',
+        timeline: [{ id: 't1', timestamp: '12:00:00' }],
+      })).toBe(false);
+
+      // 3. Malformed fileChanges (invalid status)
+      expect(isValidRunDetail({
+        ...validBase,
+        id: 'r-bad-file',
+        fileChanges: [{ path: 'test.ts', status: 'corrupted' }],
+      })).toBe(false);
+
+      // 4. Malformed verifications (invalid outcome)
+      expect(isValidRunDetail({
+        ...validBase,
+        id: 'r-bad-verif',
+        verifications: [{ name: 'Test check', outcome: 'unknown' }],
+      })).toBe(false);
+
+      // 5. Malformed artifacts (missing summary)
+      expect(isValidRunDetail({
+        ...validBase,
+        id: 'r-bad-art',
+        artifacts: [{ id: 'a1', name: 'bundle.zip', type: 'ZIP', size: '10KB' }],
+      })).toBe(false);
+
+      // 6. Malformed approvalRequest (invalid risk)
+      expect(isValidRunDetail({
+        ...validBase,
+        id: 'r-bad-appr',
+        approvalRequest: { id: 'app1', action: 'deploy', target: 'url', risk: 'extreme', reason: '', scope: '', sideEffects: '', status: 'pending' },
+      })).toBe(false);
+
+      // Save all malformed items into localStorage
+      const malformedRuns = [
+        { ...validBase, id: 'run-mal-1', plan: [{ corrupted: true }] },
+        { ...validBase, id: 'run-mal-2', timeline: [{ corrupted: true }] },
+        { ...validBase, id: 'run-mal-3', fileChanges: [{ corrupted: true }] },
+        { ...validBase, id: 'run-mal-4', verifications: [{ corrupted: true }] },
+        { ...validBase, id: 'run-mal-5', artifacts: [{ corrupted: true }] },
+      ];
+      localStorage.setItem(DEMO_STORAGE_KEY_RUNS, JSON.stringify(malformedRuns));
+
+      // Rehydration must not throw and discards all malformed runs
+      expect(() => workspaceFixtureStore.rehydrateFromStorage()).not.toThrow();
+      expect(workspaceFixtureStore.getRun('run-mal-1')).toBeNull();
+      expect(workspaceFixtureStore.getRun('run-mal-2')).toBeNull();
+      expect(workspaceFixtureStore.getRun('run-mal-3')).toBeNull();
+      expect(workspaceFixtureStore.getRun('run-mal-4')).toBeNull();
+      expect(workspaceFixtureStore.getRun('run-mal-5')).toBeNull();
+
+      // UI mounting does not crash
+      renderWithProviders(<AgentLauncherView />);
+      await waitFor(() => {
+        expect(screen.getByTestId('agent-manager-view')).toBeDefined();
+      });
     });
   });
 });
