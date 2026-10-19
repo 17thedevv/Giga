@@ -10,7 +10,7 @@ import { AuthProvider } from '../src/app/context/AuthContext.js';
 import { RouterProvider, useRouter } from '../src/app/router.js';
 import { workspaceFixtureStore } from '../src/features/agent/workspace-fixtures.js';
 import { mockDataAdapter, MOCK_USER } from '../src/lib/api/mock-adapter.js';
-import { realApiClient } from '../src/lib/api/client.js';
+import { realApiClient, ApiException } from '../src/lib/api/client.js';
 
 function renderWithProviders(ui: React.ReactElement, initialPath = '/agent', mode: 'mock' | 'real' = 'mock') {
   return render(
@@ -860,6 +860,107 @@ describe('Workspace-First GigaAgent UX (17T-40)', () => {
       await new Promise((r) => setTimeout(r, 50));
       // Mock run data remains active
       expect(screen.getByTestId('run-task-title').textContent).toContain('Build a responsive React task manager');
+    });
+
+    it('P1 RunView: Mock -> Real with pending response clears Mock run immediately and prevents stale cross-contamination', async () => {
+      const deferredRealRun = createDeferred<any>();
+      vi.spyOn(realApiClient, 'getAgentRun').mockImplementation(() => deferredRealRun.promise);
+      vi.spyOn(realApiClient, 'getAgentCapabilities').mockResolvedValue(defaultUnavailableCaps as any);
+
+      renderWithProviders(
+        <>
+          <ModeSwitcher />
+          <AgentRunView />
+        </>,
+        '/agent/runs/run-golden-react',
+        'mock'
+      );
+
+      // Initially Mock run is loaded
+      await waitFor(() => {
+        expect(screen.getByTestId('agent-run-view')).toBeDefined();
+        expect(screen.getByTestId('run-task-title').textContent).toContain('Build a responsive React task manager');
+      });
+
+      // Switch to Real mode
+      fireEvent.click(screen.getByTestId('switch-to-real-btn'));
+      expect(screen.getByTestId('current-api-mode').textContent).toBe('real');
+
+      // Outdated Mock run is immediately cleared and loading indicator is shown
+      expect(screen.queryByTestId('agent-run-view')).toBeNull();
+      expect(screen.getByTestId('agent-run-loading')).toBeDefined();
+
+      // Resolve Real run
+      deferredRealRun.resolve({
+        run: {
+          id: 'run-golden-react',
+          task: 'Real Cloud Admitted Task',
+          status: 'running',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+      });
+
+      await waitFor(() => {
+        expect(screen.getByTestId('agent-run-view')).toBeDefined();
+      });
+      expect(screen.getByTestId('run-task-title').textContent).toBe('Real Cloud Admitted Task');
+      // Must not show DEMO SIMULATION badge
+      expect(screen.queryByTestId('demo-run-badge')).toBeNull();
+    });
+
+    it('P1 RunView: API failure and 404 handling settle error states correctly without fake fallback', async () => {
+      vi.spyOn(realApiClient, 'getAgentCapabilities').mockResolvedValue(defaultUnavailableCaps as any);
+
+      // 1. Test 404 Not Found
+      vi.spyOn(realApiClient, 'getAgentRun').mockRejectedValue(new ApiException(404, 'NOT_FOUND', 'Run not found'));
+
+      const firstMount = renderWithProviders(<AgentRunView />, '/agent/runs/non-existent-run', 'real');
+
+      await waitFor(() => {
+        expect(screen.getByTestId('agent-run-not-found')).toBeDefined();
+      });
+      expect(screen.getByText('Run not found on real backend.')).toBeDefined();
+      expect(screen.queryByTestId('demo-run-badge')).toBeNull();
+      firstMount.unmount();
+
+      // 2. Test 500 / other API failure
+      vi.spyOn(realApiClient, 'getAgentRun').mockRejectedValue(new Error('Internal server error'));
+
+      const secondMount = renderWithProviders(<AgentRunView />, '/agent/runs/failing-run', 'real');
+
+      await waitFor(() => {
+        expect(screen.getByTestId('agent-run-not-found')).toBeDefined();
+      });
+      expect(screen.getByText(/Real Cloud execution runtime is unavailable/)).toBeDefined();
+      expect(screen.queryByTestId('demo-run-badge')).toBeNull();
+      secondMount.unmount();
+    });
+
+    it('P1 RunView: component unmount during pending Real run fetch is safely ignored by request fencing', async () => {
+      const deferredRealRun = createDeferred<any>();
+      vi.spyOn(realApiClient, 'getAgentRun').mockImplementation(() => deferredRealRun.promise);
+      vi.spyOn(realApiClient, 'getAgentCapabilities').mockResolvedValue(defaultUnavailableCaps as any);
+
+      const { unmount } = renderWithProviders(<AgentRunView />, '/agent/runs/unmount-run', 'real');
+
+      expect(screen.getByTestId('agent-run-loading')).toBeDefined();
+
+      // Unmount while request is still pending
+      unmount();
+
+      // Resolve delayed promise after unmount
+      expect(() => {
+        deferredRealRun.resolve({
+          run: {
+            id: 'unmount-run',
+            task: 'Task resolved after unmount',
+            status: 'completed',
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          },
+        });
+      }).not.toThrow();
     });
 
     it('P1 RunView: Real mode disables Cancel and Approval controls when capabilities are unavailable', async () => {

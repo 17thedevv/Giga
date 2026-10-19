@@ -57,8 +57,8 @@ Web frontend redesign aligning the GigaAgent user experience with Giga's workspa
 
 ### Frontend Test Results
 - **Suite**: `vitest run`
-- **Results**: **205 / 205 tests passing** across 13 test files (zero failures, zero regressions).
-- **Dedicated Test File**: `apps/web/tests/agent-workspace-ux.test.tsx` (29 scenarios covering Blank Workspace defaults, prompt validation, gated sources, mode toggling, runtime boundaries, Golden Flow execution, Ask/Plan modes, failed runs, cancellation, INV-07 approval gates, Real mode truthfulness, subpath routing, and PR #36 review finding regressions).
+- **Results**: **208 / 208 tests passing** across 13 test files (zero failures, zero regressions).
+- **Dedicated Test File**: `apps/web/tests/agent-workspace-ux.test.tsx` (32 scenarios covering Blank Workspace defaults, prompt validation, gated sources, mode toggling, runtime boundaries, Golden Flow execution, Ask/Plan modes, failed runs, cancellation, INV-07 approval gates, Real mode truthfulness, subpath routing, and PR #36 review finding regressions).
 
 ### Compiler & Production Build
 - **Typecheck**: `npm run typecheck --prefix apps/web` (0 errors, clean TypeScript emit).
@@ -72,7 +72,19 @@ Web frontend redesign aligning the GigaAgent user experience with Giga's workspa
 
 ## 3. Visual Verification Evidence
 
-All screenshots captured from the live local preview (`http://localhost:5173/agent?demo=1`).
+All screenshots captured from the live local preview (`http://localhost:5173/agent`).
+
+### Mode Switching & Default Blank Workspace Verification
+
+#### Default Blank Workspace Selection & Target Label
+Clearly defaults to a fresh blank workspace with `New Blank Workspace (Default)` selected and `Workspace Target: New Blank Workspace` indicated.
+![Default Blank Workspace](screen_17t_40_workspace_default.png)
+
+#### Real API Mode Isolation & Runtime Warning
+Upon switching to Real API Mode, Mock fixtures and runs are immediately cleared. An explicit warning alert informs the developer that backend Cloud runtime execution requires separate infrastructure readiness (Linear 17T-48 tracks frontend control-plane integration), launch buttons are disabled, and zero mock data leaks.
+![Real Mode Isolation](screen_17t_40_mode_switching_real.png)
+
+---
 
 ### Desktop Launcher & Mode Controls
 
