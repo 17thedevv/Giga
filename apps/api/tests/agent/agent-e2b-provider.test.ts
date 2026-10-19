@@ -8,11 +8,10 @@ import {
   MockE2bTransport,
   validateE2bConfig,
   loadE2bConfigFromEnv,
-  type E2bProviderConfig,
-  type CloudSandboxProviderClient,
 } from '../../src/modules/agent/e2b-provider.js';
 import {
   IsolatedCloudSandboxAdapter,
+  type CloudSandboxProviderClient,
 } from '../../src/modules/agent/sandbox-adapter.js';
 import {
   DeterministicFakeExecutionRuntime,
@@ -840,6 +839,7 @@ describe('E2B Cloud Sandbox Provider Client (17T-69)', () => {
         async claimRun() {
           return {
             run: fakeRun,
+            workerId: 'test-worker-1',
             leaseToken: 'token-123',
             attemptCount: 1,
             leaseExpiresAt: new Date(Date.now() + 100).toISOString(),
@@ -852,11 +852,18 @@ describe('E2B Cloud Sandbox Provider Client (17T-69)', () => {
           return [];
         },
         async getConversationContext() {
-          return { messages: [] };
+          return { messages: [], totalBytes: 0, isTruncated: false };
         },
         async releaseLease() {},
         async finalizeRun() {
-          return { run: { ...fakeRun, status: 'failed' } };
+          return {
+            run: { ...fakeRun, status: 'failed' as const },
+            event: {
+              sequence: 1,
+              type: 'run.failed' as const,
+              data: { runId: fakeRun.id, code: 'TIMEOUT', message: 'failed' },
+            },
+          };
         },
       };
 
