@@ -26,6 +26,9 @@ export interface PrepareRuntimeRequest {
   readonly modelId: string;
   readonly signal: AbortSignal;
   readonly timeoutMs?: number;
+  readonly workerId?: string;
+  readonly leaseToken?: string;
+  readonly attemptNumber?: number;
 }
 
 export type PrepareRuntimeResult =

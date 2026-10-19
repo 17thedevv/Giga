@@ -236,6 +236,7 @@ export async function createTestDatabase(migrations?: readonly Migration[]): Pro
 
   const cleanup = async (): Promise<void> => {
     try {
+      await pool.query('DELETE FROM agent_sandbox_sessions;');
       await pool.query('DELETE FROM agent_messages;');
       await pool.query('DELETE FROM agent_run_steps;');
       await pool.query('DELETE FROM agent_run_events;');

@@ -1,8 +1,9 @@
 import crypto from 'node:crypto';
-import type { AgentMode, VerifiedCheck, SandboxSnapshot, SandboxFileEntry, SandboxSessionInfo } from './types.js';
+import type { AgentMode, VerifiedCheck, SandboxSnapshot, SandboxFileEntry, SandboxSessionInfo, DurableSandboxSession } from './types.js';
 import { isSafeRelativePath } from './tool-registry.js';
 import { redactSensitiveContent, boundUtf8 } from './redaction.js';
 import type { ExecutionRuntime, ValidatedToolCall, BoundedToolResult, PrepareRuntimeRequest, PrepareRuntimeResult } from './execution-runtime.js';
+import type { AgentRepository } from './repository.js';
 
 export interface SandboxNetworkPolicy {
   readonly egressEnabled: boolean;
@@ -44,6 +45,7 @@ export interface CloudSandboxConfig {
   readonly maxOutputBytes?: number;
   readonly egressAllowlist?: readonly string[];
   readonly egressEnabled?: boolean;
+  readonly repository?: AgentRepository;
 }
 
 export type DestroyStatus = 'active' | 'destroying' | 'destroyed' | 'destroy_failed';
@@ -123,6 +125,7 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
   private readonly maxOutputBytes: number;
   private readonly egressEnabled: boolean;
   private readonly egressAllowlist: readonly string[];
+  private readonly repository?: AgentRepository;
 
   constructor(config: CloudSandboxConfig = {}) {
     this.providerClient = config.providerClient;
@@ -130,6 +133,7 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
     this.maxOutputBytes = config.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
     this.egressEnabled = config.egressEnabled ?? false; // Deny-by-default
     this.egressAllowlist = config.egressAllowlist ?? [];
+    this.repository = config.repository;
   }
 
   get isConfigured(): boolean {
@@ -149,7 +153,11 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
       };
     }
 
-    if (request.signal.aborted) {
+    if (this.repository && (await this.repository.canPersistSandboxSessions())) {
+      return this.prepareDurable(request);
+    }
+
+    if (request.signal?.aborted) {
       return {
         available: false,
         code: 'RUNTIME_UNAVAILABLE',
@@ -240,7 +248,7 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
 
         // Post-Allocation Abort Fencing:
         // If the caller aborted while sandbox allocation was in flight, destroy it or queue for reconciliation!
-        if (request.signal.aborted) {
+        if (request.signal?.aborted) {
           const abortedSession: CloudSessionState = {
             sessionId,
             runId: request.runId,
@@ -313,6 +321,163 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
     } finally {
       this.inFlightPrepares.delete(request.runId);
     }
+  }
+
+  private async prepareDurable(request: PrepareRuntimeRequest): Promise<PrepareRuntimeResult> {
+    if (!this.providerClient) {
+      return {
+        available: false,
+        code: 'RUNTIME_UNAVAILABLE',
+        reason: 'No isolated cloud sandbox provider configured',
+      };
+    }
+
+    if (request.signal?.aborted) {
+      return {
+        available: false,
+        code: 'RUNTIME_UNAVAILABLE',
+        reason: 'Execution was aborted before sandbox allocation',
+      };
+    }
+
+    const timeoutMs = request.timeoutMs ?? this.defaultTimeoutMs;
+    const workerId = request.workerId ?? `worker-${crypto.randomUUID()}`;
+    const leaseToken = request.leaseToken ?? `lease-${crypto.randomUUID()}`;
+    const attemptNumber = request.attemptNumber ?? 1;
+
+    // 1. Create allocation intent in PostgreSQL
+    let allocationIntent: { session: DurableSandboxSession; duplicate: boolean };
+    try {
+      allocationIntent = await this.repository!.createSandboxAllocationIntent({
+        ownerId: request.ownerId,
+        workspaceId: request.workspaceId,
+        runId: request.runId,
+        attemptNumber,
+        mode: request.mode,
+        providerType: this.providerClient.providerName,
+        workerId,
+        leaseToken,
+        allocationTimeoutMs: timeoutMs,
+      });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.includes('TENANT_MISMATCH')) {
+        return {
+          available: false,
+          code: 'TENANT_MISMATCH',
+          reason: message,
+        };
+      }
+      return {
+        available: false,
+        code: 'RUNTIME_UNAVAILABLE',
+        reason: message,
+      };
+    }
+
+    const durableSession = allocationIntent.session;
+    const sessionId = durableSession.id;
+
+    // If duplicate active session was returned idempotently:
+    if (allocationIntent.duplicate && durableSession.lifecycleState === 'active') {
+      return { available: true, sessionId };
+    }
+
+    // 2. Abort check before calling provider
+    if (request.signal?.aborted) {
+      await this.repository!.recordSandboxAllocationFailed(
+        sessionId,
+        'Execution was aborted before sandbox allocation'
+      ).catch(() => {});
+      return {
+        available: false,
+        code: 'RUNTIME_UNAVAILABLE',
+        reason: 'Execution was aborted before sandbox allocation',
+      };
+    }
+
+    // 3. Allocate sandbox at remote provider
+    const safeEnv: Record<string, string> = {
+      GIGA_SANDBOX: '1',
+      GIGA_WORKSPACE_ID: request.workspaceId,
+      GIGA_RUN_ID: request.runId,
+      NODE_ENV: 'production',
+    };
+
+    const networkPolicy: SandboxNetworkPolicy = {
+      egressEnabled: this.egressEnabled,
+      allowlist: this.egressAllowlist,
+    };
+
+    let sandboxId: string;
+    try {
+      const res = await this.providerClient.createSandbox({
+        workspaceId: request.workspaceId,
+        ownerId: request.ownerId,
+        timeoutMs,
+        env: safeEnv,
+        networkPolicy,
+        signal: request.signal,
+      });
+      sandboxId = res.sandboxId;
+    } catch (createErr: unknown) {
+      const errMsg = createErr instanceof Error ? createErr.message : String(createErr);
+      await this.repository!.recordSandboxAllocationFailed(sessionId, errMsg).catch(() => {});
+      return {
+        available: false,
+        code: 'RUNTIME_UNAVAILABLE',
+        reason: errMsg,
+      };
+    }
+
+    // 4. Post-Allocation Abort Fencing:
+    if (request.signal?.aborted) {
+      await this.providerClient.destroySandbox(sandboxId).catch(() => {});
+      await this.repository!.markSandboxDestroyed(sessionId, sandboxId).catch(() => {});
+      return {
+        available: false,
+        code: 'RUNTIME_UNAVAILABLE',
+        reason: 'Execution was aborted during sandbox allocation',
+      };
+    }
+
+    // 5. Commit allocated provider session ID to PostgreSQL with worker lease check
+    try {
+      await this.repository!.commitSandboxSessionAllocated({
+        sessionId,
+        ownerId: request.ownerId,
+        runId: request.runId,
+        leaseToken,
+        providerSessionId: sandboxId,
+      });
+    } catch (commitErr: unknown) {
+      // Fenced! Lease expired or run status changed. Destroy provider sandbox immediately!
+      await this.providerClient.destroySandbox(sandboxId).catch(() => {});
+      return {
+        available: false,
+        code: 'RUNTIME_UNAVAILABLE',
+        reason: commitErr instanceof Error ? commitErr.message : String(commitErr),
+      };
+    }
+
+    // Store in-memory handle for fast cancellation controller routing and verifiedChecks
+    this.sessions.set(sessionId, {
+      sessionId,
+      runId: request.runId,
+      workspaceId: request.workspaceId,
+      ownerId: request.ownerId,
+      mode: request.mode,
+      sandboxId,
+      verifiedChecks: new Map(),
+      createdAt: durableSession.createdAt,
+      timeoutMs,
+      active: true,
+      destroyStatus: 'active',
+      destroyAttempts: 0,
+      activeControllers: new Set(),
+    });
+
+    return { available: true, sessionId };
   }
 
   async invoke(sessionId: string, toolCall: ValidatedToolCall, signal: AbortSignal): Promise<BoundedToolResult> {
@@ -778,71 +943,129 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
 
   async stop(sessionId: string): Promise<void> {
     const session = this.sessions.get(sessionId);
-    if (!session) return;
-    session.active = false;
+    if (session) {
+      session.active = false;
 
-    if (session.activeControllers) {
-      for (const ctrl of session.activeControllers) {
+      if (session.activeControllers) {
+        for (const ctrl of session.activeControllers) {
+          try {
+            ctrl.abort();
+          } catch {
+            // ignore
+          }
+        }
+        session.activeControllers.clear();
+      }
+
+      if (this.providerClient && session.destroyStatus !== 'destroyed') {
+        session.destroyStatus = 'destroying';
+        session.destroyAttempts++;
         try {
-          ctrl.abort();
-        } catch {
-          // ignore
+          await this.providerClient.destroySandbox(session.sandboxId);
+          session.destroyStatus = 'destroyed';
+          session.destroyError = undefined;
+          if (this.repository && (await this.repository.canPersistSandboxSessions())) {
+            await this.repository.markSandboxDestroyed(sessionId, session.sandboxId).catch(() => {});
+          }
+        } catch (err) {
+          session.destroyStatus = 'destroy_failed';
+          const rawErr = err instanceof Error ? err.message : String(err);
+          session.destroyError = sanitizeSandboxOutput(rawErr, 1024);
+          if (this.repository && (await this.repository.canPersistSandboxSessions())) {
+            await this.repository.markSandboxCleanupPending(sessionId, rawErr).catch(() => {});
+          }
+          throw err;
         }
       }
-      session.activeControllers.clear();
+      return;
     }
 
-    if (this.providerClient && session.destroyStatus !== 'destroyed') {
-      session.destroyStatus = 'destroying';
-      session.destroyAttempts++;
-      try {
-        await this.providerClient.destroySandbox(session.sandboxId);
-        session.destroyStatus = 'destroyed';
-        session.destroyError = undefined;
-      } catch (err) {
-        session.destroyStatus = 'destroy_failed';
-        const rawErr = err instanceof Error ? err.message : String(err);
-        session.destroyError = sanitizeSandboxOutput(rawErr, 1024);
-        throw err;
+    if (this.repository && (await this.repository.canPersistSandboxSessions())) {
+      const durable = await this.repository.getSandboxSessionById(sessionId);
+      if (durable && durable.lifecycleState !== 'destroyed') {
+        await this.repository.markSandboxStopping(durable.ownerId, sessionId).catch(() => {});
+        if (durable.providerSessionId && this.providerClient) {
+          try {
+            await this.providerClient.destroySandbox(durable.providerSessionId);
+            await this.repository.markSandboxDestroyed(sessionId, durable.providerSessionId);
+          } catch (err: unknown) {
+            const rawErr = err instanceof Error ? err.message : String(err);
+            await this.repository.markSandboxCleanupPending(sessionId, rawErr);
+            throw err;
+          }
+        } else {
+          await this.repository.markSandboxDestroyed(sessionId);
+        }
       }
     }
   }
 
   async cleanup(sessionId: string, options: { force?: boolean } = {}): Promise<void> {
     const session = this.sessions.get(sessionId);
-    if (!session) return;
-
-    try {
-      await this.stop(sessionId);
-    } catch (err) {
-      if (!options.force) {
-        // Keep session recorded in this.sessions so reconciliation worker can retry!
-        const rawErr = err instanceof Error ? err.message : String(err);
-        const safeErr = sanitizeSandboxOutput(rawErr, 1024);
-        throw new Error(
-          `Failed to destroy sandbox '${session.sandboxId}': ${safeErr}. Session retained for reconciliation.`
-        );
+    if (session) {
+      try {
+        await this.stop(sessionId);
+      } catch (err) {
+        if (!options.force) {
+          // Keep session recorded in this.sessions so reconciliation worker can retry!
+          const rawErr = err instanceof Error ? err.message : String(err);
+          const safeErr = sanitizeSandboxOutput(rawErr, 1024);
+          throw new Error(
+            `Failed to destroy sandbox '${session.sandboxId}': ${safeErr}. Session retained for reconciliation.`
+          );
+        }
       }
+
+      if (session.destroyStatus === 'destroyed' || options.force) {
+        this.sessions.delete(sessionId);
+      }
+      return;
     }
 
-    if (session.destroyStatus === 'destroyed' || options.force) {
-      this.sessions.delete(sessionId);
+    if (this.repository && (await this.repository.canPersistSandboxSessions())) {
+      try {
+        await this.stop(sessionId);
+      } catch (err) {
+        if (!options.force) {
+          const rawErr = err instanceof Error ? err.message : String(err);
+          const safeErr = sanitizeSandboxOutput(rawErr, 1024);
+          throw new Error(
+            `Failed to destroy sandbox '${sessionId}': ${safeErr}. Session retained for reconciliation.`
+          );
+        }
+      }
     }
   }
 
   async getSession(sessionId: string): Promise<SandboxSessionInfo | undefined> {
     const session = this.sessions.get(sessionId);
-    if (!session) return undefined;
-    return {
-      sessionId: session.sessionId,
-      runId: session.runId,
-      workspaceId: session.workspaceId,
-      ownerId: session.ownerId,
-      mode: session.mode,
-      active: session.active,
-      createdAt: session.createdAt,
-      timeoutMs: session.timeoutMs,
-    };
+    if (session) {
+      return {
+        sessionId: session.sessionId,
+        runId: session.runId,
+        workspaceId: session.workspaceId,
+        ownerId: session.ownerId,
+        mode: session.mode,
+        active: session.active,
+        createdAt: session.createdAt,
+        timeoutMs: session.timeoutMs,
+      };
+    }
+    if (this.repository && (await this.repository.canPersistSandboxSessions())) {
+      const durable = await this.repository.getSandboxSessionById(sessionId);
+      if (durable) {
+        return {
+          sessionId: durable.id,
+          runId: durable.runId,
+          workspaceId: durable.workspaceId,
+          ownerId: durable.ownerId,
+          mode: durable.mode,
+          active: durable.lifecycleState === 'active',
+          createdAt: durable.createdAt,
+        };
+      }
+    }
+    return undefined;
   }
 
   getPendingDestructions(): readonly CloudSessionState[] {

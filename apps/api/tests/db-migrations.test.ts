@@ -39,7 +39,7 @@ describe('Database Migrations and Utilities', () => {
     try {
       // First run: applies all pending migrations
       const firstRun = await runMigrations(pool);
-      assert.strictEqual(firstRun.length, 13);
+      assert.strictEqual(firstRun.length, 14);
       assert.strictEqual(firstRun[0], '001_initial_users_and_sessions');
       assert.strictEqual(firstRun[1], '002_conversations_and_messages');
       assert.strictEqual(firstRun[2], '003_skills_and_preferences');
@@ -53,6 +53,7 @@ describe('Database Migrations and Utilities', () => {
       assert.strictEqual(firstRun[10], '011_agent_control_plane');
       assert.strictEqual(firstRun[11], '012_agent_orchestrator');
       assert.strictEqual(firstRun[12], '013_agent_messages');
+      assert.strictEqual(firstRun[13], '014_agent_sandbox_sessions');
 
       const versions = await getAppliedMigrationVersions(pool);
       assert.ok(versions.has(1));
@@ -68,6 +69,7 @@ describe('Database Migrations and Utilities', () => {
       assert.ok(versions.has(11));
       assert.ok(versions.has(12));
       assert.ok(versions.has(13));
+      assert.ok(versions.has(14));
 
       // Second run: idempotent, applies 0 migrations
       const secondRun = await runMigrations(pool);

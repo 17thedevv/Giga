@@ -7,6 +7,7 @@ import {
   type AgentEventType,
   type AgentMessage,
   type AgentMessageRole,
+  type AgentMode,
   type AgentRun,
   type AgentStep,
   type AgentStatus,
@@ -22,6 +23,11 @@ import {
   type ToolRisk,
   type VerifiedCheck,
   type WorkerLease,
+  type DurableSandboxSession,
+  type CreateSandboxAllocationInput,
+  type SandboxLifecycleState,
+  type SandboxAllocationState,
+  type SandboxCleanupState,
 } from './types.js';
 import {
   SENSITIVE_KEY_NAMES,
@@ -176,6 +182,56 @@ const message = (row: MessageRow): AgentMessage => ({
   role: row.role,
   content: row.content,
   createdAt: iso(row.created_at),
+});
+
+interface SandboxSessionRow {
+  id: string;
+  owner_id: string;
+  workspace_id: string;
+  run_id: string;
+  attempt_number: number;
+  mode: AgentMode;
+  provider_type: string;
+  provider_session_id: string | null;
+  lifecycle_state: SandboxLifecycleState;
+  allocation_state: SandboxAllocationState;
+  cleanup_state: SandboxCleanupState;
+  worker_id: string;
+  lease_token: string;
+  allocation_intent_id: string;
+  cleanup_attempts: number;
+  next_cleanup_retry_at: Date | null;
+  allocation_expires_at: Date;
+  created_at: Date;
+  updated_at: Date;
+  destroyed_at: Date | null;
+  diagnostics: Record<string, unknown>;
+  verified_checks: VerifiedCheck[] | null;
+}
+
+const sandboxSession = (row: SandboxSessionRow): DurableSandboxSession => ({
+  id: row.id,
+  ownerId: row.owner_id,
+  workspaceId: row.workspace_id,
+  runId: row.run_id,
+  attemptNumber: row.attempt_number,
+  mode: row.mode,
+  providerType: row.provider_type,
+  providerSessionId: row.provider_session_id,
+  lifecycleState: row.lifecycle_state,
+  allocationState: row.allocation_state,
+  cleanupState: row.cleanup_state,
+  workerId: row.worker_id,
+  leaseToken: row.lease_token,
+  allocationIntentId: row.allocation_intent_id,
+  cleanupAttempts: row.cleanup_attempts,
+  nextCleanupRetryAt: row.next_cleanup_retry_at ? iso(row.next_cleanup_retry_at) : null,
+  allocationExpiresAt: iso(row.allocation_expires_at),
+  createdAt: iso(row.created_at),
+  updatedAt: iso(row.updated_at),
+  destroyedAt: row.destroyed_at ? iso(row.destroyed_at) : null,
+  diagnostics: row.diagnostics ?? {},
+  verifiedChecks: row.verified_checks ?? [],
 });
 
 export type { ClaimedRun, WorkerLease };
@@ -818,7 +874,7 @@ export class AgentRepository {
         if (outcome.status === 'completed') {
           const sanitizedSummary = AgentRepository.redactSensitiveContent(outcome.summary);
           const boundedSummary = AgentRepository.boundUtf8(sanitizedSummary);
-          const sanitizedChecks = outcome.verifiedChecks.map((c) => ({
+          const sanitizedChecks = (outcome.verifiedChecks ?? []).map((c) => ({
             ...c,
             summary: c.summary ? AgentRepository.boundUtf8(AgentRepository.redactSensitiveContent(c.summary)) : c.summary,
           }));
@@ -1280,5 +1336,411 @@ export class AgentRepository {
       totalBytes: currentBytes,
       isTruncated,
     };
+  }
+
+  /**
+   * Checks if migration 014 (agent_sandbox_sessions) is applied.
+   */
+  async canPersistSandboxSessions(client?: pg.PoolClient | pg.Pool): Promise<boolean> {
+    const executor = client ?? this.pool;
+    try {
+      const res = await executor.query(
+        "SELECT 1 FROM information_schema.tables WHERE table_name = 'agent_sandbox_sessions'"
+      );
+      return res.rows.length > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Creates a durable sandbox session allocation intent in PostgreSQL.
+   * Guarantees:
+   * 1. Fenced with worker lease check on agent_runs
+   * 2. Rejects terminal runs
+   * 3. Idempotently returns existing active session for same attempt & worker
+   * 4. Enforces tenant and mode matching (rejects cross-tenant with TENANT_MISMATCH)
+   * 5. Atomically transitions to 'allocating' with expiration TTL
+   */
+  async createSandboxAllocationIntent(
+    input: CreateSandboxAllocationInput
+  ): Promise<{ session: DurableSandboxSession; duplicate: boolean }> {
+    return this.transaction(async (client) => {
+      // 1. Lock and verify the run
+      const runRes = await client.query<RunRow>(
+        'SELECT * FROM agent_runs WHERE owner_id = $1 AND workspace_id = $2 AND id = $3 FOR UPDATE',
+        [input.ownerId, input.workspaceId, input.runId]
+      );
+      const runRow = runRes.rows[0];
+      if (!runRow) throw new NotFoundError();
+
+      if (['completed', 'failed', 'cancelled'].includes(runRow.status)) {
+        throw new ConflictError('Cannot allocate sandbox for terminal run');
+      }
+
+      this.assertActiveLease(runRow, input.leaseToken);
+
+      // 2. Check existing active or allocating sessions for this run
+      const existingRes = await client.query<SandboxSessionRow>(
+        `SELECT * FROM agent_sandbox_sessions
+         WHERE run_id = $1 AND lifecycle_state IN ('allocating', 'active', 'stopping')
+         FOR UPDATE`,
+        [input.runId]
+      );
+      const existing = existingRes.rows[0];
+
+      if (existing) {
+        // Tenant boundary enforcement
+        if (existing.owner_id !== input.ownerId || existing.workspace_id !== input.workspaceId) {
+          throw new ConflictError('TENANT_MISMATCH: owner or workspace mismatch on active sandbox session');
+        }
+        // Mode boundary enforcement
+        if (existing.mode !== input.mode) {
+          throw new ConflictError(`TENANT_MISMATCH: active session is '${existing.mode}' mode, requested '${input.mode}'`);
+        }
+
+        // Check if this is an idempotent retry by the same worker lease & attempt
+        if (
+          existing.attempt_number === input.attemptNumber &&
+          existing.worker_id === input.workerId &&
+          existing.lease_token === input.leaseToken
+        ) {
+          return { session: sandboxSession(existing), duplicate: true };
+        }
+
+        // If existing session is in 'allocating' state but expired, transition it to failed
+        if (
+          existing.lifecycle_state === 'allocating' &&
+          new Date(existing.allocation_expires_at).getTime() <= Date.now()
+        ) {
+          await client.query(
+            `UPDATE agent_sandbox_sessions
+             SET lifecycle_state = 'failed', allocation_state = 'timed_out',
+                 diagnostics = '{"reason": "ALLOCATION_TIMEOUT"}',
+                 updated_at = NOW()
+             WHERE id = $1`,
+            [existing.id]
+          );
+        } else {
+          throw new ConflictError('A non-terminal sandbox session is already active or allocating for this run');
+        }
+      }
+
+      // 3. Insert new session record in 'allocating' state
+      const timeoutMs = input.allocationTimeoutMs ?? 60_000;
+      const expiresAt = new Date(Date.now() + timeoutMs);
+      const intentId = input.allocationIntentId ?? crypto.randomUUID();
+
+      const inserted = await client.query<SandboxSessionRow>(
+        `INSERT INTO agent_sandbox_sessions (
+           owner_id, workspace_id, run_id, attempt_number, mode, provider_type,
+           lifecycle_state, allocation_state, cleanup_state, worker_id, lease_token,
+           allocation_intent_id, allocation_expires_at, diagnostics
+         ) VALUES ($1, $2, $3, $4, $5, $6, 'allocating', 'pending', 'none', $7, $8, $9, $10, $11)
+         RETURNING *`,
+        [
+          input.ownerId,
+          input.workspaceId,
+          input.runId,
+          input.attemptNumber,
+          input.mode,
+          input.providerType,
+          input.workerId,
+          input.leaseToken,
+          intentId,
+          expiresAt,
+          JSON.stringify({ allocationIntentId: intentId }),
+        ]
+      );
+
+      return { session: sandboxSession(inserted.rows[0]!), duplicate: false };
+    });
+  }
+
+  /**
+   * Finalizes allocation after provider returned a sandbox identifier.
+   * Fenced: verifies worker lease is still active. If stale or cancelled, marks session for cleanup.
+   */
+  async commitSandboxSessionAllocated(params: {
+    sessionId: string;
+    ownerId: string;
+    runId: string;
+    leaseToken: string;
+    providerSessionId: string;
+  }): Promise<DurableSandboxSession> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // 1. Lock session row
+      const sessionRes = await client.query<SandboxSessionRow>(
+        'SELECT * FROM agent_sandbox_sessions WHERE id = $1 AND owner_id = $2 AND run_id = $3 FOR UPDATE',
+        [params.sessionId, params.ownerId, params.runId]
+      );
+      const session = sessionRes.rows[0];
+      if (!session) {
+        await client.query('ROLLBACK');
+        throw new NotFoundError();
+      }
+
+      // 2. Lock and check run lease
+      const runRes = await client.query<RunRow>(
+        'SELECT * FROM agent_runs WHERE owner_id = $1 AND id = $2 FOR UPDATE',
+        [params.ownerId, params.runId]
+      );
+      const runRow = runRes.rows[0];
+
+      const isLeaseActive =
+        runRow &&
+        runRow.status === 'running' &&
+        runRow.lease_token === params.leaseToken &&
+        runRow.lease_expires_at &&
+        new Date(runRow.lease_expires_at).getTime() > Date.now();
+
+      if (!isLeaseActive) {
+        // Worker was fenced! Attach provider session ID and immediately mark cleanup_pending!
+        const existingDiag = (session.diagnostics && typeof session.diagnostics === 'object') ? session.diagnostics : {};
+        const mergedDiag = JSON.stringify({ ...existingDiag, fence_reason: 'WORKER_FENCED_DURING_ALLOCATION' });
+        await client.query(
+          `UPDATE agent_sandbox_sessions
+           SET provider_session_id = $1, lifecycle_state = 'cleanup_pending', cleanup_state = 'pending',
+               allocation_state = 'allocated',
+               diagnostics = $2,
+               updated_at = NOW()
+           WHERE id = $3`,
+          [params.providerSessionId, mergedDiag, params.sessionId]
+        );
+        await client.query('COMMIT');
+        throw new ConflictError('Worker fenced: lease expired during sandbox allocation');
+      }
+
+      if (session.lifecycle_state !== 'allocating') {
+        await client.query('ROLLBACK');
+        throw new ConflictError(`Session cannot be activated from state '${session.lifecycle_state}'`);
+      }
+
+      // 3. Transition to active
+      const updated = await client.query<SandboxSessionRow>(
+        `UPDATE agent_sandbox_sessions
+         SET provider_session_id = $1, lifecycle_state = 'active', allocation_state = 'allocated',
+             updated_at = NOW()
+         WHERE id = $2 AND owner_id = $3 AND run_id = $4
+         RETURNING *`,
+        [params.providerSessionId, params.sessionId, params.ownerId, params.runId]
+      );
+      await client.query('COMMIT');
+      return sandboxSession(updated.rows[0]!);
+    } catch (err) {
+      try {
+        await client.query('ROLLBACK');
+      } catch {
+        // Ignore rollback failure if already committed
+      }
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Records that sandbox allocation failed or timed out.
+   */
+  async recordSandboxAllocationFailed(
+    sessionId: string,
+    reason: string,
+    diagnostics?: Record<string, unknown>
+  ): Promise<DurableSandboxSession> {
+    const cleanReason = redactSensitiveContent(reason);
+    const cleanDiag = diagnostics
+      ? (AgentRepository.redactJsonValue(diagnostics) as Record<string, unknown>)
+      : {};
+
+    const sessionRes = await this.pool.query<SandboxSessionRow>(
+      "SELECT id, diagnostics FROM agent_sandbox_sessions WHERE id = $1 AND lifecycle_state IN ('allocating', 'destroying')",
+      [sessionId]
+    );
+    const row = sessionRes.rows[0];
+    if (!row) throw new NotFoundError();
+
+    const existingDiag = (row.diagnostics && typeof row.diagnostics === 'object') ? row.diagnostics : {};
+    const mergedDiag = JSON.stringify({ ...existingDiag, reason: cleanReason, ...cleanDiag });
+
+    const updated = await this.pool.query<SandboxSessionRow>(
+      `UPDATE agent_sandbox_sessions
+       SET lifecycle_state = 'failed', allocation_state = 'failed',
+           diagnostics = $1, updated_at = NOW()
+       WHERE id = $2 AND lifecycle_state IN ('allocating', 'destroying')
+       RETURNING *`,
+      [mergedDiag, sessionId]
+    );
+    if (!updated.rows[0]) throw new NotFoundError();
+    return sandboxSession(updated.rows[0]);
+  }
+
+  /**
+   * Gets a sandbox session by ID with tenant owner scoping.
+   */
+  async getSandboxSession(ownerId: string, sessionId: string): Promise<DurableSandboxSession> {
+    const result = await this.pool.query<SandboxSessionRow>(
+      'SELECT * FROM agent_sandbox_sessions WHERE owner_id = $1 AND id = $2',
+      [ownerId, sessionId]
+    );
+    if (!result.rows[0]) throw new NotFoundError();
+    return sandboxSession(result.rows[0]);
+  }
+
+  /**
+   * Gets a sandbox session by ID without owner scoping (internal use).
+   */
+  async getSandboxSessionById(sessionId: string): Promise<DurableSandboxSession | null> {
+    const result = await this.pool.query<SandboxSessionRow>(
+      'SELECT * FROM agent_sandbox_sessions WHERE id = $1',
+      [sessionId]
+    );
+    return result.rows[0] ? sandboxSession(result.rows[0]) : null;
+  }
+
+  /**
+   * Gets the latest sandbox session for a run.
+   */
+  async getSandboxSessionByRunId(ownerId: string, runId: string): Promise<DurableSandboxSession | null> {
+    const result = await this.pool.query<SandboxSessionRow>(
+      'SELECT * FROM agent_sandbox_sessions WHERE owner_id = $1 AND run_id = $2 ORDER BY created_at DESC LIMIT 1',
+      [ownerId, runId]
+    );
+    return result.rows[0] ? sandboxSession(result.rows[0]) : null;
+  }
+
+  /**
+   * Gets the active non-terminal sandbox session for a run.
+   */
+  async getActiveSandboxSessionForRun(ownerId: string, runId: string): Promise<DurableSandboxSession | null> {
+    const result = await this.pool.query<SandboxSessionRow>(
+      `SELECT * FROM agent_sandbox_sessions
+       WHERE owner_id = $1 AND run_id = $2 AND lifecycle_state IN ('allocating', 'active', 'stopping')
+       LIMIT 1`,
+      [ownerId, runId]
+    );
+    return result.rows[0] ? sandboxSession(result.rows[0]) : null;
+  }
+
+  /**
+   * Marks a sandbox session as stopping.
+   */
+  async markSandboxStopping(ownerId: string, sessionId: string): Promise<DurableSandboxSession> {
+    const result = await this.pool.query<SandboxSessionRow>(
+      `UPDATE agent_sandbox_sessions
+       SET lifecycle_state = 'stopping', updated_at = NOW()
+       WHERE owner_id = $1 AND id = $2 AND lifecycle_state IN ('allocating', 'active')
+       RETURNING *`,
+      [ownerId, sessionId]
+    );
+    if (!result.rows[0]) throw new NotFoundError();
+    return sandboxSession(result.rows[0]);
+  }
+
+  /**
+   * Marks a sandbox session as destroyed (durable tombstone).
+   */
+  async markSandboxDestroyed(sessionId: string, providerSessionId?: string): Promise<DurableSandboxSession> {
+    const result = await this.pool.query<SandboxSessionRow>(
+      `UPDATE agent_sandbox_sessions
+       SET lifecycle_state = 'destroyed', cleanup_state = 'completed',
+           destroyed_at = NOW(), updated_at = NOW(),
+           provider_session_id = COALESCE(provider_session_id, $2)
+       WHERE id = $1
+       RETURNING *`,
+      [sessionId, providerSessionId ?? null]
+    );
+    if (!result.rows[0]) throw new NotFoundError();
+    return sandboxSession(result.rows[0]);
+  }
+
+  /**
+   * Marks a sandbox session for cleanup retry with exponential backoff delay.
+   */
+  async markSandboxCleanupPending(
+    sessionId: string,
+    errorReason: string,
+    retryDelayMs = 5000
+  ): Promise<DurableSandboxSession> {
+    const cleanError = redactSensitiveContent(errorReason);
+    const retryAt = new Date(Date.now() + retryDelayMs);
+
+    const sessionRes = await this.pool.query<SandboxSessionRow>(
+      'SELECT id, diagnostics FROM agent_sandbox_sessions WHERE id = $1',
+      [sessionId]
+    );
+    const row = sessionRes.rows[0];
+    if (!row) throw new NotFoundError();
+
+    const existingDiag = (row.diagnostics && typeof row.diagnostics === 'object') ? row.diagnostics : {};
+    const mergedDiag = JSON.stringify({ ...existingDiag, last_cleanup_error: cleanError });
+
+    const result = await this.pool.query<SandboxSessionRow>(
+      `UPDATE agent_sandbox_sessions
+       SET lifecycle_state = 'cleanup_pending', cleanup_state = 'retry_scheduled',
+           cleanup_attempts = cleanup_attempts + 1,
+           next_cleanup_retry_at = $2,
+           diagnostics = $3,
+           updated_at = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [sessionId, retryAt, mergedDiag]
+    );
+    if (!result.rows[0]) throw new NotFoundError();
+    return sandboxSession(result.rows[0]);
+  }
+
+  /**
+   * Updates verified checks array on active session.
+   */
+  async updateSandboxVerifiedChecks(
+    ownerId: string,
+    sessionId: string,
+    checks: readonly VerifiedCheck[]
+  ): Promise<void> {
+    await this.pool.query(
+      `UPDATE agent_sandbox_sessions
+       SET verified_checks = $1, updated_at = NOW()
+       WHERE owner_id = $2 AND id = $3 AND lifecycle_state IN ('active', 'allocating')`,
+      [JSON.stringify(checks), ownerId, sessionId]
+    );
+  }
+
+  /**
+   * Queries sessions needing cleanup with FOR UPDATE SKIP LOCKED.
+   */
+  async listSandboxSessionsNeedingCleanup(limit = 10): Promise<readonly DurableSandboxSession[]> {
+    const result = await this.pool.query<SandboxSessionRow>(
+      `SELECT s.* FROM agent_sandbox_sessions s
+       LEFT JOIN agent_runs r ON r.id = s.run_id
+       WHERE (
+         (s.lifecycle_state = 'allocating' AND s.allocation_expires_at <= NOW())
+         OR (s.lifecycle_state = 'cleanup_pending' AND (s.next_cleanup_retry_at IS NULL OR s.next_cleanup_retry_at <= NOW()))
+         OR (s.lifecycle_state = 'destroying' AND s.updated_at <= NOW() - INTERVAL '30 seconds')
+         OR (s.lifecycle_state IN ('active', 'stopping') AND (r.status IN ('completed', 'failed', 'cancelled') OR r.lease_expires_at <= NOW()))
+       )
+       AND s.lifecycle_state <> 'destroyed'
+       ORDER BY s.created_at ASC
+       LIMIT $1
+       FOR UPDATE SKIP LOCKED`,
+      [limit]
+    );
+    return result.rows.map(sandboxSession);
+  }
+
+  /**
+   * Claims a single session for cleanup processing by setting cleanup_state to in_progress.
+   */
+  async claimSandboxSessionForCleanup(sessionId: string): Promise<DurableSandboxSession | null> {
+    const result = await this.pool.query<SandboxSessionRow>(
+      `UPDATE agent_sandbox_sessions
+       SET cleanup_state = 'in_progress', lifecycle_state = 'destroying', updated_at = NOW()
+       WHERE id = $1 AND lifecycle_state <> 'destroyed'
+       RETURNING *`,
+      [sessionId]
+    );
+    return result.rows[0] ? sandboxSession(result.rows[0]) : null;
   }
 }

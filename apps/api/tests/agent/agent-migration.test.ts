@@ -136,6 +136,7 @@ it('012 upgrades populated current 011 preserving all existing agent and product
 
 it('013 upgrades populated current 012 preserving all existing agent and product tables and reruns idempotently', async () => {
   const base12 = MIGRATIONS.filter((migration) => migration.version <= 12);
+  const v13Only = MIGRATIONS.filter((migration) => migration.version <= 13);
   const initial = await createTestDatabase(base12);
   let pool = initial.pool;
   const schema = `agent_upgrade_013_${randomUUID().replaceAll('-', '')}`;
@@ -180,7 +181,7 @@ it('013 upgrades populated current 012 preserving all existing agent and product
     const snapshots = await Promise.all(tables.map((table) => pool.query(`SELECT * FROM ${table} ORDER BY 1`)));
 
     // Apply forward-only migration 013
-    assert.deepEqual(await runMigrations(pool), ['013_agent_messages']);
+    assert.deepEqual(await runMigrations(pool, v13Only), ['013_agent_messages']);
 
     // Check all 17 pre-existing tables preserved
     for (let i = 0; i < tables.length; i++) {
@@ -189,7 +190,7 @@ it('013 upgrades populated current 012 preserving all existing agent and product
     }
 
     // Idempotent second run
-    assert.deepEqual(await runMigrations(pool), []);
+    assert.deepEqual(await runMigrations(pool, v13Only), []);
 
     // File content matches registry
     const sql = await readFile(new URL('../../src/db/migrations/013_agent_messages.sql', import.meta.url), 'utf8');
@@ -239,6 +240,126 @@ it('013 upgrades populated current 012 preserving all existing agent and product
     assert.equal(allActiveMessages.items.length, 2);
     assert.equal(allActiveMessages.items[0]!.sequence, 1);
     assert.equal(allActiveMessages.items[1]!.sequence, 2);
+  } finally {
+    if (!initial.isMemory) {
+      await pool.end();
+      await initial.pool.query(`DROP SCHEMA ${schema} CASCADE`);
+    }
+    await initial.pool.end();
+  }
+});
+
+it('014 upgrades populated current 013 preserving all existing agent and product tables and reruns idempotently', async () => {
+  const base13 = MIGRATIONS.filter((migration) => migration.version <= 13);
+  const v14Only = MIGRATIONS.filter((migration) => migration.version <= 14);
+  const initial = await createTestDatabase(base13);
+  let pool = initial.pool;
+  const schema = `agent_upgrade_014_${randomUUID().replaceAll('-', '')}`;
+  if (!initial.isMemory) {
+    await initial.pool.query(`CREATE SCHEMA ${schema}`);
+    pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, options: `-c search_path=${schema}`, max: 2, statement_timeout: 5000 });
+    await runMigrations(pool, base13);
+  }
+  try {
+    const owner = randomUUID();
+    await pool.query("INSERT INTO users (id,email,display_name,password_hash) VALUES ($1,'agent-upgrade-014@example.com','Upgrade14','unused')", [owner]);
+    const repository = new AgentRepository(pool);
+    const service = new AgentService(repository);
+    const workspace = await service.createWorkspace(owner, { source: { kind: 'blank' } });
+
+    // Pre-existing 013 run with messages
+    const runKey = randomUUID();
+    const queued = await repository.enqueueRun(
+      owner,
+      { workspaceId: workspace.id, task: 'Pre-existing 013 run for 014 migration', mode: 'execute', runtime: 'cloud', modelId: 'giga-agent-default' },
+      runKey,
+      'f'.repeat(64)
+    );
+    const claimed = await repository.claimRun(owner, queued.run.id, 'worker-mig-014-test');
+    assert.ok(claimed);
+
+    const tables = [
+      'users', 'sessions', 'conversations', 'messages', 'chat_generations', 'chat_operation_keys',
+      'chat_turn_selections', 'user_preferences', 'skill_definitions', 'skill_versions', 'skill_installations',
+      'user_provider_credentials', 'chat_credential_preferences',
+      'agent_workspaces', 'agent_runs', 'agent_run_events', 'agent_run_steps', 'agent_messages',
+    ];
+    const snapshots = await Promise.all(tables.map((table) => pool.query(`SELECT * FROM ${table} ORDER BY 1`)));
+
+    // Apply forward-only migration 014
+    assert.deepEqual(await runMigrations(pool, v14Only), ['014_agent_sandbox_sessions']);
+
+    // Check all 18 pre-existing tables preserved
+    for (let i = 0; i < tables.length; i++) {
+      const currentRows = (await pool.query(`SELECT * FROM ${tables[i]} ORDER BY 1`)).rows;
+      assert.equal(currentRows.length, snapshots[i]!.rows.length);
+    }
+
+    // Idempotent second run
+    assert.deepEqual(await runMigrations(pool, v14Only), []);
+
+    // File content matches registry
+    const sql = await readFile(new URL('../../src/db/migrations/014_agent_sandbox_sessions.sql', import.meta.url), 'utf8');
+    assert.equal(
+      MIGRATIONS.find((migration) => migration.version === 14)!.sql.trim().replace(/\r\n/g, '\n'),
+      sql.trim().replace(/\r\n/g, '\n')
+    );
+
+    // Verify 014 additions: create allocation intent, commit allocated, verify constraints
+    const { session: allocation } = await repository.createSandboxAllocationIntent({
+      ownerId: owner,
+      workspaceId: workspace.id,
+      runId: queued.run.id,
+      attemptNumber: 1,
+      mode: 'execute',
+      providerType: 'e2b',
+      leaseToken: claimed.leaseToken,
+      workerId: 'worker-mig-014-test',
+    });
+    assert.equal(allocation.allocationState, 'pending');
+    assert.equal(allocation.lifecycleState, 'allocating');
+
+    const activeSession = await repository.commitSandboxSessionAllocated({
+      sessionId: allocation.id,
+      ownerId: owner,
+      runId: queued.run.id,
+      leaseToken: claimed.leaseToken,
+      providerSessionId: 'sbx-test-mig-014',
+    });
+    assert.ok(activeSession);
+    assert.equal(activeSession.lifecycleState, 'active');
+    assert.equal(activeSession.providerSessionId, 'sbx-test-mig-014');
+
+    // Partial unique constraint prevents second active session for same run
+    await assert.rejects(
+      async () => {
+        await pool.query(
+          `INSERT INTO agent_sandbox_sessions (
+             owner_id, workspace_id, run_id, attempt_number, mode, provider_type,
+             lifecycle_state, allocation_state, cleanup_state, worker_id, lease_token,
+             allocation_intent_id, allocation_expires_at
+           ) VALUES ($1, $2, $3, 2, 'execute', 'e2b', 'allocating', 'pending', 'none', 'w2', 'tok2', gen_random_uuid(), NOW() + interval '1 minute')`,
+          [owner, workspace.id, queued.run.id]
+        );
+      },
+      (err: any) => err.code === '23505'
+    );
+
+    // Mark destroyed
+    const destroyed = await repository.markSandboxDestroyed(activeSession.id, 'sbx-test-mig-014');
+    assert.ok(destroyed);
+    assert.equal(destroyed.lifecycleState, 'destroyed');
+
+    // Immutability trigger and check constraint prevents reviving destroyed session
+    await assert.rejects(
+      async () => {
+        await pool.query(
+          "UPDATE agent_sandbox_sessions SET lifecycle_state = 'active' WHERE id = $1",
+          [destroyed.id]
+        );
+      },
+      /cannot modify destroyed sandbox session|terminal and immutable|check constraint/i
+    );
   } finally {
     if (!initial.isMemory) {
       await pool.end();
