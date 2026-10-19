@@ -7,6 +7,7 @@ import { runMigrations } from '../db/migrate.js';
 import { createChatEngine } from '../modules/llm/chat-bootstrap.js';
 import type { ProviderTransport } from '../modules/llm/providers/gemini/gemini-provider.js';
 import type { LLMEngine } from '../modules/llm/engine.js';
+import { createWebUi } from './web-ui.js';
 
 export interface StartServerOptions {
   readonly port?: number;
@@ -31,6 +32,8 @@ export async function startServer(options: StartServerOptions = {}): Promise<{
   // Fail configuration before opening DB connections or listening on a socket.
   const configuredEngine = createChatEngine(config.chat, options.providerTransport);
   const llmEngine = options.llmEngine ?? configuredEngine;
+  // Validate the optional web bundle before connecting or applying migrations.
+  const webUi = config.serveWeb ? createWebUi() : undefined;
 
   let pool = options.pool;
 
@@ -59,6 +62,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<{
     llmEngine,
     providerTransport: options.providerTransport,
   });
+  if (webUi) app.route('/', webUi);
 
   const server = serve(
     {

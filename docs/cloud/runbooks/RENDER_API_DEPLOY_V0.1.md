@@ -122,3 +122,46 @@ For quota/network errors prefer a safe fixture or a capped approved live test; l
 - Repeat only affected checks after a fix; re-run security/contract acceptance when behavior changes.
 - Have the peer independently redeploy or diagnose a controlled test incident, record operator/reviewer/timestamp/environment/SHA/outcome and link the evidence to 17T-12 and 17T-14.
 - Final human decision records Chat and Full separately. Keep 17T-12 open until its agreed acceptance, evidence and independent review are actually complete.
+
+## 8. Measured topology correction — 2026-10-19
+
+The static frontend and API deployed at main `f06d4646...` successfully. A capped
+live provider request returned an answer and HTTP checks passed for auth, A/B
+ownership and logout. However, **the static-site proxy did not pass incremental
+streaming**:
+
+- Direct API: started at 151 ms, deltas from 2420–2845 ms, 9 transport chunks.
+- Static rewrite: all events arrived at 2265 ms, in 2 chunks, including started,
+  deltas and completion together. That does not meet the streaming P0.
+
+Use the optional **single Node service** topology for the next demo candidate:
+
+1. Build both apps from the repository root:
+   `npm ci --prefix apps/api --include=dev && npm ci --prefix apps/web --include=dev && npm run build --prefix apps/web && npm run build --prefix apps/api`.
+2. Start with `npm start --prefix apps/api`, `SERVE_WEB=true`, and `/health`.
+3. Set `ALLOWED_ORIGINS` to the actual shared HTTPS origin (retain the static
+   origin only while its separate diagnostic site is still used).
+4. Use that service's `/login` and `/chat` URL for browser acceptance. No static
+   rewrite is involved in Chat requests.
+5. The existing static site is diagnostic only until explicitly retired; it has
+   not passed streaming acceptance. Do not label it a working streamed demo.
+6. Verify the deployed SHA and all affected browser/auth/SSE checks. Deploying an
+   unmerged PR branch for controlled demo verification is not review or release approval.
+
+`SERVE_WEB` defaults false and rejects invalid values. Enabling it requires a
+built web bundle before DB connection/migrations; missing bundles fail startup.
+The adapter serves only known frontend routes plus `/assets/*` and `/giga/*`.
+It does not route API paths through SPA fallback.
+
+| Surface | Before | Candidate | Compatibility |
+| --- | --- | --- | --- |
+| Existing API routes/DTO/errors | Existing API behavior | Same handlers and payloads | Preserved; tests required |
+| SSE event schema/order | Existing runtime events | Same runtime at shared origin | Preserved; buffering removed from topology |
+| Sessions/CSRF | Secure HttpOnly cookie + exact origins | Same policy, actual shared origin allowlisted | No wildcard or auth bypass |
+| UI navigation on API host | JSON 404 | Opt-in known GET/HEAD HTML/assets | Additive, disabled by default |
+| Unknown API/asset, unsupported method | Structured 404 | Structured 404 | Preserved |
+| DB schema | Migrations 001–013 at baseline | No new migration | Unchanged |
+
+Review questions: confirm the fixed build-output root, supported frontend deep
+links, uncached HTML, missing-asset/API JSON errors, direct SSE timing and browser
+session behavior. API remains DRAFT.

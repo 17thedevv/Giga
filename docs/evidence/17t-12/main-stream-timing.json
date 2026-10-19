@@ -1,0 +1,135 @@
+{
+  "at": "2026-10-19T07:41:42.345Z",
+  "reports": [
+    {
+      "kind": "direct",
+      "status": 200,
+      "chunks": [
+        {
+          "afterMs": 151,
+          "bytes": 193
+        },
+        {
+          "afterMs": 2419,
+          "bytes": 146
+        },
+        {
+          "afterMs": 2586,
+          "bytes": 261
+        },
+        {
+          "afterMs": 2671,
+          "bytes": 280
+        },
+        {
+          "afterMs": 2671,
+          "bytes": 274
+        },
+        {
+          "afterMs": 2844,
+          "bytes": 286
+        },
+        {
+          "afterMs": 2845,
+          "bytes": 259
+        },
+        {
+          "afterMs": 2845,
+          "bytes": 185
+        },
+        {
+          "afterMs": 2845,
+          "bytes": 202
+        }
+      ],
+      "frames": [
+        {
+          "event": "message.started",
+          "afterMs": 151
+        },
+        {
+          "event": "message.delta",
+          "afterMs": 2420
+        },
+        {
+          "event": "message.delta",
+          "afterMs": 2586
+        },
+        {
+          "event": "message.delta",
+          "afterMs": 2671
+        },
+        {
+          "event": "message.delta",
+          "afterMs": 2671
+        },
+        {
+          "event": "message.delta",
+          "afterMs": 2844
+        },
+        {
+          "event": "message.delta",
+          "afterMs": 2845
+        },
+        {
+          "event": "message.delta",
+          "afterMs": 2845
+        },
+        {
+          "event": "message.completed",
+          "afterMs": 2845
+        }
+      ],
+      "incremental": true
+    },
+    {
+      "kind": "proxy",
+      "status": 200,
+      "chunks": [
+        {
+          "afterMs": 2265,
+          "bytes": 984
+        },
+        {
+          "afterMs": 2265,
+          "bytes": 901
+        }
+      ],
+      "frames": [
+        {
+          "event": "message.started",
+          "afterMs": 2265
+        },
+        {
+          "event": "message.delta",
+          "afterMs": 2265
+        },
+        {
+          "event": "message.delta",
+          "afterMs": 2265
+        },
+        {
+          "event": "message.delta",
+          "afterMs": 2265
+        },
+        {
+          "event": "message.delta",
+          "afterMs": 2265
+        },
+        {
+          "event": "message.delta",
+          "afterMs": 2265
+        },
+        {
+          "event": "message.delta",
+          "afterMs": 2265
+        },
+        {
+          "event": "message.completed",
+          "afterMs": 2265
+        }
+      ],
+      "incremental": false
+    }
+  ]
+}

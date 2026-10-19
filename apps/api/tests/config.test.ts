@@ -3,6 +3,12 @@ import assert from 'node:assert/strict';
 import { parsePort, parseSameSite, loadConfig, DEFAULT_PORT } from '../src/app/config.js';
 
 describe('PORT configuration and fail-fast validation', () => {
+  it('keeps web hosting opt-in and rejects malformed configuration', () => {
+    assert.strictEqual(loadConfig({}).serveWeb, false);
+    assert.strictEqual(loadConfig({ SERVE_WEB: 'false' }).serveWeb, false);
+    assert.strictEqual(loadConfig({ SERVE_WEB: 'true' }).serveWeb, true);
+    assert.throws(() => loadConfig({ SERVE_WEB: 'yes' }), /SERVE_WEB must be true or false/);
+  });
   it('returns default port 3000 when PORT is undefined', () => {
     assert.strictEqual(parsePort(undefined), DEFAULT_PORT);
   });
