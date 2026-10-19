@@ -1,0 +1,88 @@
+{
+  "checkedAt": "2026-10-19T08:20:58.700Z",
+  "environment": "local Vite; same-origin iframe viewport, 640px height; mock fixtures; not device emulation",
+  "chat": [
+    {
+      "width": 320,
+      "scrollWidth": 320,
+      "horizontalOverflow": false,
+      "composerInViewport": true,
+      "route": "/chat/conv_8f3a1d94-3201-44dc-98ef-c1192da0e521"
+    },
+    {
+      "width": 375,
+      "scrollWidth": 375,
+      "horizontalOverflow": false,
+      "composerInViewport": true,
+      "route": "/chat/conv_8f3a1d94-3201-44dc-98ef-c1192da0e521"
+    },
+    {
+      "width": 768,
+      "scrollWidth": 768,
+      "horizontalOverflow": false,
+      "composerInViewport": true,
+      "route": "/chat/conv_8f3a1d94-3201-44dc-98ef-c1192da0e521"
+    },
+    {
+      "width": 1024,
+      "scrollWidth": 1024,
+      "horizontalOverflow": false,
+      "composerInViewport": true,
+      "route": "/chat/conv_8f3a1d94-3201-44dc-98ef-c1192da0e521"
+    },
+    {
+      "width": 1440,
+      "scrollWidth": 1440,
+      "horizontalOverflow": false,
+      "composerInViewport": true,
+      "route": "/chat/conv_8f3a1d94-3201-44dc-98ef-c1192da0e521"
+    }
+  ],
+  "routes": [
+    {
+      "width": 375,
+      "scrollWidth": 375,
+      "horizontalOverflow": false,
+      "composerInViewport": null,
+      "route": "/agent",
+      "ready": true,
+      "heading": "Autonomous Coding Agent"
+    },
+    {
+      "width": 375,
+      "scrollWidth": 375,
+      "horizontalOverflow": false,
+      "composerInViewport": null,
+      "route": "/skills",
+      "ready": true,
+      "heading": "Skills & Personalization"
+    },
+    {
+      "width": 375,
+      "scrollWidth": 375,
+      "horizontalOverflow": false,
+      "composerInViewport": null,
+      "route": "/personalization",
+      "ready": true,
+      "heading": "Skills & Personalization"
+    },
+    {
+      "width": 375,
+      "scrollWidth": 375,
+      "horizontalOverflow": false,
+      "composerInViewport": null,
+      "route": "/settings",
+      "ready": true,
+      "heading": "Settings"
+    },
+    {
+      "width": 370,
+      "scrollWidth": 370,
+      "horizontalOverflow": false,
+      "composerInViewport": null,
+      "route": "/login",
+      "ready": true,
+      "heading": "A little space for possibility."
+    }
+  ]
+}

@@ -8,6 +8,7 @@ import { Badge } from '../src/components/Badge.js';
 import { Card, CardHeader, CardBody, CardFooter } from '../src/components/Card.js';
 import { Alert } from '../src/components/Alert.js';
 import { Input } from '../src/components/Input.js';
+import { ConversationSidebar } from '../src/features/chat/ConversationSidebar.js';
 import { ThemeProvider, useTheme } from '../src/app/context/ThemeContext.js';
 
 describe('GIGA Design System Primitives & Assets', () => {
@@ -79,35 +80,35 @@ describe('GIGA Design System Primitives & Assets', () => {
       );
     };
 
-    it('initializes to dark theme by default and updates document data-theme', () => {
+    it('initializes to light theme by default and updates document data-theme', () => {
       render(
         <ThemeProvider>
           <TestThemeConsumer />
         </ThemeProvider>
       );
+
+      expect(screen.getByTestId('current-theme').textContent).toBe('light');
+      expect(document.documentElement.getAttribute('data-theme')).toBe('light');
+      expect(localStorage.getItem('giga-theme')).toBe('light');
+    });
+
+    it('toggles theme to dark and updates DOM and localStorage', () => {
+      render(
+        <ThemeProvider>
+          <TestThemeConsumer />
+        </ThemeProvider>
+      );
+
+      fireEvent.click(screen.getByTestId('toggle-btn'));
 
       expect(screen.getByTestId('current-theme').textContent).toBe('dark');
       expect(document.documentElement.getAttribute('data-theme')).toBe('dark');
       expect(localStorage.getItem('giga-theme')).toBe('dark');
-    });
-
-    it('toggles theme to light and updates DOM and localStorage', () => {
-      render(
-        <ThemeProvider>
-          <TestThemeConsumer />
-        </ThemeProvider>
-      );
 
       fireEvent.click(screen.getByTestId('toggle-btn'));
 
       expect(screen.getByTestId('current-theme').textContent).toBe('light');
       expect(document.documentElement.getAttribute('data-theme')).toBe('light');
-      expect(localStorage.getItem('giga-theme')).toBe('light');
-
-      fireEvent.click(screen.getByTestId('toggle-btn'));
-
-      expect(screen.getByTestId('current-theme').textContent).toBe('dark');
-      expect(document.documentElement.getAttribute('data-theme')).toBe('dark');
     });
   });
 
@@ -156,5 +157,23 @@ describe('GIGA Design System Primitives & Assets', () => {
       expect(screen.getByText('Success')).toBeDefined();
       expect(screen.getByText('Operation finished')).toBeDefined();
     });
+  });
+});
+
+
+describe('Conversation discovery', () => {
+  it('filters conversations and keeps selecting separate from deletion', () => {
+    const selected: string[] = [];
+    render(<ConversationSidebar conversations={[
+      {id:'first',title:'Architecture review',createdAt:'2026-10-19T00:00:00Z',updatedAt:'2026-10-19T00:00:00Z'},
+      {id:'second',title:'A new idea',createdAt:'2026-10-19T00:00:00Z',updatedAt:'2026-10-19T00:00:00Z'},
+    ]} onCreate={() => {}} onDelete={() => {}} onSelect={id => selected.push(id)} />);
+    fireEvent.change(screen.getByRole('textbox', {name:'Search conversations'}), {target:{value:'ARCHITECTURE'}});
+    expect(screen.queryByRole('button', {name:'A new idea'})).toBeNull();
+    fireEvent.click(screen.getByRole('button', {name:'Architecture review'}));
+    expect(selected).toEqual(['first']);
+    fireEvent.click(screen.getByRole('button', {name:'Delete Architecture review'}));
+    expect(selected).toEqual(['first']);
+    expect(screen.getByRole('dialog')).toBeDefined();
   });
 });

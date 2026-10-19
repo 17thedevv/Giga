@@ -17,7 +17,7 @@ describe('Auth & Routing Integration', () => {
       </ApiModeProvider>
     );
 
-    expect(screen.getByText('Developer Workspace')).toBeDefined();
+    expect(screen.getByText('A little space for possibility.')).toBeDefined();
     expect(screen.getByLabelText(/Email Address/i)).toBeDefined();
     expect(screen.getByLabelText(/Password/i)).toBeDefined();
     expect(screen.getByRole('button', { name: /Sign In to Workspace/i })).toBeDefined();

@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
 import type { Message } from '../../lib/api/types.js';
 import { CopyIcon, CheckIcon, RefreshCwIcon } from '../../components/Icons.js';
-import { Badge } from '../../components/Badge.js';
 
 interface MessageBubbleProps {
   message: Message;
@@ -27,6 +26,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
 
   return (
     <div
+      className={`g-message ${isUser ? 'g-message--user' : 'g-message--assistant'}`}
       style={{
         display: 'flex',
         flexDirection: 'column',
@@ -35,14 +35,15 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
         width: '100%',
       }}
     >
-      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
-        <Badge status={isUser ? 'user' : 'assistant'} />
+      <div className="g-message-meta" style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
+        <span className="g-author">{isUser ? 'You' : 'Giga'}</span>
         <span style={{ fontSize: '11px', color: 'var(--giga-text-muted, #94A3B8)' }}>
           {new Date(message.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
         </span>
       </div>
 
       <div
+        className="g-message-content"
         style={{
           maxWidth: '85%',
           padding: '14px 18px',
@@ -77,7 +78,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
       </div>
 
       {!isUser && !isStreaming && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '6px' }}>
+        <div className="g-message-actions" style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '6px' }}>
           <button
             onClick={handleCopy}
             data-testid={`copy-btn-${message.id}`}
