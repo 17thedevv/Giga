@@ -23,6 +23,7 @@ export const ConversationSidebar: React.FC<ConversationSidebarProps> = ({
   isLoading = false,
   isOpenOnMobile = false,
 }) => {
+  const [search, setSearch] = useState('');
   const [deleteCandidate, setDeleteCandidate] = useState<Conversation | null>(null);
 
   return (
@@ -49,13 +50,15 @@ export const ConversationSidebar: React.FC<ConversationSidebarProps> = ({
         }}
       >
         <h2 style={{ fontSize: '14px', fontWeight: 600, color: 'var(--giga-text, #F8FAFC)', margin: 0 }}>
-          Discussions
+          Your space
         </h2>
         <Button size="sm" variant="primary" onClick={onCreate} icon={<PlusIcon size={16} />}>
           New Chat
         </Button>
       </div>
 
+      <div className="g-history-search"><input aria-label="Search conversations" placeholder="Search conversations" value={search} onChange={event => setSearch(event.target.value)} /></div>
+      <p className="g-history-label">YOUR CONVERSATIONS</p>
       {/* List Area */}
       <div style={{ flex: 1, overflowY: 'auto', padding: '8px' }}>
         {isLoading && (
@@ -71,12 +74,12 @@ export const ConversationSidebar: React.FC<ConversationSidebarProps> = ({
         )}
 
         {!isLoading &&
-          conversations.map((conv) => {
+          conversations.filter(conv => conv.title.toLowerCase().includes(search.toLowerCase())).map((conv) => {
             const isActive = conv.id === activeId;
             return (
               <div
+                className={`g-history-row ${isActive ? 'is-active' : ''}`}
                 key={conv.id}
-                onClick={() => onSelect(conv.id)}
                 style={{
                   display: 'flex',
                   alignItems: 'center',
@@ -92,9 +95,7 @@ export const ConversationSidebar: React.FC<ConversationSidebarProps> = ({
                   border: `1px solid ${isActive ? 'var(--giga-border, #334155)' : 'transparent'}`,
                 }}
               >
-                <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, marginRight: '8px' }}>
-                  {conv.title}
-                </div>
+                <button className="g-history-title" onClick={() => onSelect(conv.id)} aria-current={isActive ? 'page' : undefined} title={conv.title}>{conv.title}</button>
                 <button
                   type="button"
                   onClick={(e) => {
@@ -120,6 +121,8 @@ export const ConversationSidebar: React.FC<ConversationSidebarProps> = ({
           })}
       </div>
 
+      {!isLoading && search && !conversations.some(conv => conv.title.toLowerCase().includes(search.toLowerCase())) && <p className="g-history-no-results">No conversations match your search.</p>}
+      <div className="g-sidebar-footnote"><span aria-hidden="true">✦</span> A little room for big ideas.</div>
       {/* Delete Confirmation Dialog */}
       <Modal
         isOpen={Boolean(deleteCandidate)}
