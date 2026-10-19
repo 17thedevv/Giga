@@ -2,6 +2,7 @@ import { loadChatConfig, type ChatProviderConfig } from '../modules/llm/chat-boo
 import { CredentialEncryption } from '../modules/credentials/encryption.js';
 
 export interface AppConfig {
+  readonly serveWeb?: boolean;
   readonly credentialEncryption?: CredentialEncryption;
   readonly chatEnabled?: boolean;
   readonly chat?: ChatProviderConfig;
@@ -119,6 +120,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   ) as 'development' | 'production' | 'test';
 
   const port = parsePort(env.PORT);
+  if (env.SERVE_WEB !== undefined && env.SERVE_WEB !== 'true' && env.SERVE_WEB !== 'false') {
+    throw new Error('SERVE_WEB must be true or false');
+  }
 
   const databaseUrl = env.DATABASE_URL?.trim();
   if (nodeEnv === 'production' && !databaseUrl) {
@@ -139,6 +143,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     : new CredentialEncryption(env.CREDENTIAL_ENCRYPTION_KEY);
 
   return {
+    serveWeb: env.SERVE_WEB === 'true',
     port,
     databaseUrl,
     nodeEnv,

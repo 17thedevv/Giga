@@ -1,0 +1,137 @@
+{
+  "at": "2026-10-19T07:40:37.463Z",
+  "origin": "https://giga-web-demo-17t12.onrender.com",
+  "api": "https://giga-api-demo-17t12.onrender.com",
+  "sourceSha": "f06d46462134f92f7626a515782f93e0c5f7f8e9",
+  "results": [
+    {
+      "test": "frontend-deep-link",
+      "result": "PASS",
+      "status": 200,
+      "type": "text/html; charset=utf-8"
+    },
+    {
+      "test": "proxy-unauthenticated",
+      "result": "PASS",
+      "status": 401,
+      "type": "application/json"
+    },
+    {
+      "test": "api-health",
+      "result": "PASS",
+      "status": 200,
+      "type": "application/json"
+    },
+    {
+      "test": "api-unauthenticated",
+      "result": "PASS",
+      "status": 401,
+      "type": "application/json"
+    },
+    {
+      "test": "structured-404",
+      "result": "PASS",
+      "status": 404
+    },
+    {
+      "test": "proxy-register-a",
+      "result": "PASS",
+      "status": 201
+    },
+    {
+      "test": "proxy-login-a",
+      "result": "PASS",
+      "status": 200,
+      "secure": true,
+      "httpOnly": true,
+      "sameSiteLax": true
+    },
+    {
+      "test": "proxy-me-a",
+      "result": "PASS",
+      "status": 200
+    },
+    {
+      "test": "proxy-register-b",
+      "result": "PASS",
+      "status": 201
+    },
+    {
+      "test": "proxy-login-b",
+      "result": "PASS",
+      "status": 200,
+      "secure": true,
+      "httpOnly": true,
+      "sameSiteLax": true
+    },
+    {
+      "test": "proxy-me-b",
+      "result": "PASS",
+      "status": 200
+    },
+    {
+      "test": "proxy-create-conversation",
+      "result": "PASS",
+      "status": 201
+    },
+    {
+      "test": "owner-A-B-read-denied",
+      "result": "PASS",
+      "status": 404
+    },
+    {
+      "test": "real-provider-stream",
+      "result": "PASS",
+      "httpStatus": 200,
+      "transportChunks": 1,
+      "eventNames": [
+        "message.started",
+        "message.delta",
+        "message.completed"
+      ],
+      "eventTimes": [
+        {
+          "event": "message.started",
+          "afterMs": 2423
+        },
+        {
+          "event": "message.delta",
+          "afterMs": 2423
+        },
+        {
+          "event": "message.completed",
+          "afterMs": 2423
+        }
+      ],
+      "streamedChars": 19
+    },
+    {
+      "test": "history-reopen",
+      "result": "PASS",
+      "status": 200,
+      "messageCount": 2,
+      "statuses": [
+        {
+          "role": "user",
+          "chars": 39
+        },
+        {
+          "role": "assistant",
+          "chars": 19
+        }
+      ]
+    },
+    {
+      "test": "logout-invalidates-old-session-a",
+      "result": "PASS",
+      "logoutStatus": 204,
+      "replayStatus": 401
+    },
+    {
+      "test": "logout-invalidates-old-session-b",
+      "result": "PASS",
+      "logoutStatus": 204,
+      "replayStatus": 401
+    }
+  ]
+}

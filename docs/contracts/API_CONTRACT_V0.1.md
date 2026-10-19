@@ -52,6 +52,21 @@ type ModelMetadata = {
 - **Cloud deployment decision gate:** Render static site and API may be cross-site; cookie `SameSite` and browser third-party restrictions require real-browser testing. Prefer a same-origin API proxy/custom domain; if separate cross-site origins are retained, document browser support and implement correct `SameSite=None; Secure`, CORS and CSRF measures. Do not claim this is solved until W2 cloud test passes.
 - Account registration may be restricted to demo users if public signups increase abuse risk.
 
+## 17T-12 same-origin hosting candidate
+
+Render static-site rewrites were measured buffering POST SSE on the demo deployment.
+The opt-in `SERVE_WEB=true` server configuration serves the reviewed
+`apps/web/dist` bundle from the API origin, using the existing Node adapter.
+It adds GET/HEAD assets and known frontend navigation paths; it does not rename
+API endpoints or change DTOs, SSE events, session cookies, authorization or persistence.
+Unknown API routes and unsupported methods retain structured JSON errors.
+Without the flag, the API-only behavior remains the default.
+
+Frontend and backend review must confirm deep-link/asset boundaries, the deployed
+browser cookie/CSRF behavior and incremental SSE at that shared origin.
+This deployment candidate does not freeze API v1.
+
+
 ## 4. Conversations & Chat
 
 The [17T-37 Chat BYOK candidate](CHAT_BYOK_API_V0.1.md) adds optional,
