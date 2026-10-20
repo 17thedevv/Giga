@@ -48,6 +48,7 @@ export interface E2bSandboxHandle {
   };
   kill(): Promise<void>;
   isOpen?(): boolean;
+  hasFailedCleanup?(): boolean;
 }
 
 /**
@@ -72,13 +73,94 @@ export interface E2bTransport {
 }
 
 /**
+ * Safely quotes a single argument for POSIX/Bash shell execution.
+ * Encloses the argument in single quotes and replaces embedded single quotes with '\''
+ * (close single quote, escaped literal single quote, reopen single quote).
+ *
+ * This guarantees shell metacharacters (spaces, tabs, newlines, semicolons, pipes,
+ * redirections, command substitutions $(...), backticks, and variable expansions $VAR)
+ * remain purely literal string data without triggering command execution.
+ */
+export function escapeShellArg(arg: string): string {
+  return `'${arg.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * Builds the final command line string by escaping each argument exactly once.
+ * If args is omitted or empty, returns the command string as-is.
+ */
+export function buildShellCommandLine(command: string, args?: readonly string[]): string {
+  if (!args || args.length === 0) {
+    return command;
+  }
+  const escapedArgs = args.map(escapeShellArg).join(' ');
+  return `${command} ${escapedArgs}`;
+}
+
+export interface E2bSdkCommandResult {
+  readonly exitCode: number;
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly error?: string;
+}
+
+export interface E2bSdkCommandHandle {
+  readonly pid: number;
+  wait(): Promise<E2bSdkCommandResult>;
+  kill(): Promise<boolean>;
+  disconnect?(): Promise<void>;
+}
+
+export interface E2bSdkRunOptions {
+  readonly background?: boolean;
+  readonly cwd?: string;
+  readonly envs?: Record<string, string>;
+  readonly timeoutMs?: number;
+  readonly signal?: AbortSignal;
+  readonly onStdout?: (chunk: any) => void;
+  readonly onStderr?: (chunk: any) => void;
+  readonly stdin?: boolean;
+}
+
+export interface E2bSdkEntryInfo {
+  readonly name: string;
+  readonly path: string;
+  readonly type?: 'file' | 'directory' | string;
+  readonly size?: number;
+}
+
+export interface E2bSdkSandboxInstance {
+  readonly sandboxId: string;
+  readonly commands: {
+    run(command: string, opts?: E2bSdkRunOptions): Promise<E2bSdkCommandHandle | E2bSdkCommandResult>;
+    kill?(pid: number): Promise<boolean>;
+    list?(): Promise<readonly { readonly pid: number }[]>;
+  };
+  readonly files: {
+    read(path: string, opts?: { format?: 'text' | 'bytes' }): Promise<string | Uint8Array>;
+    write(path: string, content: string): Promise<void>;
+    list(path: string): Promise<readonly E2bSdkEntryInfo[]>;
+  };
+  kill(): Promise<boolean | void>;
+}
+
+/**
  * Dependency injection seam for official E2B SDK.
  * Enables validating real transport lifecycle without incurring live cloud calls or credentials in tests.
  */
 export interface E2bSdkSeam {
-  Sandbox: {
-    create(template?: string, opts?: any): Promise<any>;
-    kill?(sandboxId: string, opts?: any): Promise<boolean>;
+  readonly Sandbox: {
+    create(
+      template?: string,
+      opts?: {
+        readonly apiKey?: string;
+        readonly domain?: string;
+        readonly timeoutMs?: number;
+        readonly envs?: Record<string, string>;
+        readonly metadata?: Record<string, string>;
+      }
+    ): Promise<E2bSdkSandboxInstance>;
+    kill?(sandboxId: string): Promise<boolean>;
   };
 }
 
@@ -86,7 +168,60 @@ export interface E2bSdkSeam {
  * Creates a real E2B SDK transport backed by the official `e2b` package (or injected SDK seam).
  */
 export function createRealE2bTransport(sdkSeam?: E2bSdkSeam): E2bTransport {
-  const SandboxClass = sdkSeam?.Sandbox ?? SdkSandbox;
+  const createSandboxInstance = async (
+    template?: string,
+    opts?: {
+      readonly apiKey?: string;
+      readonly domain?: string;
+      readonly timeoutMs?: number;
+      readonly envs?: Record<string, string>;
+      readonly metadata?: Record<string, string>;
+    }
+  ): Promise<E2bSdkSandboxInstance> => {
+    if (sdkSeam) {
+      return await sdkSeam.Sandbox.create(template, opts);
+    }
+    const sdkOpts = {
+      apiKey: opts?.apiKey,
+      domain: opts?.domain,
+      timeoutMs: opts?.timeoutMs,
+      envs: opts?.envs ? { ...opts.envs } : undefined,
+      metadata: opts?.metadata ? { ...opts.metadata } : undefined,
+    };
+    const realInstance = template !== undefined
+      ? await SdkSandbox.create(template, sdkOpts)
+      : await SdkSandbox.create(sdkOpts);
+
+    return {
+      sandboxId: realInstance.sandboxId,
+      commands: {
+        run: (cmd, runOpts) => realInstance.commands.run(cmd, runOpts),
+        kill: (pid) => realInstance.commands.kill(pid),
+        list: () => realInstance.commands.list(),
+      },
+      files: {
+        read: async (path, readOpts) => {
+          if (readOpts?.format === 'bytes') {
+            return await realInstance.files.read(path, { format: 'bytes' });
+          }
+          return await realInstance.files.read(path, { format: 'text' });
+        },
+        write: async (path, content) => {
+          await realInstance.files.write(path, content);
+        },
+        list: async (path) => {
+          const entries = await realInstance.files.list(path);
+          return entries.map((e) => ({
+            name: e.name,
+            path: e.path,
+            type: e.type,
+            size: e.size,
+          }));
+        },
+      },
+      kill: () => realInstance.kill(),
+    };
+  };
 
   return {
     async createSandbox(options: E2bCreateOptions): Promise<E2bSandboxHandle> {
@@ -94,7 +229,7 @@ export function createRealE2bTransport(sdkSeam?: E2bSdkSeam): E2bTransport {
         throw new Error('Aborted before sandbox creation');
       }
 
-      const instance = await SandboxClass.create(options.template, {
+      const instance = await createSandboxInstance(options.template, {
         apiKey: options.apiKey,
         domain: options.domain,
         timeoutMs: options.timeoutMs,
@@ -103,6 +238,7 @@ export function createRealE2bTransport(sdkSeam?: E2bSdkSeam): E2bTransport {
       });
 
       let killed = false;
+      let failedCleanup = false;
 
       return {
         sandboxId: instance.sandboxId,
@@ -119,60 +255,275 @@ export function createRealE2bTransport(sdkSeam?: E2bSdkSeam): E2bTransport {
               readonly onStderr?: (chunk: string) => void;
             }
           ) {
+            if (killed) {
+              throw new Error(`Sandbox '${instance.sandboxId}' has been terminated`);
+            }
+
             if (runOpts?.signal?.aborted) {
               throw new Error('Command was aborted');
             }
-            const fullCmd =
-              runOpts?.args && runOpts.args.length > 0
-                ? `${command} ${runOpts.args.map((a) => `'${a.replace(/'/g, "'\\''")}'`).join(' ')}`
-                : command;
 
+            const fullCmd = buildShellCommandLine(command, runOpts?.args);
             const start = Date.now();
-            const res = await instance.commands.run(fullCmd, {
-              cwd: runOpts?.cwd,
-              envs: runOpts?.envs,
-              timeoutMs: runOpts?.timeoutMs,
-              onStdout: runOpts?.onStdout
-                ? (c: any) => runOpts.onStdout!(typeof c === 'string' ? c : c?.line || '')
-                : undefined,
-              onStderr: runOpts?.onStderr
-                ? (c: any) => runOpts.onStderr!(typeof c === 'string' ? c : c?.line || '')
-                : undefined,
+
+            let activeHandle: E2bSdkCommandHandle | undefined;
+            let commandCancelled = false;
+            let cancellationFailedError: Error | undefined;
+            let processSettled = false;
+
+            let abortReject: ((reason?: unknown) => void) | undefined;
+            const abortPromise = new Promise<never>((_, reject) => {
+              abortReject = reject;
             });
 
-            return {
-              exitCode: res.exitCode,
-              stdout: res.stdout ?? '',
-              stderr: res.stderr ?? '',
-              durationMs: Date.now() - start,
-              error: res.error,
+            let terminationPromise: Promise<void> | undefined;
+            const terminateCommandOrSandbox = (): Promise<void> => {
+              if (terminationPromise) return terminationPromise;
+              commandCancelled = true;
+              terminationPromise = (async () => {
+                let individualKillSuccess = false;
+
+                // 1. Try to cancel the individual command via supported SDK API
+                try {
+                  if (activeHandle && typeof activeHandle.kill === 'function') {
+                    const res = await activeHandle.kill();
+                    if (res === true) {
+                      individualKillSuccess = true;
+                    } else if (res === false) {
+                      // Process was not found by SIGKILL (res === false).
+                      // Only treat as confirmed stopped if we have positive evidence that the process settled or is absent from running list!
+                      if (processSettled) {
+                        individualKillSuccess = true;
+                      } else if (typeof instance.commands.list === 'function' && typeof activeHandle.pid === 'number') {
+                        try {
+                          const running = await instance.commands.list();
+                          const isStillRunning = running.some((p) => p.pid === activeHandle!.pid);
+                          if (!isStillRunning) {
+                            // Confirmed absent from process table
+                            individualKillSuccess = true;
+                          } else {
+                            // Still running!
+                            individualKillSuccess = false;
+                          }
+                        } catch {
+                          // Querying process list failed! State is unconfirmed, fail-closed to false.
+                          individualKillSuccess = false;
+                        }
+                      } else {
+                        // Without processSettled or a working commands.list check,
+                        // state is unconfirmed; fail-closed to false.
+                        individualKillSuccess = false;
+                      }
+                    }
+                  } else if (
+                    typeof instance.commands.kill === 'function' &&
+                    typeof activeHandle?.pid === 'number'
+                  ) {
+                    const res = await instance.commands.kill(activeHandle.pid);
+                    if (res === true) {
+                      individualKillSuccess = true;
+                    } else if (res === false) {
+                      if (processSettled) {
+                        individualKillSuccess = true;
+                      } else if (typeof instance.commands.list === 'function') {
+                        try {
+                          const running = await instance.commands.list();
+                          const isStillRunning = running.some((p) => p.pid === activeHandle!.pid);
+                          if (!isStillRunning) {
+                            individualKillSuccess = true;
+                          } else {
+                            individualKillSuccess = false;
+                          }
+                        } catch {
+                          individualKillSuccess = false;
+                        }
+                      } else {
+                        individualKillSuccess = false;
+                      }
+                    }
+                  }
+                } catch {
+                  // Individual kill threw an unexpected error (e.g. RPC failure)
+                  individualKillSuccess = false;
+                }
+
+                // 2. Fallback: If individual command cannot be cancelled,
+                // terminate the sandbox to guarantee the remote operation stops.
+                if (!individualKillSuccess) {
+                  try {
+                    if (typeof instance.kill === 'function') {
+                      await instance.kill();
+                      killed = true;
+                    }
+                  } catch (sandboxKillErr) {
+                    // P1 fix: Both individual kill and sandbox termination failed!
+                    // Do not swallow; remote process is NOT confirmed stopped!
+                    failedCleanup = true;
+                    const msg = sandboxKillErr instanceof Error ? sandboxKillErr.message : String(sandboxKillErr);
+                    cancellationFailedError = new Error(
+                      `Failed to terminate remote command and fallback sandbox destruction failed: ${msg}`
+                    );
+                  }
+                }
+              })();
+              return terminationPromise;
             };
+
+            const abortHandler = () => {
+              void terminateCommandOrSandbox().finally(() => {
+                if (cancellationFailedError) {
+                  abortReject?.(cancellationFailedError);
+                } else {
+                  abortReject?.(new Error('Command was aborted'));
+                }
+              });
+            };
+
+            if (runOpts?.signal) {
+              if (runOpts.signal.aborted) {
+                await terminateCommandOrSandbox();
+                if (cancellationFailedError) {
+                  throw cancellationFailedError;
+                }
+                throw new Error('Command was aborted');
+              }
+              runOpts.signal.addEventListener('abort', abortHandler, { once: true });
+            }
+
+            try {
+              // Execute via SDK: pass background: true to obtain handle for in-flight cancellation
+              const started = await Promise.race([
+                instance.commands.run(fullCmd, {
+                  background: true,
+                  cwd: runOpts?.cwd,
+                  envs: runOpts?.envs,
+                  timeoutMs: runOpts?.timeoutMs,
+                  signal: runOpts?.signal,
+                  onStdout: runOpts?.onStdout
+                    ? (c: any) => runOpts.onStdout!(typeof c === 'string' ? c : c?.line || '')
+                    : undefined,
+                  onStderr: runOpts?.onStderr
+                    ? (c: any) => runOpts.onStderr!(typeof c === 'string' ? c : c?.line || '')
+                    : undefined,
+                }),
+                abortPromise,
+              ]);
+
+              if (commandCancelled || runOpts?.signal?.aborted) {
+                await terminateCommandOrSandbox();
+                if (cancellationFailedError) {
+                  throw cancellationFailedError;
+                }
+                throw new Error('Command was aborted');
+              }
+
+              let result: E2bSdkCommandResult;
+
+              if (started && typeof (started as E2bSdkCommandHandle).wait === 'function') {
+                activeHandle = started as E2bSdkCommandHandle;
+                if (commandCancelled || runOpts?.signal?.aborted) {
+                  await terminateCommandOrSandbox();
+                  if (cancellationFailedError) {
+                    throw cancellationFailedError;
+                  }
+                  throw new Error('Command was aborted');
+                }
+                result = await Promise.race([
+                  activeHandle.wait().then((res) => {
+                    processSettled = true;
+                    return res;
+                  }),
+                  abortPromise,
+                ]);
+              } else {
+                result = started as E2bSdkCommandResult;
+                processSettled = true;
+              }
+
+              // Fencing: Ensure cancellation race cannot return stale success
+              if (commandCancelled || runOpts?.signal?.aborted) {
+                await terminateCommandOrSandbox();
+                if (cancellationFailedError) {
+                  throw cancellationFailedError;
+                }
+                throw new Error('Command was aborted');
+              }
+
+              return {
+                exitCode: result.exitCode ?? 0,
+                stdout: result.stdout ?? '',
+                stderr: result.stderr ?? '',
+                durationMs: Date.now() - start,
+                error: result.error,
+              };
+            } catch (err: any) {
+              if (cancellationFailedError) {
+                throw cancellationFailedError;
+              }
+              if (commandCancelled || runOpts?.signal?.aborted) {
+                await terminateCommandOrSandbox();
+                if (cancellationFailedError) {
+                  throw cancellationFailedError;
+                }
+                throw new Error('Command was aborted');
+              }
+
+              // Check if err is CommandExitError carrying exitCode from real E2B SDK
+              if (err && typeof err.exitCode === 'number') {
+                return {
+                  exitCode: err.exitCode,
+                  stdout: err.stdout ?? '',
+                  stderr: err.stderr ?? '',
+                  durationMs: Date.now() - start,
+                  error: err.error ?? err.message,
+                };
+              }
+
+              throw err;
+            } finally {
+              if (runOpts?.signal) {
+                runOpts.signal.removeEventListener('abort', abortHandler);
+              }
+            }
           },
         },
         files: {
           async read(path: string): Promise<string> {
-            return await instance.files.read(path, { format: 'text' });
+            if (killed) throw new Error(`Sandbox '${instance.sandboxId}' has been terminated`);
+            const data = await instance.files.read(path, { format: 'text' });
+            return typeof data === 'string' ? data : Buffer.from(data).toString('utf8');
           },
           async write(path: string, content: string): Promise<void> {
+            if (killed) throw new Error(`Sandbox '${instance.sandboxId}' has been terminated`);
             await instance.files.write(path, content);
           },
           async list(path?: string): Promise<readonly E2bEntryInfo[]> {
+            if (killed) throw new Error(`Sandbox '${instance.sandboxId}' has been terminated`);
             const entries = await instance.files.list(path ?? '.');
-            return entries.map((e: any) => ({
+            return entries.map((e) => ({
               name: e.name,
               path: e.path,
-              type: e.type,
+              type: e.type === 'directory' ? 'directory' : e.type === 'symlink' ? 'symlink' : 'file',
               size: e.size,
             }));
           },
         },
         async kill(): Promise<void> {
           if (killed) return;
-          await instance.kill();
-          killed = true;
+          try {
+            await instance.kill();
+            killed = true;
+            failedCleanup = false;
+          } catch (err) {
+            // Keep retry state: do not mark killed = true if kill() threw
+            throw err;
+          }
         },
         isOpen(): boolean {
           return !killed;
+        },
+        hasFailedCleanup(): boolean {
+          return failedCleanup;
         },
       };
     },
@@ -440,6 +791,7 @@ interface ActiveSandboxEntry {
   destroyed: boolean;
   destroyAttempts: number;
   lastDestroyError?: string;
+  cleanupPending?: boolean;
 }
 
 /**
@@ -667,12 +1019,9 @@ export class E2bCloudSandboxProviderClient implements CloudSandboxProviderClient
     }
 
     const effectiveTimeoutMs = params.timeoutMs ?? this.defaultTimeoutMs;
-    const fullCommand = params.args && params.args.length > 0
-      ? `${params.command} ${params.args.join(' ')}`
-      : params.command;
 
     try {
-      const result = await sbx.handle.commands.run(fullCommand, {
+      const result = await sbx.handle.commands.run(params.command, {
         args: params.args,
         cwd: params.cwd,
         timeoutMs: effectiveTimeoutMs,
@@ -697,6 +1046,16 @@ export class E2bCloudSandboxProviderClient implements CloudSandboxProviderClient
       const raw = err instanceof Error ? err.message : String(err);
       const safe = sanitizeSandboxOutput(raw, 1024);
       const lower = raw.toLowerCase();
+
+      // P1: Check if handle has unconfirmed cancellation / failed cleanup
+      if (sbx.handle.hasFailedCleanup && sbx.handle.hasFailedCleanup()) {
+        sbx.cleanupPending = true;
+        sbx.lastDestroyError = safe;
+        throw new E2bProviderError(
+          'PROVIDER_ERROR',
+          `Command cancellation failed and sandbox cleanup failed: ${safe}`
+        );
+      }
 
       if (params.signal?.aborted || lower.includes('abort')) {
         throw new E2bProviderError('EXECUTION_ABORTED', 'Execution was aborted');
@@ -847,6 +1206,7 @@ export class E2bCloudSandboxProviderClient implements CloudSandboxProviderClient
     try {
       await sbx.handle.kill();
       sbx.destroyed = true;
+      sbx.cleanupPending = false;
       this.recentlyDestroyed.add(sandboxId);
       this.activeSandboxes.delete(sandboxId);
     } catch (err) {
@@ -899,7 +1259,18 @@ export class MockE2bTransport implements E2bTransport {
     const handle: E2bSandboxHandle = {
       sandboxId,
       commands: {
-        async run(command: string, opts?: { timeoutMs?: number; signal?: AbortSignal }) {
+        async run(
+          command: string,
+          opts?: {
+            readonly args?: readonly string[];
+            readonly cwd?: string;
+            readonly envs?: Record<string, string>;
+            readonly timeoutMs?: number;
+            readonly signal?: AbortSignal;
+            readonly onStdout?: (chunk: string) => void;
+            readonly onStderr?: (chunk: string) => void;
+          }
+        ) {
           const entry = transport.sandboxes.get(sandboxId);
           if (!entry || entry.killed) {
             throw new Error(`Sandbox '${sandboxId}' is not running`);
@@ -926,7 +1297,13 @@ export class MockE2bTransport implements E2bTransport {
             await new Promise((resolve) => setTimeout(resolve, transport.simulateLateCompletionMs));
           }
 
-          if (command.includes('fail-command') || command.includes('syntax-error')) {
+          const fullCommand = buildShellCommandLine(command, opts?.args);
+
+          if (
+            command.includes('fail-command') ||
+            fullCommand.includes('fail-command') ||
+            command.includes('syntax-error')
+          ) {
             return {
               exitCode: 1,
               stdout: '',
@@ -936,7 +1313,7 @@ export class MockE2bTransport implements E2bTransport {
 
           return {
             exitCode: 0,
-            stdout: `Mock E2B executed: ${command}`,
+            stdout: `Mock E2B executed: ${fullCommand}`,
             stderr: '',
           };
         },

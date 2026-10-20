@@ -129,6 +129,8 @@ The E2B Cloud Sandbox provider client is **strictly disabled by default**:
 | 20 | **Cross-Owner Access Denial** | **VERIFIED** | Prohibits passing host secrets (`DATABASE_URL`, `JWT_SECRET`); rejects tenant mismatches on duplicate prepare (`TENANT_MISMATCH`). |
 | 21 | **Adapter Signature / SDK Drift** | **VERIFIED** | `E2bCloudSandboxProviderClient` strictly satisfies `CloudSandboxProviderClient` interface. |
 | 22 | **Real E2B SDK Transport Mapping** | **VERIFIED** | `createRealE2bTransport` maps lifecycle, commands, files, and kill to injected `E2bSdkSeam`; provider defaults to real transport when omitted (Blocker 1). |
+| 23 | **Command Argument Escaping & Shell Injection Fencing** | **VERIFIED** | `buildShellCommandLine` escapes arguments exactly once using single quotes (`escapeShellArg`); prevents argument duplication and guarantees shell metacharacters remain data rather than code (P1 Finding). |
+| 24 | **In-Flight Command Cancellation for Real Transport** | **VERIFIED** | `createRealE2bTransport` runs commands with `{ background: true }` and abort listener cancels in-flight process via `handle.kill()`; checks process table if kill returns false, treating unconfirmed/failed queries as unverified (fails closed to sandbox kill, Blocker Finding); falls back to `instance.kill()` if individual cancellation fails; when both kills fail, fails closed with `PROVIDER_ERROR` and retains sandbox in registry for retry reconciliation rather than reporting false abort (P1 Finding); races `wait()` against abort to prevent hangs and fences against stale success races. |
 
 ### Unverified Provider Guarantees (Flagged as Blockers for Live Testing)
 
@@ -229,18 +231,32 @@ The E2B Cloud Sandbox provider client is **strictly disabled by default**:
     ✔ verifies E2bCloudSandboxProviderClient strictly satisfies CloudSandboxProviderClient interface (0.0717ms)
   ✔ 21. Adapter signature/SDK drift detection (0.1055ms)
   ▶ 22. Real E2B SDK transport mapping (Blocker 1)
-    ✔ createRealE2bTransport correctly maps lifecycle, commands, files, and kill to injected SDK seam (0.8925ms)
-    ✔ E2bCloudSandboxProviderClient defaults to createRealE2bTransport when transport is omitted (0.0649ms)
-  ✔ 22. Real E2B SDK transport mapping (Blocker 1) (1.0139ms)
-✔ E2B Cloud Sandbox Provider Client (17T-69) (3156.2013ms)
-ℹ tests 39
-ℹ suites 23
-ℹ pass 39
+    ✔ createRealE2bTransport correctly maps lifecycle, commands, files, and kill to injected SDK seam (1.0166ms)
+    ✔ E2bCloudSandboxProviderClient defaults to createRealE2bTransport when transport is omitted (0.0626ms)
+  ✔ 22. Real E2B SDK transport mapping (Blocker 1) (1.1323ms)
+  ▶ 23. Command argument escaping and shell injection fencing (P1 Finding)
+    ✔ escapeShellArg wraps in single quotes and escapes single quotes cleanly (0.1193ms)
+    ✔ buildShellCommandLine escapes arguments exactly once without duplicating or pre-concatenating (0.0532ms)
+    ✔ executeCommand and real transport pass arguments cleanly to SDK seam exactly once without duplication or injection (0.308ms)
+  ✔ 23. Command argument escaping and shell injection fencing (P1 Finding) (0.5436ms)
+  ▶ 24. In-flight command cancellation for real transport (P1 Finding)
+    ✔ cancels in-flight remote command via SDK handle.kill() without terminating sandbox (5.1424ms)
+    ✔ falls back to terminating sandbox when individual command cancellation fails or is unsupported (1.4542ms)
+    ✔ ensures cancellation race cannot return stale success if remote completes concurrently with abort (0.5883ms)
+    ✔ fails closed with PROVIDER_ERROR and retains sandbox for retry when both command kill and sandbox kill fail (P1 Finding) (1.5105ms)
+    ✔ does not terminate sandbox when command kill returns false because process already exited (P2 Finding) (1.2772ms)
+    ✔ falls back to terminating sandbox when command kill returns false and commands.list fails (Blocker Finding) (1.563ms)
+    ✔ fails closed with PROVIDER_ERROR when command kill returns false, commands.list fails AND sandbox kill fails (Blocker Finding) (1.3786ms)
+  ✔ 24. In-flight command cancellation for real transport (P1 Finding) (13.6569ms)
+✔ E2B Cloud Sandbox Provider Client (17T-69) (3571.8074ms)
+ℹ tests 49
+ℹ suites 25
+ℹ pass 49
 ℹ fail 0
 ℹ cancelled 0
 ℹ skipped 0
 ℹ todo 0
-ℹ duration_ms 3544.2889
+ℹ duration_ms 3961.6947
 ```
 
 ### B. Sandbox Adapter Regression Suite (`apps/api/tests/agent/agent-sandbox.test.ts`)
@@ -253,8 +269,8 @@ The E2B Cloud Sandbox provider client is **strictly disabled by default**:
 
 ### D. Full Backend Test Suite (`apps/api`)
 
-- **Tests:** 518 total tests (493 PASS, 0 FAIL, 0 cancelled, 25 skipped for TEST_DATABASE_URL).
-- **Duration:** 40.53s.
+- **Tests:** 528 total tests (503 PASS, 0 FAIL, 0 cancelled, 25 skipped for TEST_DATABASE_URL).
+- **Duration:** 41.5s.
 
 ### E. Frontend Test Suite (`apps/web`)
 
