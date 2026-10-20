@@ -56,8 +56,8 @@ export function redactStringPatterns(content: string): string {
   sanitized = sanitized.replace(/\bBearer\s+(?!\[REDACTED\])[A-Za-z0-9\-_.~+/=]+/gi, 'Bearer [REDACTED]');
   sanitized = sanitized.replace(/\bBasic\s+(?!\[REDACTED\])[A-Za-z0-9+/=]{16,}/gi, 'Basic [REDACTED]');
 
-  // 6. Common API key prefixes: sk-..., ghp-..., gho-..., pat-..., live_..., test_...
-  sanitized = sanitized.replace(/\b(?:sk|ghp|gho|ghu|ghs|ghr|pat|xoxb|xoxp|xapp|glpat|npm|live|test)[-_][A-Za-z0-9_\-]{8,}\b/gi, '[REDACTED_KEY]');
+  // 6. Common API key prefixes: e2b-..., e2b_..., sk-..., ghp-..., gho-..., pat-..., live_..., test_...
+  sanitized = sanitized.replace(/\b(?:e2b|sk|ghp|gho|ghu|ghs|ghr|pat|xoxb|xoxp|xapp|glpat|npm|live|test)[-_][A-Za-z0-9_\-]{8,}\b/gi, '[REDACTED_KEY]');
 
   // 7. Quoted JSON / object key-value pairs:
   const quotedRegex = new RegExp(
