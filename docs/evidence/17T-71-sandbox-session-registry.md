@@ -96,40 +96,50 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_sandbox_single_active ON agent_sandbo
 ## 4. Verification Evidence & Test Results
 
 ### 1. Dedicated Sandbox Session Tests (`tests/agent/agent-sandbox-sessions.test.ts`)
-- **Suite:** 16 tests across 6 scenario groups
-- **Outcome:** **16 passed, 0 failed**
+- **Suite:** 20 tests across 7 scenario groups
+- **Outcome:** **20 passed, 0 failed**
 
 ```
 ▶ GigaAgent Durable Sandbox Sessions & Crash-Safe Cleanup (17T-71)
   ▶ 1. Allocation Races & Invariants
-    ✔ concurrent allocation intents: exactly one survivor, second gets duplicate or conflict (34.8ms)
-    ✔ allocation rejects terminal runs (completed, failed, cancelled) (26.9ms)
-    ✔ cross-attempt allocation succeeds after previous attempt destroyed or failed (26.7ms)
-  ✔ 1. Allocation Races & Invariants (89.2ms)
+    ✔ concurrent allocation intents: exactly one survivor, second gets duplicate or conflict (40.3ms)
+    ✔ allocation rejects terminal runs (completed, failed, cancelled) (32.6ms)
+    ✔ cross-attempt allocation succeeds after previous attempt destroyed or failed (26.9ms)
+  ✔ 1. Allocation Races & Invariants (100.7ms)
   ▶ 2. Crash Windows & Orphan Prevention
-    ✔ worker crashes before provider call: allocating TTL expires -> reconciler sweeps and marks timed out (36.7ms)
-    ✔ worker crashes after provider allocation before DB commit: session tracked and reconciler destroys it (26.3ms)
-    ✔ worker crashes while stopping/destroying: reconciler sweeps and completes destruction (38.6ms)
-  ✔ 2. Crash Windows & Orphan Prevention (102.3ms)
+    ✔ worker crashes before provider call: allocating TTL expires -> reconciler sweeps and marks timed out (41.6ms)
+    ✔ worker crashes after provider allocation before DB commit: session tracked and reconciler destroys it (35.1ms)
+    ✔ worker crashes while stopping/destroying: reconciler sweeps and completes destruction (42.2ms)
+  ✔ 2. Crash Windows & Orphan Prevention (119.3ms)
   ▶ 3. Late Callbacks & Worker Lease Fencing
-    ✔ late callback: commit after lease expired fails and automatically marks session cleanup_pending (27.1ms)
-    ✔ late callback: another worker claimed the run -> first worker fenced out on commit (29.1ms)
-  ✔ 3. Late Callbacks & Worker Lease Fencing (56.6ms)
+    ✔ late callback: commit after lease expired fails and automatically marks session cleanup_pending (26.1ms)
+    ✔ late callback: another worker claimed the run -> first worker fenced out on commit (27.4ms)
+  ✔ 3. Late Callbacks & Worker Lease Fencing (53.9ms)
   ▶ 4. Durable Reconciler & Idempotent Cleanup
-    ✔ reconciler treats 404 / NOT FOUND as idempotent destruction success (33.9ms)
-    ✔ reconciler handles transient provider errors with exponential backoff and attempt counter (55.0ms)
-    ✔ reconciler bounded batching processes only up to batchSize items (74.4ms)
-  ✔ 4. Durable Reconciler & Idempotent Cleanup (163.7ms)
+    ✔ reconciler treats 404 / NOT FOUND as idempotent destruction success (36.9ms)
+    ✔ reconciler handles transient provider errors with exponential backoff and attempt counter (49.0ms)
+    ✔ reconciler bounded batching processes only up to batchSize items (88.8ms)
+  ✔ 4. Durable Reconciler & Idempotent Cleanup (175.0ms)
   ▶ 5. Tenant Boundary & Immutability Security
-    ✔ cross-owner query via getSandboxSession rejects with NotFoundError (20.9ms)
-    ✔ cross-workspace allocation attempt rejected with NotFoundError or ConflictError (15.7ms)
-    ✔ destroyed session cannot be revived (immutable tombstone) (20.1ms)
+    ✔ cross-owner query via getSandboxSession rejects with NotFoundError (25.4ms)
+    ✔ cross-workspace allocation attempt rejected with NotFoundError or ConflictError (16.5ms)
+    ✔ destroyed session cannot be revived (immutable tombstone) (23.7ms)
     ✔ diagnostics and error reasons redact sensitive tokens and credentials (20.4ms)
-  ✔ 5. Tenant Boundary & Immutability Security (77.7ms)
+  ✔ 5. Tenant Boundary & Immutability Security (86.5ms)
   ▶ 6. Adapter Integration & Execution Flow
-    ✔ IsolatedCloudSandboxAdapter with repository persists allocating intent and commits active session on prepare (27.8ms)
-  ✔ 6. Adapter Integration & Execution Flow (28.4ms)
-✔ GigaAgent Durable Sandbox Sessions & Crash-Safe Cleanup (17T-71) (676.6ms)
+    ✔ IsolatedCloudSandboxAdapter with repository persists allocating intent and commits active session on prepare (33.6ms)
+  ✔ 6. Adapter Integration & Execution Flow (33.8ms)
+  ▶ 7. Concurrency & Robustness Scenarios (17T-71 Acceptance)
+    ✔ mode mismatch between run mode and requested allocation mode throws ConflictError (22.0ms)
+    ✔ abort followed by failed destroy, then successful reconciliation retry (36.7ms)
+    ✔ two concurrent reconciliation workers safely arbitrate multiple pending cleanups without duplicate destruction (106.9ms)
+    ✔ two workers concurrently preparing the same run via IsolatedCloudSandboxAdapter (27.8ms)
+  ✔ 7. Concurrency & Robustness Scenarios (17T-71 Acceptance) (193.7ms)
+✔ GigaAgent Durable Sandbox Sessions & Crash-Safe Cleanup (17T-71) (927.1ms)
+ℹ tests 20
+ℹ suites 8
+ℹ pass 20
+ℹ fail 0
 ```
 
 ### 2. Migration Tests (`tests/agent/agent-migration.test.ts` & `tests/db-migrations.test.ts`)
@@ -169,7 +179,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_sandbox_single_active ON agent_sandbo
 | `apps/api/src/modules/agent/orchestrator.ts` | Modified | Forwarded workerId, leaseToken, and attempt to runtime.prepare |
 | `apps/api/src/modules/agent/sandbox-adapter.ts` | Modified | Connected adapter to PostgreSQL registry with in-memory fallback |
 | `apps/api/tests/agent/agent-migration.test.ts` | Modified | Added migration 014 verification test |
-| `apps/api/tests/agent/agent-sandbox-sessions.test.ts` | Added | 16 comprehensive durable session & reconciler tests |
+| `apps/api/tests/agent/agent-sandbox-sessions.test.ts` | Added | 20 comprehensive durable session & reconciler tests |
 | `apps/api/tests/db-migrations.test.ts` | Modified | Updated migration count assertion to 14 |
 | `apps/api/tests/test-db-helper.ts` | Modified | Added `agent_sandbox_sessions` to test cleanup |
 | `docs/evidence/17T-71-sandbox-session-registry.md` | Added | Complete verification evidence and technical analysis |

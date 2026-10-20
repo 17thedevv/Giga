@@ -1378,6 +1378,10 @@ export class AgentRepository {
         throw new ConflictError('Cannot allocate sandbox for terminal run');
       }
 
+      if (runRow.mode !== input.mode) {
+        throw new ConflictError(`MODE_MISMATCH: run mode is '${runRow.mode}', requested allocation is '${input.mode}'`);
+      }
+
       this.assertActiveLease(runRow, input.leaseToken);
 
       // 2. Check existing active or allocating sessions for this run
@@ -1737,7 +1741,7 @@ export class AgentRepository {
     const result = await this.pool.query<SandboxSessionRow>(
       `UPDATE agent_sandbox_sessions
        SET cleanup_state = 'in_progress', lifecycle_state = 'destroying', updated_at = NOW()
-       WHERE id = $1 AND lifecycle_state <> 'destroyed'
+       WHERE id = $1 AND lifecycle_state <> 'destroyed' AND cleanup_state <> 'in_progress'
        RETURNING *`,
       [sessionId]
     );

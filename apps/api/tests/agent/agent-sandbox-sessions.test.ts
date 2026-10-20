@@ -747,4 +747,173 @@ describe('GigaAgent Durable Sandbox Sessions & Crash-Safe Cleanup (17T-71)', { t
       assert.equal(postStop.errorCode, 'SESSION_NOT_FOUND');
     });
   });
+
+  describe('7. Concurrency & Robustness Scenarios (17T-71 Acceptance)', () => {
+    it('mode mismatch between run mode and requested allocation mode throws ConflictError', async () => {
+      const { run, claim } = await createClaimedRun(ownerId, workspaceId, 'worker-1', 'ask');
+
+      // Attempting to allocate 'execute' sandbox for an 'ask' run must fail closed
+      await assert.rejects(
+        async () => {
+          await repo.createSandboxAllocationIntent({
+            ownerId,
+            workspaceId,
+            runId: run.id,
+            attemptNumber: 1,
+            mode: 'execute', // Mismatched mode!
+            providerType: 'e2b',
+            workerId: 'worker-1',
+            leaseToken: claim.leaseToken,
+          });
+        },
+        (err: any) => err instanceof ConflictError && err.message.includes('MODE_MISMATCH')
+      );
+    });
+
+    it('abort followed by failed destroy, then successful reconciliation retry', async () => {
+      const { run, claim } = await createClaimedRun(ownerId, workspaceId);
+      const provider = new MockCloudSandboxProviderClient();
+      const reconciler = new SandboxCleanupReconciler(repo, provider);
+      const adapter = new IsolatedCloudSandboxAdapter({
+        providerClient: provider,
+        repository: repo,
+      });
+
+      const prep = await adapter.prepare({
+        runId: run.id,
+        workspaceId,
+        ownerId,
+        mode: 'execute',
+        task: 'Execute test with abort failure',
+        modelId: 'giga-agent-default',
+        workerId: 'worker-1',
+        leaseToken: claim.leaseToken,
+        attemptNumber: 1,
+        signal: new AbortController().signal,
+      });
+
+      assert.equal(prep.available, true);
+      const activeSession = await repo.getActiveSandboxSessionForRun(ownerId, run.id);
+      assert.ok(activeSession);
+
+      // Simulate provider outage during stop/destroy
+      provider.failDestroyWith = new Error('503 Service Unavailable: connection reset');
+
+      // Adapter stop fails due to provider outage, but records cleanup_pending in PostgreSQL
+      await assert.rejects(
+        async () => {
+          await adapter.stop(prep.sessionId!);
+        },
+        /503 Service Unavailable/
+      );
+
+      // Session must be in cleanup_pending state
+      const pendingSession = await repo.getSandboxSession(ownerId, activeSession.id);
+      assert.equal(pendingSession.lifecycleState, 'cleanup_pending');
+      assert.equal(pendingSession.cleanupState, 'retry_scheduled');
+
+      // Provider recovers
+      provider.failDestroyWith = undefined;
+
+      // Fast forward next_cleanup_retry_at to past so reconciler sweeps it
+      await db.pool.query(
+        "UPDATE agent_sandbox_sessions SET next_cleanup_retry_at = NOW() - interval '1 second' WHERE id = $1",
+        [activeSession.id]
+      );
+
+      // Reconciler runs and sweeps cleanup_pending session
+      const result = await reconciler.reconcileBatch();
+      assert.equal(result.destroyed, 1);
+
+      // Session is now confirmed destroyed
+      const finalSession = await repo.getSandboxSession(ownerId, activeSession.id);
+      assert.equal(finalSession.lifecycleState, 'destroyed');
+      assert.equal(finalSession.cleanupState, 'completed');
+      assert.ok(provider.destroyedSandboxes.includes(activeSession.providerSessionId!));
+    });
+
+    it('two concurrent reconciliation workers safely arbitrate multiple pending cleanups without duplicate destruction', async () => {
+      const provider = new MockCloudSandboxProviderClient();
+      const reconcilerA = new SandboxCleanupReconciler(repo, provider, { batchSize: 5 });
+      const reconcilerB = new SandboxCleanupReconciler(repo, provider, { batchSize: 5 });
+
+      // Create 4 sessions needing cleanup
+      for (let i = 0; i < 4; i++) {
+        const { run, claim } = await createClaimedRun(ownerId, workspaceId);
+        const { session } = await repo.createSandboxAllocationIntent({
+          ownerId,
+          workspaceId,
+          runId: run.id,
+          attemptNumber: 1,
+          mode: 'execute',
+          providerType: 'e2b',
+          workerId: 'worker-1',
+          leaseToken: claim.leaseToken,
+        });
+        await repo.commitSandboxSessionAllocated({
+          sessionId: session.id,
+          ownerId,
+          runId: run.id,
+          leaseToken: claim.leaseToken,
+          providerSessionId: `sbx-concurrent-sweep-${i}`,
+        });
+        await repo.markSandboxCleanupPending(session.id, 'concurrency_test', 0);
+      }
+
+      // Run both reconcilers concurrently
+      const [resA, resB] = await Promise.all([
+        reconcilerA.reconcileBatch(5),
+        reconcilerB.reconcileBatch(5),
+      ]);
+
+      // Total destroyed across both workers must equal exactly 4
+      assert.equal(resA.destroyed + resB.destroyed, 4);
+      // No duplicate destroy calls at provider
+      assert.equal(provider.destroyedSandboxes.length, 4);
+      assert.equal(new Set(provider.destroyedSandboxes).size, 4);
+    });
+
+    it('two workers concurrently preparing the same run via IsolatedCloudSandboxAdapter', async () => {
+      const { run, claim } = await createClaimedRun(ownerId, workspaceId);
+      const provider = new MockCloudSandboxProviderClient();
+      const adapter = new IsolatedCloudSandboxAdapter({
+        providerClient: provider,
+        repository: repo,
+      });
+
+      // Worker 1 and Worker 2 both call prepare on the same run
+      const [prep1, prep2] = await Promise.allSettled([
+        adapter.prepare({
+          runId: run.id,
+          workspaceId,
+          ownerId,
+          mode: 'execute',
+          task: 'Concurrent prepare test',
+          modelId: 'giga-agent-default',
+          workerId: 'worker-1',
+          leaseToken: claim.leaseToken,
+          attemptNumber: 1,
+          signal: new AbortController().signal,
+        }),
+        adapter.prepare({
+          runId: run.id,
+          workspaceId,
+          ownerId,
+          mode: 'execute',
+          task: 'Concurrent prepare test',
+          modelId: 'giga-agent-default',
+          workerId: 'worker-2',
+          leaseToken: claim.leaseToken,
+          attemptNumber: 1,
+          signal: new AbortController().signal,
+        }),
+      ]);
+
+      // Exactly one succeeds with a writable active session, or both coordinate safely
+      const successes = [prep1, prep2].filter((r) => r.status === 'fulfilled' && (r as PromiseFulfilledResult<any>).value.available);
+      // Never allocates duplicate writable sessions at provider
+      assert.equal(provider.createdSandboxes.length, 1);
+      assert.ok(successes.length >= 1);
+    });
+  });
 });
