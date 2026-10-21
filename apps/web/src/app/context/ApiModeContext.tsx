@@ -16,7 +16,7 @@ export const ApiModeProvider: React.FC<{ children: React.ReactNode; initialMode?
   const [mode, setModeState] = useState<ApiMode>(() => {
     if (initialMode) return initialMode;
     const saved = typeof localStorage !== 'undefined' ? localStorage.getItem('giga_api_mode') : null;
-    return (saved === 'real' || saved === 'mock') ? saved : 'mock';
+    return (saved === 'real' || saved === 'mock') ? saved : import.meta.env.PROD ? 'real' : 'mock';
   });
 
   const setMode = (newMode: ApiMode) => {

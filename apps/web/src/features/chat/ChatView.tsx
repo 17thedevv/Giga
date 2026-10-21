@@ -87,7 +87,7 @@ export const ChatView: React.FC = () => {
   };
 
   useEffect(() => {
-    scrollToBottom();
+    if (messages.length || streamingText) scrollToBottom();
   }, [messages, streamingText]);
 
   // Cleanup abort controller on component unmount
@@ -655,7 +655,7 @@ export const ChatView: React.FC = () => {
 
 
   return (
-    <div style={{ display: 'flex', height: '100%', width: '100%' }}>
+    <div className="g-chat-layout" style={{ display: 'flex', height: '100%', width: '100%' }}>
       {/* Sidebar with discussions list */}
       <ConversationSidebar
         conversations={conversations}
@@ -675,6 +675,7 @@ export const ChatView: React.FC = () => {
 
       {/* Main Chat Workspace */}
       <div
+        className="g-chat-workspace"
         style={{
           display: 'flex',
           flexDirection: 'column',
@@ -684,6 +685,7 @@ export const ChatView: React.FC = () => {
           minWidth: 0,
         }}
       >
+        <header className="g-chat-heading"><div><span className="g-wordmark">giga</span><span className="g-heading-separator">/</span><span>Chat</span></div><span className="g-heading-note">A little clarity. A lot of possibility.</span></header>
         {/* Mobile Header Bar for discussions toggle (< 768px) */}
         <div
           className="mobile-chat-bar"
@@ -699,6 +701,7 @@ export const ChatView: React.FC = () => {
           <Button
             size="sm"
             variant="ghost"
+            aria-expanded={showMobileSidebar}
             onClick={() => setShowMobileSidebar(!showMobileSidebar)}
           >
             {showMobileSidebar ? '✕ Close Discussions' : '☰ Discussions'}
@@ -792,7 +795,7 @@ export const ChatView: React.FC = () => {
         )}
 
         {/* Message Feed */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: '24px 20px', display: 'flex', flexDirection: 'column' }}>
+        <div className="g-message-feed" style={{ flex: 1, overflowY: 'auto', padding: '24px 20px', display: 'flex', flexDirection: 'column' }}>
           {isMessagesLoading && messages.length === 0 && (
             <div style={{ margin: 'auto', textAlign: 'center', color: 'var(--giga-text-muted, #94A3B8)', fontSize: '13px' }}>
               Loading message history...
@@ -832,41 +835,19 @@ export const ChatView: React.FC = () => {
           )}
 
           {!isMessagesLoading && messages.length === 0 && !isStreaming && !historyLoadError && (
-            <div
-              className="g-empty"
-              style={{
-                margin: 'auto',
-                textAlign: 'center',
-                maxWidth: '480px',
-                padding: '32px 16px',
-              }}
-            >
-              <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '16px' }}>
-                <GigaLogo variant="mark" tone="color" width={48} />
+            <section className="g-welcome">
+              <div className="g-welcome-symbol"><GigaLogo variant="mark" tone="color" width={40} /></div>
+              <p className="g-eyebrow">YOUR SPACE TO THINK</p>
+              <h1>Where shall we begin?</h1>
+              <p className="g-welcome-description">A fresh perspective, a tricky problem, your next big idea.<br />Let's work through it together.</p>
+              <div className="g-suggestions">
+                {[
+                  { label: 'Make something', description: 'Turn an idea into a clear plan', prompt: 'Help me turn a new app idea into a practical step-by-step plan.' },
+                  { label: 'Understand more', description: 'Find a simpler explanation', prompt: 'Explain how streaming AI responses work, using a simple everyday analogy.' },
+                  { label: 'Work through it', description: 'Untangle a tricky problem', prompt: 'Help me break down a difficult coding problem. Ask me what I am working on first.' },
+                ].map(item => <button key={item.label} onClick={() => handleSendMessage(item.prompt)}><span className="g-suggestion-title">{item.label}<span aria-hidden="true">↗</span></span><span>{item.description}</span></button>)}
               </div>
-              <h2 style={{ fontSize: '18px', fontWeight: 600, color: 'var(--giga-text, #F8FAFC)', marginBottom: '8px' }}>
-                Welcome to GIGA Developer Chat
-              </h2>
-              <p style={{ fontSize: '13px', lineHeight: 1.6, marginBottom: '20px', color: 'var(--giga-text-secondary, #94A3B8)' }}>
-                Explore codebase architecture, troubleshoot cloud deployments, or delegate autonomous coding tasks.
-              </p>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => handleSendMessage('Explain how Giga handles human approvals for GitHub writes')}
-                >
-                  "Explain how Giga handles human approvals for GitHub writes"
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => handleSendMessage('Review Neon PostgreSQL connection pool settings in Hono')}
-                >
-                  "Review Neon PostgreSQL connection pool settings in Hono"
-                </Button>
-              </div>
-            </div>
+            </section>
           )}
 
           {messages.map((msg) => {

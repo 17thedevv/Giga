@@ -224,14 +224,14 @@ describe('latest-turn generation controls', () => {
       return <button onClick={() => navigate('/chat/c1')}>Open conversation B</button>;
     }
     render(<ApiModeProvider initialMode="real"><RouterProvider initialPath={source === 'creation' ? '/chat' : '/chat/cA'}><Navigation /><ChatView /></RouterProvider></ApiModeProvider>);
-    const input = await screen.findByPlaceholderText(/Ask Giga anything/);
+    const input = await screen.findByPlaceholderText(/Message Giga/);
     fireEvent.change(input, { target: { value: 'Create conversation A' } });
     fireEvent.submit(input.closest('form')!);
     if (source === 'creation') expect(create).toHaveBeenCalledTimes(1);
     else await waitFor(() => expect(rejectHistory).toBeDefined());
     fireEvent.click(screen.getByRole('button', { name: 'Open conversation B' }));
     await ready();
-    const inputB = screen.getByPlaceholderText(/Ask Giga anything/);
+    const inputB = screen.getByPlaceholderText(/Message Giga/);
     fireEvent.change(inputB, { target: { value: 'Start generation B' } });
     fireEvent.submit(inputB.closest('form')!);
     expect(await screen.findByText('B stays active')).toBeDefined();
@@ -258,7 +258,7 @@ describe('latest-turn generation controls', () => {
     vi.spyOn(realApiClient, 'listConversations').mockResolvedValue({ items: [], nextCursor: null });
     const create = vi.spyOn(realApiClient, 'createConversation').mockImplementation(() => new Promise(() => {}));
     render(<ApiModeProvider initialMode="real"><RouterProvider initialPath="/chat"><ChatView /></RouterProvider></ApiModeProvider>);
-    const input = await screen.findByPlaceholderText(/Ask Giga anything/);
+    const input = await screen.findByPlaceholderText(/Message Giga/);
     fireEvent.change(input, { target: { value: 'New keyboard turn' } });
     await act(async () => {
       fireEvent.keyDown(input, { key: 'Enter' });
@@ -300,7 +300,7 @@ describe('latest-turn generation controls', () => {
     );
 
     // Send in conversation A
-    const inputA = await screen.findByPlaceholderText(/Ask Giga anything/);
+    const inputA = await screen.findByPlaceholderText(/Message Giga/);
     fireEvent.change(inputA, { target: { value: 'Prompt in A' } });
     fireEvent.submit(inputA.closest('form')!);
 
@@ -360,7 +360,7 @@ describe('latest-turn generation controls', () => {
     );
 
     // Send in conversation A
-    const inputA = await screen.findByPlaceholderText(/Ask Giga anything/);
+    const inputA = await screen.findByPlaceholderText(/Message Giga/);
     fireEvent.change(inputA, { target: { value: 'Prompt in A' } });
     fireEvent.submit(inputA.closest('form')!);
 
@@ -541,7 +541,7 @@ describe('latest-turn generation controls', () => {
     expect(stopBtn).toBeDefined();
 
     // Verify textarea is disabled / generation action locked
-    const textarea = screen.getByPlaceholderText(/Generating response...|Ask Giga anything/);
+    const textarea = screen.getByPlaceholderText(/Generating response...|Message Giga/);
     expect(textarea.hasAttribute('disabled')).toBe(true);
 
     // Click Stop Generating
@@ -606,7 +606,7 @@ describe('latest-turn generation controls', () => {
     // Regenerate is available, Retry is not, Composer is unlocked
     expect(screen.getByRole('button', { name: 'Regenerate' })).toBeDefined();
     expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
-    const textarea = screen.getByPlaceholderText(/Ask Giga anything/);
+    const textarea = screen.getByPlaceholderText(/Message Giga/);
     expect(textarea.hasAttribute('disabled')).toBe(false);
   });
 
@@ -640,7 +640,7 @@ describe('latest-turn generation controls', () => {
     expect(await screen.findByText(/Network timeout loading history/)).toBeDefined();
 
     // Composer is locked due to history loading failure
-    const textarea = screen.getByPlaceholderText(/Chat is disabled|Ask Giga anything/);
+    const textarea = screen.getByPlaceholderText(/Chat is disabled|Message Giga/);
     expect(textarea.hasAttribute('disabled')).toBe(true);
 
     // Find and click Retry Loading History button
@@ -650,7 +650,7 @@ describe('latest-turn generation controls', () => {
     // On successful retry, history is restored and Composer is unlocked
     expect(await screen.findByText('Recovered prompt')).toBeDefined();
     await waitFor(() => {
-      expect(screen.getByPlaceholderText(/Ask Giga anything/).hasAttribute('disabled')).toBe(false);
+      expect(screen.getByPlaceholderText(/Message Giga/).hasAttribute('disabled')).toBe(false);
     });
   });
 
@@ -693,7 +693,7 @@ describe('latest-turn generation controls', () => {
     // Message restored, but active generation discovered -> Stop enabled and Composer locked
     expect(await screen.findByText('Active prompt')).toBeDefined();
     expect(await screen.findByRole('button', { name: 'Stop Generating' })).toBeDefined();
-    expect(screen.getByPlaceholderText(/Generating response...|Ask Giga anything/).hasAttribute('disabled')).toBe(true);
+    expect(screen.getByPlaceholderText(/Generating response...|Message Giga/).hasAttribute('disabled')).toBe(true);
   });
 
   it('rapid A -> B navigation while history request for A fails does not lock Composer in B', async () => {
@@ -748,7 +748,7 @@ describe('latest-turn generation controls', () => {
     // In conversation B: prompt in B is displayed, no error from A, and Composer is NOT locked
     expect(await screen.findByText('Prompt in B')).toBeDefined();
     expect(screen.queryByText(/Stale failure in A/)).toBeNull();
-    const textarea = screen.getByPlaceholderText(/Ask Giga anything/);
+    const textarea = screen.getByPlaceholderText(/Message Giga/);
     expect(textarea.hasAttribute('disabled')).toBe(false);
   });
 });

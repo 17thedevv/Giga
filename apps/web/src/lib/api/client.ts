@@ -430,6 +430,10 @@ export class RealApiClient {
     });
   }
 
+  async getRun(id: string): Promise<{ run: AgentRun }> {
+    return this.getAgentRun(id);
+  }
+
   async getProposal(runId: string): Promise<{ proposal: ChangeProposal }> {
     return this.request<{ proposal: ChangeProposal }>(`/api/v1/agent/runs/${encodeURIComponent(runId)}/proposal`, {
       method: 'GET',

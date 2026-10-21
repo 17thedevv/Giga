@@ -1,7 +1,9 @@
 import crypto from 'node:crypto';
+import { Sandbox as SdkSandbox } from 'e2b';
 import type { CloudSandboxProviderClient, CreateSandboxParams } from './sandbox-adapter.js';
 import { isSafeRelativePath } from './tool-registry.js';
 import { sanitizeSandboxOutput } from './sandbox-adapter.js';
+import { redactSensitiveContent } from './redaction.js';
 
 /**
  * EntryInfo matching the official E2B SDK filesystem type (e2b files.list).
@@ -46,6 +48,7 @@ export interface E2bSandboxHandle {
   };
   kill(): Promise<void>;
   isOpen?(): boolean;
+  hasFailedCleanup?(): boolean;
 }
 
 /**
@@ -67,6 +70,464 @@ export interface E2bCreateOptions {
  */
 export interface E2bTransport {
   createSandbox(options: E2bCreateOptions): Promise<E2bSandboxHandle>;
+}
+
+/**
+ * Safely quotes a single argument for POSIX/Bash shell execution.
+ * Encloses the argument in single quotes and replaces embedded single quotes with '\''
+ * (close single quote, escaped literal single quote, reopen single quote).
+ *
+ * This guarantees shell metacharacters (spaces, tabs, newlines, semicolons, pipes,
+ * redirections, command substitutions $(...), backticks, and variable expansions $VAR)
+ * remain purely literal string data without triggering command execution.
+ */
+export function escapeShellArg(arg: string): string {
+  return `'${arg.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * Builds the final command line string by escaping each argument exactly once.
+ * If args is omitted or empty, returns the command string as-is.
+ */
+export function buildShellCommandLine(command: string, args?: readonly string[]): string {
+  if (!args || args.length === 0) {
+    return command;
+  }
+  const escapedArgs = args.map(escapeShellArg).join(' ');
+  return `${command} ${escapedArgs}`;
+}
+
+export interface E2bSdkCommandResult {
+  readonly exitCode: number;
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly error?: string;
+}
+
+export interface E2bSdkCommandHandle {
+  readonly pid: number;
+  wait(): Promise<E2bSdkCommandResult>;
+  kill(): Promise<boolean>;
+  disconnect?(): Promise<void>;
+}
+
+export interface E2bSdkRunOptions {
+  readonly background?: boolean;
+  readonly cwd?: string;
+  readonly envs?: Record<string, string>;
+  readonly timeoutMs?: number;
+  readonly signal?: AbortSignal;
+  readonly onStdout?: (chunk: any) => void;
+  readonly onStderr?: (chunk: any) => void;
+  readonly stdin?: boolean;
+}
+
+export interface E2bSdkEntryInfo {
+  readonly name: string;
+  readonly path: string;
+  readonly type?: 'file' | 'directory' | string;
+  readonly size?: number;
+}
+
+export interface E2bSdkSandboxInstance {
+  readonly sandboxId: string;
+  readonly commands: {
+    run(command: string, opts?: E2bSdkRunOptions): Promise<E2bSdkCommandHandle | E2bSdkCommandResult>;
+    kill?(pid: number): Promise<boolean>;
+    list?(): Promise<readonly { readonly pid: number }[]>;
+  };
+  readonly files: {
+    read(path: string, opts?: { format?: 'text' | 'bytes' }): Promise<string | Uint8Array>;
+    write(path: string, content: string): Promise<void>;
+    list(path: string): Promise<readonly E2bSdkEntryInfo[]>;
+  };
+  kill(): Promise<boolean | void>;
+}
+
+/**
+ * Dependency injection seam for official E2B SDK.
+ * Enables validating real transport lifecycle without incurring live cloud calls or credentials in tests.
+ */
+export interface E2bSdkSeam {
+  readonly Sandbox: {
+    create(
+      template?: string,
+      opts?: {
+        readonly apiKey?: string;
+        readonly domain?: string;
+        readonly timeoutMs?: number;
+        readonly envs?: Record<string, string>;
+        readonly metadata?: Record<string, string>;
+      }
+    ): Promise<E2bSdkSandboxInstance>;
+    kill?(sandboxId: string): Promise<boolean>;
+  };
+}
+
+/**
+ * Creates a real E2B SDK transport backed by the official `e2b` package (or injected SDK seam).
+ */
+export function createRealE2bTransport(sdkSeam?: E2bSdkSeam): E2bTransport {
+  const createSandboxInstance = async (
+    template?: string,
+    opts?: {
+      readonly apiKey?: string;
+      readonly domain?: string;
+      readonly timeoutMs?: number;
+      readonly envs?: Record<string, string>;
+      readonly metadata?: Record<string, string>;
+    }
+  ): Promise<E2bSdkSandboxInstance> => {
+    if (sdkSeam) {
+      return await sdkSeam.Sandbox.create(template, opts);
+    }
+    const sdkOpts = {
+      apiKey: opts?.apiKey,
+      domain: opts?.domain,
+      timeoutMs: opts?.timeoutMs,
+      envs: opts?.envs ? { ...opts.envs } : undefined,
+      metadata: opts?.metadata ? { ...opts.metadata } : undefined,
+    };
+    const realInstance = template !== undefined
+      ? await SdkSandbox.create(template, sdkOpts)
+      : await SdkSandbox.create(sdkOpts);
+
+    return {
+      sandboxId: realInstance.sandboxId,
+      commands: {
+        run: (cmd, runOpts) => realInstance.commands.run(cmd, runOpts),
+        kill: (pid) => realInstance.commands.kill(pid),
+        list: () => realInstance.commands.list(),
+      },
+      files: {
+        read: async (path, readOpts) => {
+          if (readOpts?.format === 'bytes') {
+            return await realInstance.files.read(path, { format: 'bytes' });
+          }
+          return await realInstance.files.read(path, { format: 'text' });
+        },
+        write: async (path, content) => {
+          await realInstance.files.write(path, content);
+        },
+        list: async (path) => {
+          const entries = await realInstance.files.list(path);
+          return entries.map((e) => ({
+            name: e.name,
+            path: e.path,
+            type: e.type,
+            size: e.size,
+          }));
+        },
+      },
+      kill: () => realInstance.kill(),
+    };
+  };
+
+  return {
+    async createSandbox(options: E2bCreateOptions): Promise<E2bSandboxHandle> {
+      if (options.signal?.aborted) {
+        throw new Error('Aborted before sandbox creation');
+      }
+
+      const instance = await createSandboxInstance(options.template, {
+        apiKey: options.apiKey,
+        domain: options.domain,
+        timeoutMs: options.timeoutMs,
+        envs: options.envs,
+        metadata: options.metadata,
+      });
+
+      let killed = false;
+      let failedCleanup = false;
+
+      return {
+        sandboxId: instance.sandboxId,
+        commands: {
+          async run(
+            command: string,
+            runOpts?: {
+              readonly args?: readonly string[];
+              readonly cwd?: string;
+              readonly envs?: Record<string, string>;
+              readonly timeoutMs?: number;
+              readonly signal?: AbortSignal;
+              readonly onStdout?: (chunk: string) => void;
+              readonly onStderr?: (chunk: string) => void;
+            }
+          ) {
+            if (killed) {
+              throw new Error(`Sandbox '${instance.sandboxId}' has been terminated`);
+            }
+
+            if (runOpts?.signal?.aborted) {
+              throw new Error('Command was aborted');
+            }
+
+            const fullCmd = buildShellCommandLine(command, runOpts?.args);
+            const start = Date.now();
+
+            let activeHandle: E2bSdkCommandHandle | undefined;
+            let commandCancelled = false;
+            let cancellationFailedError: Error | undefined;
+            let processSettled = false;
+
+            let abortReject: ((reason?: unknown) => void) | undefined;
+            const abortPromise = new Promise<never>((_, reject) => {
+              abortReject = reject;
+            });
+
+            let terminationPromise: Promise<void> | undefined;
+            const terminateCommandOrSandbox = (): Promise<void> => {
+              if (terminationPromise) return terminationPromise;
+              commandCancelled = true;
+              terminationPromise = (async () => {
+                let individualKillSuccess = false;
+
+                // 1. Try to cancel the individual command via supported SDK API
+                try {
+                  if (activeHandle && typeof activeHandle.kill === 'function') {
+                    const res = await activeHandle.kill();
+                    if (res === true) {
+                      individualKillSuccess = true;
+                    } else if (res === false) {
+                      // Process was not found by SIGKILL (res === false).
+                      // Only treat as confirmed stopped if we have positive evidence that the process settled or is absent from running list!
+                      if (processSettled) {
+                        individualKillSuccess = true;
+                      } else if (typeof instance.commands.list === 'function' && typeof activeHandle.pid === 'number') {
+                        try {
+                          const running = await instance.commands.list();
+                          const isStillRunning = running.some((p) => p.pid === activeHandle!.pid);
+                          if (!isStillRunning) {
+                            // Confirmed absent from process table
+                            individualKillSuccess = true;
+                          } else {
+                            // Still running!
+                            individualKillSuccess = false;
+                          }
+                        } catch {
+                          // Querying process list failed! State is unconfirmed, fail-closed to false.
+                          individualKillSuccess = false;
+                        }
+                      } else {
+                        // Without processSettled or a working commands.list check,
+                        // state is unconfirmed; fail-closed to false.
+                        individualKillSuccess = false;
+                      }
+                    }
+                  } else if (
+                    typeof instance.commands.kill === 'function' &&
+                    typeof activeHandle?.pid === 'number'
+                  ) {
+                    const res = await instance.commands.kill(activeHandle.pid);
+                    if (res === true) {
+                      individualKillSuccess = true;
+                    } else if (res === false) {
+                      if (processSettled) {
+                        individualKillSuccess = true;
+                      } else if (typeof instance.commands.list === 'function') {
+                        try {
+                          const running = await instance.commands.list();
+                          const isStillRunning = running.some((p) => p.pid === activeHandle!.pid);
+                          if (!isStillRunning) {
+                            individualKillSuccess = true;
+                          } else {
+                            individualKillSuccess = false;
+                          }
+                        } catch {
+                          individualKillSuccess = false;
+                        }
+                      } else {
+                        individualKillSuccess = false;
+                      }
+                    }
+                  }
+                } catch {
+                  // Individual kill threw an unexpected error (e.g. RPC failure)
+                  individualKillSuccess = false;
+                }
+
+                // 2. Fallback: If individual command cannot be cancelled,
+                // terminate the sandbox to guarantee the remote operation stops.
+                if (!individualKillSuccess) {
+                  try {
+                    if (typeof instance.kill === 'function') {
+                      await instance.kill();
+                      killed = true;
+                    }
+                  } catch (sandboxKillErr) {
+                    // P1 fix: Both individual kill and sandbox termination failed!
+                    // Do not swallow; remote process is NOT confirmed stopped!
+                    failedCleanup = true;
+                    const msg = sandboxKillErr instanceof Error ? sandboxKillErr.message : String(sandboxKillErr);
+                    cancellationFailedError = new Error(
+                      `Failed to terminate remote command and fallback sandbox destruction failed: ${msg}`
+                    );
+                  }
+                }
+              })();
+              return terminationPromise;
+            };
+
+            const abortHandler = () => {
+              void terminateCommandOrSandbox().finally(() => {
+                if (cancellationFailedError) {
+                  abortReject?.(cancellationFailedError);
+                } else {
+                  abortReject?.(new Error('Command was aborted'));
+                }
+              });
+            };
+
+            if (runOpts?.signal) {
+              if (runOpts.signal.aborted) {
+                await terminateCommandOrSandbox();
+                if (cancellationFailedError) {
+                  throw cancellationFailedError;
+                }
+                throw new Error('Command was aborted');
+              }
+              runOpts.signal.addEventListener('abort', abortHandler, { once: true });
+            }
+
+            try {
+              // Execute via SDK: pass background: true to obtain handle for in-flight cancellation
+              const started = await Promise.race([
+                instance.commands.run(fullCmd, {
+                  background: true,
+                  cwd: runOpts?.cwd,
+                  envs: runOpts?.envs,
+                  timeoutMs: runOpts?.timeoutMs,
+                  signal: runOpts?.signal,
+                  onStdout: runOpts?.onStdout
+                    ? (c: any) => runOpts.onStdout!(typeof c === 'string' ? c : c?.line || '')
+                    : undefined,
+                  onStderr: runOpts?.onStderr
+                    ? (c: any) => runOpts.onStderr!(typeof c === 'string' ? c : c?.line || '')
+                    : undefined,
+                }),
+                abortPromise,
+              ]);
+
+              if (commandCancelled || runOpts?.signal?.aborted) {
+                await terminateCommandOrSandbox();
+                if (cancellationFailedError) {
+                  throw cancellationFailedError;
+                }
+                throw new Error('Command was aborted');
+              }
+
+              let result: E2bSdkCommandResult;
+
+              if (started && typeof (started as E2bSdkCommandHandle).wait === 'function') {
+                activeHandle = started as E2bSdkCommandHandle;
+                if (commandCancelled || runOpts?.signal?.aborted) {
+                  await terminateCommandOrSandbox();
+                  if (cancellationFailedError) {
+                    throw cancellationFailedError;
+                  }
+                  throw new Error('Command was aborted');
+                }
+                result = await Promise.race([
+                  activeHandle.wait().then((res) => {
+                    processSettled = true;
+                    return res;
+                  }),
+                  abortPromise,
+                ]);
+              } else {
+                result = started as E2bSdkCommandResult;
+                processSettled = true;
+              }
+
+              // Fencing: Ensure cancellation race cannot return stale success
+              if (commandCancelled || runOpts?.signal?.aborted) {
+                await terminateCommandOrSandbox();
+                if (cancellationFailedError) {
+                  throw cancellationFailedError;
+                }
+                throw new Error('Command was aborted');
+              }
+
+              return {
+                exitCode: result.exitCode ?? 0,
+                stdout: result.stdout ?? '',
+                stderr: result.stderr ?? '',
+                durationMs: Date.now() - start,
+                error: result.error,
+              };
+            } catch (err: any) {
+              if (cancellationFailedError) {
+                throw cancellationFailedError;
+              }
+              if (commandCancelled || runOpts?.signal?.aborted) {
+                await terminateCommandOrSandbox();
+                if (cancellationFailedError) {
+                  throw cancellationFailedError;
+                }
+                throw new Error('Command was aborted');
+              }
+
+              // Check if err is CommandExitError carrying exitCode from real E2B SDK
+              if (err && typeof err.exitCode === 'number') {
+                return {
+                  exitCode: err.exitCode,
+                  stdout: err.stdout ?? '',
+                  stderr: err.stderr ?? '',
+                  durationMs: Date.now() - start,
+                  error: err.error ?? err.message,
+                };
+              }
+
+              throw err;
+            } finally {
+              if (runOpts?.signal) {
+                runOpts.signal.removeEventListener('abort', abortHandler);
+              }
+            }
+          },
+        },
+        files: {
+          async read(path: string): Promise<string> {
+            if (killed) throw new Error(`Sandbox '${instance.sandboxId}' has been terminated`);
+            const data = await instance.files.read(path, { format: 'text' });
+            return typeof data === 'string' ? data : Buffer.from(data).toString('utf8');
+          },
+          async write(path: string, content: string): Promise<void> {
+            if (killed) throw new Error(`Sandbox '${instance.sandboxId}' has been terminated`);
+            await instance.files.write(path, content);
+          },
+          async list(path?: string): Promise<readonly E2bEntryInfo[]> {
+            if (killed) throw new Error(`Sandbox '${instance.sandboxId}' has been terminated`);
+            const entries = await instance.files.list(path ?? '.');
+            return entries.map((e) => ({
+              name: e.name,
+              path: e.path,
+              type: e.type === 'directory' ? 'directory' : e.type === 'symlink' ? 'symlink' : 'file',
+              size: e.size,
+            }));
+          },
+        },
+        async kill(): Promise<void> {
+          if (killed) return;
+          try {
+            await instance.kill();
+            killed = true;
+            failedCleanup = false;
+          } catch (err) {
+            // Keep retry state: do not mark killed = true if kill() threw
+            throw err;
+          }
+        },
+        isOpen(): boolean {
+          return !killed;
+        },
+        hasFailedCleanup(): boolean {
+          return failedCleanup;
+        },
+      };
+    },
+  };
 }
 
 /**
@@ -93,6 +554,7 @@ export interface E2bProviderConfig {
 
   /**
    * E2B Domain / endpoint URL (default: 'https://api.e2b.dev').
+   * Must be a vetted *.e2b.dev HTTPS endpoint.
    */
   readonly domain?: string;
 
@@ -102,7 +564,7 @@ export interface E2bProviderConfig {
   readonly defaultTimeoutMs?: number;
 
   /**
-   * Maximum allowed output bytes (stdout + stderr). Defaults to 65,536 (64 KiB).
+   * Maximum allowed combined output bytes (stdout + stderr). Defaults to 65,536 (64 KiB).
    */
   readonly maxOutputBytes?: number;
 
@@ -110,14 +572,21 @@ export interface E2bProviderConfig {
    * Hardware / VPC Network Isolation Guarantee.
    * Public E2B sandboxes have unrestricted outbound internet egress by default.
    * If egressEnabled is requested as false or allowlists are required, but
-   * networkIsolationGuaranteed is not explicitly true (e.g. via enterprise VPC/egress firewall),
+   * networkIsolationGuaranteed is not explicitly true (backed by auditable networkIsolationProof),
    * sandbox creation fails closed to prevent accidental data exfiltration.
    */
   readonly networkIsolationGuaranteed?: boolean;
 
   /**
+   * Auditable identifier of the verified Enterprise VPC gateway or egress firewall (e.g. vpc-gw-...).
+   * Required when networkIsolationGuaranteed is true.
+   */
+  readonly networkIsolationProof?: string;
+
+  /**
    * Optional injected transport for SDK interaction.
    * Enables complete in-memory mocking in tests without network or credentials.
+   * When omitted, defaults to createRealE2bTransport().
    */
   readonly transport?: E2bTransport;
 }
@@ -227,11 +696,20 @@ export function validateE2bConfig(
   if (config.domain !== undefined) {
     try {
       const u = new URL(config.domain);
-      if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+      if (u.protocol !== 'https:') {
         return {
           valid: false,
-          code: 'INVALID_CONFIG',
-          reason: 'Invalid domain URL protocol: must be http: or https:',
+          code: 'SECURITY_VIOLATION',
+          reason: 'Insecure HTTP domain not permitted for E2B credentials; HTTPS is strictly required',
+        };
+      }
+      const hostname = u.hostname.toLowerCase();
+      const isApprovedHost = hostname === 'api.e2b.dev' || hostname.endsWith('.e2b.dev');
+      if (!isApprovedHost) {
+        return {
+          valid: false,
+          code: 'SECURITY_VIOLATION',
+          reason: `Unapproved E2B endpoint host '${hostname}'; only vetted *.e2b.dev HTTPS endpoints are permitted`,
         };
       }
     } catch (err) {
@@ -239,6 +717,20 @@ export function validateE2bConfig(
         valid: false,
         code: 'INVALID_CONFIG',
         reason: `Invalid domain URL: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+  }
+
+  if (config.networkIsolationGuaranteed) {
+    if (
+      !config.networkIsolationProof ||
+      typeof config.networkIsolationProof !== 'string' ||
+      config.networkIsolationProof.trim().length === 0
+    ) {
+      return {
+        valid: false,
+        code: 'INVALID_CONFIG',
+        reason: 'networkIsolationGuaranteed requires auditable networkIsolationProof (e.g. verified Enterprise VPC gateway ID)',
       };
     }
   }
@@ -255,7 +747,13 @@ export function loadE2bConfigFromEnv(env: NodeJS.ProcessEnv = process.env): E2bP
   const apiKey = env.E2B_API_KEY?.trim();
   const template = env.E2B_TEMPLATE?.trim() || 'base';
   const domain = env.E2B_DOMAIN?.trim() || 'https://api.e2b.dev';
-  const networkIsolationGuaranteed = env.E2B_NETWORK_ISOLATION_GUARANTEED === 'true';
+
+  // Auditable deployment configuration: requires verified VPC gateway ID and firewall verification
+  const networkIsolationProof = env.E2B_VPC_GATEWAY_ID?.trim() || env.E2B_NETWORK_ISOLATION_PROOF?.trim();
+  const networkIsolationGuaranteed = Boolean(
+    networkIsolationProof &&
+    env.E2B_EGRESS_FIREWALL_VERIFIED === 'true'
+  );
 
   let defaultTimeoutMs: number | undefined;
   if (env.E2B_TIMEOUT_MS) {
@@ -281,6 +779,7 @@ export function loadE2bConfigFromEnv(env: NodeJS.ProcessEnv = process.env): E2bP
     defaultTimeoutMs,
     maxOutputBytes,
     networkIsolationGuaranteed,
+    networkIsolationProof,
   };
 }
 
@@ -290,6 +789,67 @@ interface ActiveSandboxEntry {
   readonly workspaceId: string;
   readonly ownerId: string;
   destroyed: boolean;
+  destroyAttempts: number;
+  lastDestroyError?: string;
+  cleanupPending?: boolean;
+}
+
+/**
+ * Bounds combined stdout and stderr to a shared byte budget.
+ * Guarantee: Buffer.byteLength(stdout, 'utf8') + Buffer.byteLength(stderr, 'utf8') <= maxCombinedBytes.
+ * Enforces credential redaction across both streams before and after bounding.
+ */
+export function boundCombinedOutput(
+  rawStdout: string,
+  rawStderr: string,
+  maxCombinedBytes: number
+): { stdout: string; stderr: string } {
+  if (maxCombinedBytes <= 0) {
+    return { stdout: '', stderr: '' };
+  }
+
+  // 1. Initial redaction on both streams
+  const cleanStdout = redactSensitiveContent(rawStdout || '');
+  const cleanStderr = redactSensitiveContent(rawStderr || '');
+
+  const stdoutBytes = Buffer.byteLength(cleanStdout, 'utf8');
+  const stderrBytes = Buffer.byteLength(cleanStderr, 'utf8');
+
+  // If combined output fits entirely within budget, return as is
+  if (stdoutBytes + stderrBytes <= maxCombinedBytes) {
+    return { stdout: cleanStdout, stderr: cleanStderr };
+  }
+
+  const halfBudget = Math.floor(maxCombinedBytes / 2);
+
+  let finalStdout: string;
+  let finalStderr: string;
+
+  if (stdoutBytes <= halfBudget) {
+    finalStdout = cleanStdout;
+    const remainingForStderr = maxCombinedBytes - stdoutBytes;
+    finalStderr = sanitizeSandboxOutput(cleanStderr, remainingForStderr);
+  } else if (stderrBytes <= halfBudget) {
+    finalStderr = cleanStderr;
+    const remainingForStdout = maxCombinedBytes - stderrBytes;
+    finalStdout = sanitizeSandboxOutput(cleanStdout, remainingForStdout);
+  } else {
+    const stdoutBudget = halfBudget;
+    const stderrBudget = maxCombinedBytes - halfBudget;
+    finalStdout = sanitizeSandboxOutput(cleanStdout, stdoutBudget);
+    finalStderr = sanitizeSandboxOutput(cleanStderr, stderrBudget);
+  }
+
+  // Double-check invariant (accounting for any truncation marker edge cases)
+  const total = Buffer.byteLength(finalStdout, 'utf8') + Buffer.byteLength(finalStderr, 'utf8');
+  if (total > maxCombinedBytes) {
+    const excess = total - maxCombinedBytes;
+    const currentStderrBytes = Buffer.byteLength(finalStderr, 'utf8');
+    const allowedStderr = Math.max(0, currentStderrBytes - excess);
+    finalStderr = sanitizeSandboxOutput(finalStderr, allowedStderr);
+  }
+
+  return { stdout: finalStdout, stderr: finalStderr };
 }
 
 /**
@@ -312,6 +872,7 @@ export class E2bCloudSandboxProviderClient implements CloudSandboxProviderClient
   private readonly defaultTimeoutMs: number;
   private readonly maxOutputBytes: number;
   private readonly activeSandboxes = new Map<string, ActiveSandboxEntry>();
+  private readonly recentlyDestroyed = new Set<string>();
 
   constructor(config: E2bProviderConfig = {}) {
     this.config = config;
@@ -332,6 +893,7 @@ export class E2bCloudSandboxProviderClient implements CloudSandboxProviderClient
   }
 
   getSandboxStatus(sandboxId: string): 'active' | 'destroyed' | 'unknown' {
+    if (this.recentlyDestroyed.has(sandboxId)) return 'destroyed';
     const sbx = this.activeSandboxes.get(sandboxId);
     if (!sbx) return 'unknown';
     if (sbx.destroyed) return 'destroyed';
@@ -385,14 +947,8 @@ export class E2bCloudSandboxProviderClient implements CloudSandboxProviderClient
       throw new E2bProviderError('EXECUTION_ABORTED', 'Execution was aborted before sandbox creation');
     }
 
-    // 6. Transport check
-    const transport = this.config.transport;
-    if (!transport) {
-      throw new E2bProviderError(
-        'INVALID_CONFIG',
-        'No E2B transport configured (inject an E2bTransport or configure SDK)'
-      );
-    }
+    // 6. Transport check (Blocker 1: fallback to real E2B SDK transport when transport is omitted)
+    const transport = this.config.transport ?? createRealE2bTransport();
 
     const template = this.config.template || 'base';
     const domain = this.config.domain;
@@ -422,6 +978,7 @@ export class E2bCloudSandboxProviderClient implements CloudSandboxProviderClient
         workspaceId: params.workspaceId,
         ownerId: params.ownerId,
         destroyed: false,
+        destroyAttempts: 0,
       });
 
       return {
@@ -462,12 +1019,9 @@ export class E2bCloudSandboxProviderClient implements CloudSandboxProviderClient
     }
 
     const effectiveTimeoutMs = params.timeoutMs ?? this.defaultTimeoutMs;
-    const fullCommand = params.args && params.args.length > 0
-      ? `${params.command} ${params.args.join(' ')}`
-      : params.command;
 
     try {
-      const result = await sbx.handle.commands.run(fullCommand, {
+      const result = await sbx.handle.commands.run(params.command, {
         args: params.args,
         cwd: params.cwd,
         timeoutMs: effectiveTimeoutMs,
@@ -475,8 +1029,11 @@ export class E2bCloudSandboxProviderClient implements CloudSandboxProviderClient
       });
 
       const durationMs = result.durationMs ?? (Date.now() - start);
-      const stdout = sanitizeSandboxOutput(result.stdout ?? '', this.maxOutputBytes);
-      const stderr = sanitizeSandboxOutput(result.stderr ?? '', this.maxOutputBytes);
+      const { stdout, stderr } = boundCombinedOutput(
+        result.stdout ?? '',
+        result.stderr ?? '',
+        this.maxOutputBytes
+      );
 
       return {
         exitCode: result.exitCode ?? 0,
@@ -489,6 +1046,16 @@ export class E2bCloudSandboxProviderClient implements CloudSandboxProviderClient
       const raw = err instanceof Error ? err.message : String(err);
       const safe = sanitizeSandboxOutput(raw, 1024);
       const lower = raw.toLowerCase();
+
+      // P1: Check if handle has unconfirmed cancellation / failed cleanup
+      if (sbx.handle.hasFailedCleanup && sbx.handle.hasFailedCleanup()) {
+        sbx.cleanupPending = true;
+        sbx.lastDestroyError = safe;
+        throw new E2bProviderError(
+          'PROVIDER_ERROR',
+          `Command cancellation failed and sandbox cleanup failed: ${safe}`
+        );
+      }
 
       if (params.signal?.aborted || lower.includes('abort')) {
         throw new E2bProviderError('EXECUTION_ABORTED', 'Execution was aborted');
@@ -631,19 +1198,23 @@ export class E2bCloudSandboxProviderClient implements CloudSandboxProviderClient
   async destroySandbox(sandboxId: string): Promise<void> {
     const sbx = this.activeSandboxes.get(sandboxId);
     // Duplicate destroy idempotency: if not found or already destroyed, safely return without throwing
-    if (!sbx || sbx.destroyed) {
+    if (!sbx) {
       return;
     }
 
-    sbx.destroyed = true;
+    sbx.destroyAttempts = (sbx.destroyAttempts ?? 0) + 1;
     try {
       await sbx.handle.kill();
-    } catch (err) {
-      const raw = err instanceof Error ? err.message : String(err);
-      const safe = sanitizeSandboxOutput(raw, 1024);
-      throw new E2bProviderError('PROVIDER_ERROR', `Failed to destroy E2B sandbox: ${safe}`);
-    } finally {
+      sbx.destroyed = true;
+      sbx.cleanupPending = false;
+      this.recentlyDestroyed.add(sandboxId);
       this.activeSandboxes.delete(sandboxId);
+    } catch (err) {
+      // Blocker 2 fix: Do NOT mark destroyed or delete entry on failure!
+      // Keep entry in registry so a subsequent retry can re-attempt kill()
+      sbx.lastDestroyError = err instanceof Error ? err.message : String(err);
+      const safe = sanitizeSandboxOutput(sbx.lastDestroyError, 1024);
+      throw new E2bProviderError('PROVIDER_ERROR', `Failed to destroy E2B sandbox: ${safe}`);
     }
   }
 }
@@ -657,6 +1228,8 @@ export class MockE2bTransport implements E2bTransport {
   public killedCount = 0;
   public simulateCreateError?: Error;
   public simulateCommandError?: Error;
+  public simulateKillError?: Error;
+  public failKillAttempts = 0;
   public simulateTimeoutMs = 0;
   public simulateLateCompletionMs = 0;
   public simulateDisconnect = false;
@@ -686,7 +1259,18 @@ export class MockE2bTransport implements E2bTransport {
     const handle: E2bSandboxHandle = {
       sandboxId,
       commands: {
-        async run(command: string, opts?: { timeoutMs?: number; signal?: AbortSignal }) {
+        async run(
+          command: string,
+          opts?: {
+            readonly args?: readonly string[];
+            readonly cwd?: string;
+            readonly envs?: Record<string, string>;
+            readonly timeoutMs?: number;
+            readonly signal?: AbortSignal;
+            readonly onStdout?: (chunk: string) => void;
+            readonly onStderr?: (chunk: string) => void;
+          }
+        ) {
           const entry = transport.sandboxes.get(sandboxId);
           if (!entry || entry.killed) {
             throw new Error(`Sandbox '${sandboxId}' is not running`);
@@ -713,7 +1297,13 @@ export class MockE2bTransport implements E2bTransport {
             await new Promise((resolve) => setTimeout(resolve, transport.simulateLateCompletionMs));
           }
 
-          if (command.includes('fail-command') || command.includes('syntax-error')) {
+          const fullCommand = buildShellCommandLine(command, opts?.args);
+
+          if (
+            command.includes('fail-command') ||
+            fullCommand.includes('fail-command') ||
+            command.includes('syntax-error')
+          ) {
             return {
               exitCode: 1,
               stdout: '',
@@ -723,7 +1313,7 @@ export class MockE2bTransport implements E2bTransport {
 
           return {
             exitCode: 0,
-            stdout: `Mock E2B executed: ${command}`,
+            stdout: `Mock E2B executed: ${fullCommand}`,
             stderr: '',
           };
         },
@@ -759,6 +1349,13 @@ export class MockE2bTransport implements E2bTransport {
         },
       },
       async kill(): Promise<void> {
+        if (transport.simulateKillError) {
+          throw transport.simulateKillError;
+        }
+        if (transport.failKillAttempts > 0) {
+          transport.failKillAttempts--;
+          throw new Error('E2B API gateway 502 Bad Gateway during sandbox kill');
+        }
         const entry = transport.sandboxes.get(sandboxId);
         if (entry) {
           entry.killed = true;

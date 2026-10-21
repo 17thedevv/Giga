@@ -10,4 +10,9 @@ This folder will contain reproducible instructions for deployment, health checks
 - Failure symptoms, diagnosis, safe rollback and cost notes.
 - Sanitized screenshot/log evidence and Linear issue links.
 
-**Status:** templates only; no cloud services are asserted to be deployed.
+## Demo deployment
+
+- [Render deployment and verification runbook](RENDER_API_DEPLOY_V0.1.md) — DRAFT, tracked by 17T-12.
+- [Demo deployment evidence](../../evidence/17T-12-demo-deployment.md) — local preflight and authenticated inventory; hosted acceptance remains open.
+
+**Status:** draft procedures and preflight evidence only; no Giga cloud deployment is asserted.

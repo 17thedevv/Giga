@@ -399,7 +399,7 @@ describe('17T-42 — Capability-Driven Reasoning Controls in GigaChat', () => {
       fireEvent.change(reasoningSelect, { target: { value: 'medium' } });
 
       // User submits message
-      const textarea = screen.getByPlaceholderText(/Ask Giga anything/);
+      const textarea = screen.getByPlaceholderText(/Message Giga/);
       fireEvent.change(textarea, { target: { value: 'Explain quantum computing' } });
 
       const sendButton = screen.getByRole('button', { name: /Send Message/i });
@@ -486,7 +486,7 @@ describe('17T-42 — Capability-Driven Reasoning Controls in GigaChat', () => {
       expect(reasoningSelect.value).toBe('');
 
       // Send message
-      const textarea = screen.getByPlaceholderText(/Ask Giga anything/);
+      const textarea = screen.getByPlaceholderText(/Message Giga/);
       fireEvent.change(textarea, { target: { value: 'Hello Giga' } });
       fireEvent.click(screen.getByRole('button', { name: /Send Message/i }));
 
@@ -619,7 +619,7 @@ describe('17T-42 — Capability-Driven Reasoning Controls in GigaChat', () => {
       });
 
       // Submit message
-      fireEvent.change(screen.getByPlaceholderText(/Ask Giga anything/), {
+      fireEvent.change(screen.getByPlaceholderText(/Message Giga/), {
         target: { value: 'Solve this hard math problem' },
       });
       fireEvent.click(screen.getByRole('button', { name: /Send Message/i }));
@@ -1049,7 +1049,7 @@ describe('17T-42 — Capability-Driven Reasoning Controls in GigaChat', () => {
       expect(regenBtnBefore.disabled).toBe(false);
 
       // Start a new message stream
-      fireEvent.change(screen.getByPlaceholderText(/Ask Giga anything/), {
+      fireEvent.change(screen.getByPlaceholderText(/Message Giga/), {
         target: { value: 'Second prompt' },
       });
       fireEvent.click(screen.getByRole('button', { name: /Send Message/i }));
@@ -1173,7 +1173,7 @@ describe('17T-42 — Capability-Driven Reasoning Controls in GigaChat', () => {
       });
 
       // Submit message
-      const textarea = screen.getByPlaceholderText(/Ask Giga anything/);
+      const textarea = screen.getByPlaceholderText(/Message Giga/);
       fireEvent.change(textarea, { target: { value: 'Testing stale model resilience' } });
       fireEvent.click(screen.getByRole('button', { name: /Send Message/i }));
 

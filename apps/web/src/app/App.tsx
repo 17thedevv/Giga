@@ -12,7 +12,7 @@ import { AgentRunView } from '../features/agent/AgentRunView.js';
 import { SkillsView } from '../features/skills/SkillsView.js';
 import { SettingsView } from '../features/settings/SettingsView.js';
 
-const AppRoutes: React.FC = () => {
+export const AppRoutes: React.FC = () => {
   const { path } = useRouter();
 
   if (path === '/login') {
@@ -27,8 +27,8 @@ const AppRoutes: React.FC = () => {
     <AuthGuard>
       <Layout>
         {path.startsWith('/chat') && <ChatView />}
-        {path === '/agent' && <AgentLauncherView />}
         {path.startsWith('/agent/runs/') && <AgentRunView />}
+        {path.startsWith('/agent') && !path.startsWith('/agent/runs/') && <AgentLauncherView />}
         {isSkills && <SkillsView initialTab="skills" />}
         {isPersonalization && <SkillsView initialTab="personalization" />}
         {isSettings && <SettingsView />}

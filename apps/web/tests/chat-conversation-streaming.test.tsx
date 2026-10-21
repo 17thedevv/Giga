@@ -186,7 +186,7 @@ describe('17T-33 — GigaChat Conversation & Streaming UI Tests', () => {
       await waitFor(() => {
         expect(screen.getByText(/No discussions yet/i)).toBeDefined();
       });
-      expect(screen.getByText(/Welcome to GIGA Developer Chat/i)).toBeDefined();
+      expect(screen.getByText(/Where shall we begin?/i)).toBeDefined();
     });
 
     it('creates a new conversation in Real mode on New Chat button click', async () => {
@@ -382,10 +382,10 @@ describe('17T-33 — GigaChat Conversation & Streaming UI Tests', () => {
       );
 
       await waitFor(() => {
-        expect(screen.getByPlaceholderText(/Ask Giga anything/i)).toBeDefined();
+        expect(screen.getByPlaceholderText(/Message Giga/i)).toBeDefined();
       });
 
-      const input = screen.getByPlaceholderText(/Ask Giga anything/i) as HTMLTextAreaElement;
+      const input = screen.getByPlaceholderText(/Message Giga/i) as HTMLTextAreaElement;
       const form = input.closest('form')!;
 
       fireEvent.change(input, { target: { value: 'Review PostgreSQL connection timeout' } });
@@ -444,10 +444,10 @@ describe('17T-33 — GigaChat Conversation & Streaming UI Tests', () => {
       );
 
       await waitFor(() => {
-        expect(screen.getByPlaceholderText(/Ask Giga anything/i)).toBeDefined();
+        expect(screen.getByPlaceholderText(/Message Giga/i)).toBeDefined();
       });
 
-      const input = screen.getByPlaceholderText(/Ask Giga anything/i) as HTMLTextAreaElement;
+      const input = screen.getByPlaceholderText(/Message Giga/i) as HTMLTextAreaElement;
       const form = input.closest('form')!;
 
       // First submit
@@ -521,10 +521,10 @@ describe('17T-33 — GigaChat Conversation & Streaming UI Tests', () => {
       );
 
       await waitFor(() => {
-        expect(screen.getByPlaceholderText(/Ask Giga anything/i)).toBeDefined();
+        expect(screen.getByPlaceholderText(/Message Giga/i)).toBeDefined();
       });
 
-      const input = screen.getByPlaceholderText(/Ask Giga anything/i) as HTMLTextAreaElement;
+      const input = screen.getByPlaceholderText(/Message Giga/i) as HTMLTextAreaElement;
       const form = input.closest('form')!;
 
       fireEvent.change(input, { target: { value: 'Trigger timeout' } });
@@ -596,10 +596,10 @@ describe('17T-33 — GigaChat Conversation & Streaming UI Tests', () => {
       );
 
       await waitFor(() => {
-        expect(screen.getByPlaceholderText(/Ask Giga anything/i)).toBeDefined();
+        expect(screen.getByPlaceholderText(/Message Giga/i)).toBeDefined();
       });
 
-      const input = screen.getByPlaceholderText(/Ask Giga anything/i) as HTMLTextAreaElement;
+      const input = screen.getByPlaceholderText(/Message Giga/i) as HTMLTextAreaElement;
       const form = input.closest('form')!;
 
       fireEvent.change(input, { target: { value: 'Test durable cancel' } });
@@ -697,10 +697,10 @@ describe('17T-33 — GigaChat Conversation & Streaming UI Tests', () => {
       );
 
       await waitFor(() => {
-        expect(screen.getByPlaceholderText(/Ask Giga anything/i)).toBeDefined();
+        expect(screen.getByPlaceholderText(/Message Giga/i)).toBeDefined();
       });
 
-      const input = screen.getByPlaceholderText(/Ask Giga anything/i) as HTMLTextAreaElement;
+      const input = screen.getByPlaceholderText(/Message Giga/i) as HTMLTextAreaElement;
       const form = input.closest('form')!;
       fireEvent.change(input, { target: { value: 'Trigger disconnect' } });
       fireEvent.submit(form);
@@ -798,10 +798,10 @@ describe('17T-33 — GigaChat Conversation & Streaming UI Tests', () => {
       );
 
       await waitFor(() => {
-        expect(screen.getByPlaceholderText(/Ask Giga anything/i)).toBeDefined();
+        expect(screen.getByPlaceholderText(/Message Giga/i)).toBeDefined();
       });
 
-      const input = screen.getByPlaceholderText(/Ask Giga anything/i) as HTMLTextAreaElement;
+      const input = screen.getByPlaceholderText(/Message Giga/i) as HTMLTextAreaElement;
       const form = input.closest('form')!;
       fireEvent.change(input, { target: { value: 'Prompt race' } });
       fireEvent.submit(form);
@@ -873,10 +873,10 @@ describe('17T-33 — GigaChat Conversation & Streaming UI Tests', () => {
       );
 
       await waitFor(() => {
-        expect(screen.getByPlaceholderText(/Ask Giga anything/i)).toBeDefined();
+        expect(screen.getByPlaceholderText(/Message Giga/i)).toBeDefined();
       });
 
-      const input = screen.getByPlaceholderText(/Ask Giga anything/i) as HTMLTextAreaElement;
+      const input = screen.getByPlaceholderText(/Message Giga/i) as HTMLTextAreaElement;
       const form = input.closest('form')!;
       fireEvent.change(input, { target: { value: 'Try cancel fail' } });
       fireEvent.submit(form);
@@ -995,10 +995,10 @@ describe('17T-33 — GigaChat Conversation & Streaming UI Tests', () => {
       );
 
       await waitFor(() => {
-        expect(screen.getByPlaceholderText(/Ask Giga anything/i)).toBeDefined();
+        expect(screen.getByPlaceholderText(/Message Giga/i)).toBeDefined();
       });
 
-      const input = screen.getByPlaceholderText(/Ask Giga anything/i) as HTMLTextAreaElement;
+      const input = screen.getByPlaceholderText(/Message Giga/i) as HTMLTextAreaElement;
       const form = input.closest('form')!;
       fireEvent.change(input, { target: { value: 'Trigger poll stop' } });
       fireEvent.submit(form);
@@ -1094,10 +1094,10 @@ describe('17T-33 — GigaChat Conversation & Streaming UI Tests', () => {
       );
 
       await waitFor(() => {
-        expect(screen.getByPlaceholderText(/Ask Giga anything/i)).toBeDefined();
+        expect(screen.getByPlaceholderText(/Message Giga/i)).toBeDefined();
       });
 
-      const input = screen.getByPlaceholderText(/Ask Giga anything/i) as HTMLTextAreaElement;
+      const input = screen.getByPlaceholderText(/Message Giga/i) as HTMLTextAreaElement;
       const form = input.closest('form')!;
       fireEvent.change(input, { target: { value: 'Trigger stuck generation' } });
       fireEvent.submit(form);
@@ -1190,10 +1190,10 @@ describe('17T-33 — GigaChat Conversation & Streaming UI Tests', () => {
       );
 
       await waitFor(() => {
-        expect(screen.getByPlaceholderText(/Ask Giga anything/i)).toBeDefined();
+        expect(screen.getByPlaceholderText(/Message Giga/i)).toBeDefined();
       });
 
-      const input = screen.getByPlaceholderText(/Ask Giga anything/i) as HTMLTextAreaElement;
+      const input = screen.getByPlaceholderText(/Message Giga/i) as HTMLTextAreaElement;
       const form = input.closest('form')!;
       fireEvent.change(input, { target: { value: 'Query on conv 1' } });
       fireEvent.submit(form);
@@ -1529,10 +1529,10 @@ describe('17T-33 — GigaChat Conversation & Streaming UI Tests', () => {
       );
 
       await waitFor(() => {
-        expect(screen.getByPlaceholderText(/Ask Giga anything/i)).toBeDefined();
+        expect(screen.getByPlaceholderText(/Message Giga/i)).toBeDefined();
       });
 
-      const input = screen.getByPlaceholderText(/Ask Giga anything/i) as HTMLTextAreaElement;
+      const input = screen.getByPlaceholderText(/Message Giga/i) as HTMLTextAreaElement;
       const form = input.closest('form')!;
       fireEvent.change(input, { target: { value: 'Trigger flaky reconciliation' } });
       fireEvent.submit(form);
@@ -1657,10 +1657,10 @@ describe('17T-33 — GigaChat Conversation & Streaming UI Tests', () => {
       );
 
       await waitFor(() => {
-        expect(screen.getByPlaceholderText(/Ask Giga anything/i)).toBeDefined();
+        expect(screen.getByPlaceholderText(/Message Giga/i)).toBeDefined();
       });
 
-      const input = screen.getByPlaceholderText(/Ask Giga anything/i) as HTMLTextAreaElement;
+      const input = screen.getByPlaceholderText(/Message Giga/i) as HTMLTextAreaElement;
       const form = input.closest('form')!;
 
       // 1. Submit Generation A
@@ -1777,10 +1777,10 @@ describe('17T-33 — GigaChat Conversation & Streaming UI Tests', () => {
       );
 
       await waitFor(() => {
-        expect(screen.getByPlaceholderText(/Ask Giga anything/i)).toBeDefined();
+        expect(screen.getByPlaceholderText(/Message Giga/i)).toBeDefined();
       });
 
-      const input = screen.getByPlaceholderText(/Ask Giga anything/i) as HTMLTextAreaElement;
+      const input = screen.getByPlaceholderText(/Message Giga/i) as HTMLTextAreaElement;
       const form = input.closest('form')!;
       fireEvent.change(input, { target: { value: 'First Question on Giga' } });
       fireEvent.submit(form);
@@ -1842,10 +1842,10 @@ describe('17T-33 — GigaChat Conversation & Streaming UI Tests', () => {
       );
 
       await waitFor(() => {
-        expect(screen.getByPlaceholderText(/Ask Giga anything/i)).toBeDefined();
+        expect(screen.getByPlaceholderText(/Message Giga/i)).toBeDefined();
       });
 
-      const input = screen.getByPlaceholderText(/Ask Giga anything/i) as HTMLTextAreaElement;
+      const input = screen.getByPlaceholderText(/Message Giga/i) as HTMLTextAreaElement;
       const form = input.closest('form')!;
       fireEvent.change(input, { target: { value: 'Long running stream' } });
       fireEvent.submit(form);
