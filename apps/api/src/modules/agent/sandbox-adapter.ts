@@ -21,6 +21,7 @@ export interface CreateSandboxParams {
 
 export interface CloudSandboxProviderClient {
   readonly providerName: string;
+  readonly providerType?: string;
 
   createSandbox(params: CreateSandboxParams): Promise<{ readonly sandboxId: string; readonly endpoint?: string }>;
 
@@ -46,6 +47,7 @@ export interface CloudSandboxConfig {
   readonly egressAllowlist?: readonly string[];
   readonly egressEnabled?: boolean;
   readonly repository?: AgentRepository;
+  readonly allowInMemoryFallback?: boolean;
 }
 
 export type DestroyStatus = 'active' | 'destroying' | 'destroyed' | 'destroy_failed';
@@ -126,6 +128,7 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
   private readonly egressEnabled: boolean;
   private readonly egressAllowlist: readonly string[];
   private readonly repository?: AgentRepository;
+  private readonly allowInMemoryFallback: boolean;
 
   constructor(config: CloudSandboxConfig = {}) {
     this.providerClient = config.providerClient;
@@ -134,6 +137,7 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
     this.egressEnabled = config.egressEnabled ?? false; // Deny-by-default
     this.egressAllowlist = config.egressAllowlist ?? [];
     this.repository = config.repository;
+    this.allowInMemoryFallback = config.allowInMemoryFallback ?? false;
   }
 
   get isConfigured(): boolean {
@@ -153,8 +157,31 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
       };
     }
 
-    if (this.repository && (await this.repository.canPersistSandboxSessions())) {
+    if (this.providerClient && 'isEnabled' in this.providerClient && !(this.providerClient as { isEnabled?: boolean }).isEnabled) {
+      return {
+        available: false,
+        code: 'RUNTIME_UNAVAILABLE',
+        reason: 'E2B cloud sandbox provider is disabled by feature gate (GIGA_AGENT_E2B_ENABLED=false)',
+      };
+    }
+
+    const canPersist = this.repository && (await this.repository.canPersistSandboxSessions());
+    if (canPersist) {
       return this.prepareDurable(request);
+    }
+
+    // Fail closed when durable persistence is unavailable:
+    // A configured real cloud provider must not silently fall back to in-memory session tracking.
+    const isRealCloudProvider = Boolean(
+      (this.providerClient as { isRealCloudProvider?: boolean }).isRealCloudProvider
+    );
+
+    if (isRealCloudProvider && !this.allowInMemoryFallback) {
+      return {
+        available: false,
+        code: 'RUNTIME_UNAVAILABLE',
+        reason: 'Durable sandbox session persistence is unavailable; in-memory fallback is disabled for configured cloud sandbox provider',
+      };
     }
 
     if (request.signal?.aborted) {
@@ -432,8 +459,17 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
 
     // 4. Post-Allocation Abort Fencing:
     if (request.signal?.aborted) {
-      await this.providerClient.destroySandbox(sandboxId).catch(() => {});
-      await this.repository!.markSandboxDestroyed(sessionId, sandboxId).catch(() => {});
+      try {
+        await this.providerClient.destroySandbox(sandboxId);
+        await this.repository!.markSandboxDestroyed(sessionId, sandboxId);
+      } catch (destroyErr: unknown) {
+        const rawErr = destroyErr instanceof Error ? destroyErr.message : String(destroyErr);
+        await this.repository!.recordSandboxAllocationCleanupPending(
+          sessionId,
+          sandboxId,
+          `Post-allocation abort destroy failed: ${rawErr}`
+        );
+      }
       return {
         available: false,
         code: 'RUNTIME_UNAVAILABLE',
@@ -451,8 +487,19 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
         providerSessionId: sandboxId,
       });
     } catch (commitErr: unknown) {
-      // Fenced! Lease expired or run status changed. Destroy provider sandbox immediately!
-      await this.providerClient.destroySandbox(sandboxId).catch(() => {});
+      // Fenced! Worker lease expired, stolen, or DB error.
+      // Attempt immediate destroy compensation, but never mark destroyed if provider destroy fails:
+      try {
+        await this.providerClient.destroySandbox(sandboxId);
+        await this.repository!.markSandboxDestroyed(sessionId, sandboxId).catch(() => {});
+      } catch (destroyErr: unknown) {
+        const rawErr = destroyErr instanceof Error ? destroyErr.message : String(destroyErr);
+        await this.repository!.recordSandboxAllocationCleanupPending(
+          sessionId,
+          sandboxId,
+          `Commit failed (${commitErr instanceof Error ? commitErr.message : String(commitErr)}), destroy compensation failed: ${rawErr}`
+        ).catch(() => {});
+      }
       return {
         available: false,
         code: 'RUNTIME_UNAVAILABLE',

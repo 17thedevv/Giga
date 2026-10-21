@@ -195,6 +195,9 @@ export interface DurableSandboxSession {
   readonly allocationIntentId: string;
   readonly cleanupAttempts: number;
   readonly nextCleanupRetryAt: string | null;
+  readonly cleanupLeaseToken?: string | null;
+  readonly cleanupLeaseExpiresAt?: string | null;
+  readonly cleanupWorkerId?: string | null;
   readonly allocationExpiresAt: string;
   readonly createdAt: string;
   readonly updatedAt: string;

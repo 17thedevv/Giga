@@ -186,6 +186,10 @@ export async function createTestDatabase(migrations?: readonly Migration[]): Pro
         .replace(/CREATE TRIGGER[\s\S]*?;/gi, '');
       return db.public.many(stripped);
     }
+    if (sql.includes('FOR UPDATE OF s SKIP LOCKED')) {
+      const rewritten = sql.replace(/FOR UPDATE OF s SKIP LOCKED/gi, 'FOR UPDATE SKIP LOCKED');
+      return db.public.many(rewritten);
+    }
     // Intercept to_char with AT TIME ZONE in pg-mem which does not implement the AT TIME ZONE operator
     if (sql.includes('to_char(d.created_at')) {
       const rewritten = sql.replace(

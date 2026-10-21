@@ -722,6 +722,9 @@ CREATE TABLE IF NOT EXISTS agent_sandbox_sessions (
     allocation_intent_id UUID NOT NULL DEFAULT gen_random_uuid(),
     cleanup_attempts INTEGER NOT NULL DEFAULT 0 CHECK (cleanup_attempts >= 0),
     next_cleanup_retry_at TIMESTAMPTZ,
+    cleanup_lease_token VARCHAR(128),
+    cleanup_lease_expires_at TIMESTAMPTZ,
+    cleanup_worker_id VARCHAR(128),
     allocation_expires_at TIMESTAMPTZ NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -741,16 +744,21 @@ CREATE INDEX IF NOT EXISTS idx_agent_sandbox_sessions_run ON agent_sandbox_sessi
 CREATE INDEX IF NOT EXISTS idx_agent_sandbox_sessions_cleanup ON agent_sandbox_sessions (lifecycle_state, cleanup_state, next_cleanup_retry_at);
 CREATE INDEX IF NOT EXISTS idx_agent_sandbox_provider_id ON agent_sandbox_sessions (provider_session_id) WHERE provider_session_id IS NOT NULL;
 
--- Strict Invariant: Exactly one active or allocating session per run across all workers
+-- Strict Invariant: Exactly one non-terminal session (where a provider sandbox may still exist) per run
 CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_sandbox_single_active ON agent_sandbox_sessions (run_id)
-    WHERE lifecycle_state IN ('allocating', 'active', 'stopping');
+    WHERE lifecycle_state IN ('allocating', 'active', 'stopping', 'destroying', 'cleanup_pending');
 
 -- Immutability and State Transition Guard Triggers
 CREATE OR REPLACE FUNCTION guard_agent_sandbox_session_update() RETURNS TRIGGER AS $$
 BEGIN
-    -- Terminal destroyed sessions are immutable
+    -- Terminal non-revival: once destroyed, lifecycle_state cannot be changed
     IF OLD.lifecycle_state = 'destroyed' AND NEW.lifecycle_state <> 'destroyed' THEN
         RAISE EXCEPTION 'Destroyed sandbox session is terminal and immutable';
+    END IF;
+
+    -- If already destroyed, preserve original destroyed_at timestamp
+    IF OLD.lifecycle_state = 'destroyed' THEN
+        NEW.destroyed_at = OLD.destroyed_at;
     END IF;
 
     -- Identity columns cannot be altered

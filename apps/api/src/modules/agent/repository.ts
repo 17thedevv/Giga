@@ -201,6 +201,9 @@ interface SandboxSessionRow {
   allocation_intent_id: string;
   cleanup_attempts: number;
   next_cleanup_retry_at: Date | null;
+  cleanup_lease_token?: string | null;
+  cleanup_lease_expires_at?: Date | null;
+  cleanup_worker_id?: string | null;
   allocation_expires_at: Date;
   created_at: Date;
   updated_at: Date;
@@ -226,6 +229,9 @@ const sandboxSession = (row: SandboxSessionRow): DurableSandboxSession => ({
   allocationIntentId: row.allocation_intent_id,
   cleanupAttempts: row.cleanup_attempts,
   nextCleanupRetryAt: row.next_cleanup_retry_at ? iso(row.next_cleanup_retry_at) : null,
+  cleanupLeaseToken: row.cleanup_lease_token ?? null,
+  cleanupLeaseExpiresAt: row.cleanup_lease_expires_at ? iso(row.cleanup_lease_expires_at) : null,
+  cleanupWorkerId: row.cleanup_worker_id ?? null,
   allocationExpiresAt: iso(row.allocation_expires_at),
   createdAt: iso(row.created_at),
   updatedAt: iso(row.updated_at),
@@ -1384,10 +1390,10 @@ export class AgentRepository {
 
       this.assertActiveLease(runRow, input.leaseToken);
 
-      // 2. Check existing active or allocating sessions for this run
+      // 2. Check existing active, allocating, or cleaning up sessions for this run
       const existingRes = await client.query<SandboxSessionRow>(
         `SELECT * FROM agent_sandbox_sessions
-         WHERE run_id = $1 AND lifecycle_state IN ('allocating', 'active', 'stopping')
+         WHERE run_id = $1 AND lifecycle_state IN ('allocating', 'active', 'stopping', 'destroying', 'cleanup_pending')
          FOR UPDATE`,
         [input.runId]
       );
@@ -1426,7 +1432,9 @@ export class AgentRepository {
             [existing.id]
           );
         } else {
-          throw new ConflictError('A non-terminal sandbox session is already active or allocating for this run');
+          throw new ConflictError(
+            `SANDBOX_RESOURCE_EXISTS: A non-terminal sandbox session is already in state '${existing.lifecycle_state}' for this run; awaiting cleanup before new allocation`
+          );
         }
       }
 
@@ -1644,29 +1652,85 @@ export class AgentRepository {
   }
 
   /**
-   * Marks a sandbox session as destroyed (durable tombstone).
+   * Marks a sandbox session as destroyed (durable tombstone), fenced by cleanup lease token.
+   * Preserves existing destroyed_at timestamp if already destroyed.
    */
-  async markSandboxDestroyed(sessionId: string, providerSessionId?: string): Promise<DurableSandboxSession> {
+  async markSandboxDestroyed(
+    sessionId: string,
+    providerSessionId?: string,
+    leaseToken?: string
+  ): Promise<DurableSandboxSession> {
     const result = await this.pool.query<SandboxSessionRow>(
       `UPDATE agent_sandbox_sessions
-       SET lifecycle_state = 'destroyed', cleanup_state = 'completed',
-           destroyed_at = NOW(), updated_at = NOW(),
+       SET lifecycle_state = 'destroyed',
+           cleanup_state = 'completed',
+           cleanup_lease_token = NULL,
+           cleanup_lease_expires_at = NULL,
+           destroyed_at = COALESCE(destroyed_at, NOW()),
+           updated_at = NOW(),
            provider_session_id = COALESCE(provider_session_id, $2)
        WHERE id = $1
+         AND (lifecycle_state = 'destroyed' OR $3::text IS NULL OR cleanup_lease_token = $3)
        RETURNING *`,
-      [sessionId, providerSessionId ?? null]
+      [sessionId, providerSessionId ?? null, leaseToken ?? null]
     );
-    if (!result.rows[0]) throw new NotFoundError();
+    if (!result.rows[0]) {
+      const existing = await this.getSandboxSessionById(sessionId);
+      if (existing && existing.lifecycleState === 'destroyed') {
+        return existing;
+      }
+      throw new NotFoundError();
+    }
     return sandboxSession(result.rows[0]);
   }
 
   /**
-   * Marks a sandbox session for cleanup retry with exponential backoff delay.
+   * Records that provider allocation succeeded but commit/abort failed to destroy immediately;
+   * marks session for background cleanup reconciliation.
+   */
+  async recordSandboxAllocationCleanupPending(
+    sessionId: string,
+    providerSessionId: string,
+    errorReason: string,
+    retryDelayMs = 5000
+  ): Promise<DurableSandboxSession> {
+    const cleanError = redactSensitiveContent(errorReason);
+    const retryAt = new Date(Date.now() + retryDelayMs);
+    const sessionRes = await this.pool.query<SandboxSessionRow>(
+      'SELECT id, diagnostics FROM agent_sandbox_sessions WHERE id = $1',
+      [sessionId]
+    );
+    const row = sessionRes.rows[0];
+    if (!row) throw new NotFoundError();
+
+    const existingDiag = (row.diagnostics && typeof row.diagnostics === 'object') ? row.diagnostics : {};
+    const mergedDiag = JSON.stringify({ ...existingDiag, allocation_cleanup_error: cleanError });
+
+    const result = await this.pool.query<SandboxSessionRow>(
+      `UPDATE agent_sandbox_sessions
+       SET provider_session_id = COALESCE(provider_session_id, $2),
+           lifecycle_state = 'cleanup_pending',
+           cleanup_state = 'retry_scheduled',
+           allocation_state = 'allocated',
+           next_cleanup_retry_at = $3,
+           diagnostics = $4,
+           updated_at = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [sessionId, providerSessionId, retryAt.toISOString(), mergedDiag]
+    );
+    return sandboxSession(result.rows[0]!);
+  }
+
+  /**
+   * Marks a sandbox session for cleanup retry with exponential backoff delay,
+   * fenced by cleanup lease token.
    */
   async markSandboxCleanupPending(
     sessionId: string,
     errorReason: string,
-    retryDelayMs = 5000
+    retryDelayMs = 5000,
+    leaseToken?: string
   ): Promise<DurableSandboxSession> {
     const cleanError = redactSensitiveContent(errorReason);
     const retryAt = new Date(Date.now() + retryDelayMs);
@@ -1683,16 +1747,67 @@ export class AgentRepository {
 
     const result = await this.pool.query<SandboxSessionRow>(
       `UPDATE agent_sandbox_sessions
-       SET lifecycle_state = 'cleanup_pending', cleanup_state = 'retry_scheduled',
+       SET lifecycle_state = 'cleanup_pending',
+           cleanup_state = 'retry_scheduled',
            cleanup_attempts = cleanup_attempts + 1,
            next_cleanup_retry_at = $2,
+           cleanup_lease_token = NULL,
+           cleanup_lease_expires_at = NULL,
            diagnostics = $3,
            updated_at = NOW()
        WHERE id = $1
+         AND lifecycle_state <> 'destroyed'
+         AND ($4::text IS NULL OR cleanup_lease_token = $4)
        RETURNING *`,
-      [sessionId, retryAt, mergedDiag]
+      [sessionId, retryAt.toISOString(), mergedDiag, leaseToken ?? null]
     );
-    if (!result.rows[0]) throw new NotFoundError();
+    if (!result.rows[0]) {
+      const existing = await this.getSandboxSessionById(sessionId);
+      if (existing) return existing;
+      throw new NotFoundError();
+    }
+    return sandboxSession(result.rows[0]);
+  }
+
+  /**
+   * Marks cleanup permanently failed when retry limit is exceeded, retaining durable record.
+   */
+  async markSandboxCleanupFailed(
+    sessionId: string,
+    errorReason: string,
+    leaseToken?: string
+  ): Promise<DurableSandboxSession> {
+    const cleanError = redactSensitiveContent(errorReason);
+    const sessionRes = await this.pool.query<SandboxSessionRow>(
+      'SELECT id, diagnostics FROM agent_sandbox_sessions WHERE id = $1',
+      [sessionId]
+    );
+    const row = sessionRes.rows[0];
+    if (!row) throw new NotFoundError();
+
+    const existingDiag = (row.diagnostics && typeof row.diagnostics === 'object') ? row.diagnostics : {};
+    const mergedDiag = JSON.stringify({ ...existingDiag, last_cleanup_error: cleanError, max_cleanup_attempts_exceeded: true });
+
+    const result = await this.pool.query<SandboxSessionRow>(
+      `UPDATE agent_sandbox_sessions
+       SET lifecycle_state = 'cleanup_pending',
+           cleanup_state = 'failed',
+           cleanup_attempts = cleanup_attempts + 1,
+           cleanup_lease_token = NULL,
+           cleanup_lease_expires_at = NULL,
+           diagnostics = $2,
+           updated_at = NOW()
+       WHERE id = $1
+         AND lifecycle_state <> 'destroyed'
+         AND ($3::text IS NULL OR cleanup_lease_token = $3)
+       RETURNING *`,
+      [sessionId, mergedDiag, leaseToken ?? null]
+    );
+    if (!result.rows[0]) {
+      const existing = await this.getSandboxSessionById(sessionId);
+      if (existing) return existing;
+      throw new NotFoundError();
+    }
     return sandboxSession(result.rows[0]);
   }
 
@@ -1713,7 +1828,7 @@ export class AgentRepository {
   }
 
   /**
-   * Queries sessions needing cleanup with FOR UPDATE SKIP LOCKED.
+   * Queries sessions needing cleanup with FOR UPDATE OF s SKIP LOCKED.
    */
   async listSandboxSessionsNeedingCleanup(limit = 10): Promise<readonly DurableSandboxSession[]> {
     const result = await this.pool.query<SandboxSessionRow>(
@@ -1722,28 +1837,52 @@ export class AgentRepository {
        WHERE (
          (s.lifecycle_state = 'allocating' AND s.allocation_expires_at <= NOW())
          OR (s.lifecycle_state = 'cleanup_pending' AND (s.next_cleanup_retry_at IS NULL OR s.next_cleanup_retry_at <= NOW()))
-         OR (s.lifecycle_state = 'destroying' AND s.updated_at <= NOW() - INTERVAL '30 seconds')
+         OR (s.lifecycle_state = 'destroying' AND (s.cleanup_lease_expires_at IS NULL OR s.cleanup_lease_expires_at <= NOW()))
          OR (s.lifecycle_state IN ('active', 'stopping') AND (r.status IN ('completed', 'failed', 'cancelled') OR r.lease_expires_at <= NOW()))
        )
        AND s.lifecycle_state <> 'destroyed'
+       AND (
+         s.cleanup_state <> 'in_progress'
+         OR s.cleanup_lease_expires_at IS NULL
+         OR s.cleanup_lease_expires_at <= NOW()
+       )
        ORDER BY s.created_at ASC
        LIMIT $1
-       FOR UPDATE SKIP LOCKED`,
+       FOR UPDATE OF s SKIP LOCKED`,
       [limit]
     );
     return result.rows.map(sandboxSession);
   }
 
   /**
-   * Claims a single session for cleanup processing by setting cleanup_state to in_progress.
+   * Claims a single session for cleanup processing with an expiring lease.
    */
-  async claimSandboxSessionForCleanup(sessionId: string): Promise<DurableSandboxSession | null> {
+  async claimSandboxSessionForCleanup(params: {
+    sessionId: string;
+    workerId: string;
+    leaseToken: string;
+    leaseDurationMs?: number;
+  }): Promise<DurableSandboxSession | null> {
+    const durationMs = params.leaseDurationMs ?? 30_000;
+    const expiresAt = new Date(Date.now() + durationMs);
+
     const result = await this.pool.query<SandboxSessionRow>(
       `UPDATE agent_sandbox_sessions
-       SET cleanup_state = 'in_progress', lifecycle_state = 'destroying', updated_at = NOW()
-       WHERE id = $1 AND lifecycle_state <> 'destroyed' AND cleanup_state <> 'in_progress'
+       SET cleanup_state = 'in_progress',
+           lifecycle_state = 'destroying',
+           cleanup_worker_id = $2,
+           cleanup_lease_token = $3,
+           cleanup_lease_expires_at = $4,
+           updated_at = NOW()
+       WHERE id = $1
+         AND lifecycle_state <> 'destroyed'
+         AND (
+           cleanup_state <> 'in_progress'
+           OR cleanup_lease_expires_at IS NULL
+           OR cleanup_lease_expires_at <= NOW()
+         )
        RETURNING *`,
-      [sessionId]
+      [params.sessionId, params.workerId, params.leaseToken, expiresAt.toISOString()]
     );
     return result.rows[0] ? sandboxSession(result.rows[0]) : null;
   }

@@ -884,6 +884,10 @@ export class E2bCloudSandboxProviderClient implements CloudSandboxProviderClient
     return this.config.enabled === true;
   }
 
+  get isRealCloudProvider(): boolean {
+    return !this.config.transport;
+  }
+
   get isConfigured(): boolean {
     return this.config.enabled === true && Boolean(this.config.apiKey?.trim());
   }

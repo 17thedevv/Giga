@@ -14,6 +14,7 @@ import { ConflictError, NotFoundError } from '../../src/modules/auth/auth-valida
 
 class MockCloudSandboxProviderClient implements CloudSandboxProviderClient {
   readonly providerName = 'mock-e2b';
+  readonly isRealCloudProvider = true;
   public createdSandboxes: string[] = [];
   public destroyedSandboxes: string[] = [];
   public failDestroyWith?: Error;
@@ -914,6 +915,261 @@ describe('GigaAgent Durable Sandbox Sessions & Crash-Safe Cleanup (17T-71)', { t
       // Never allocates duplicate writable sessions at provider
       assert.equal(provider.createdSandboxes.length, 1);
       assert.ok(successes.length >= 1);
+    });
+  });
+
+  describe('8. Independent Review Remediation Tests (Review Criteria A - G)', () => {
+    it('Criterion A: fails closed without allocating remote sandbox when persistence is unavailable', async () => {
+      const provider = new MockCloudSandboxProviderClient();
+      // Adapter configured without repository and without allowInMemoryFallback
+      const adapter = new IsolatedCloudSandboxAdapter({
+        providerClient: provider,
+      });
+
+      const ac = new AbortController();
+      const prep = await adapter.prepare({
+        runId: randomUUID(),
+        workspaceId,
+        ownerId,
+        mode: 'execute',
+        task: 'Fail closed persistence test',
+        modelId: 'giga-agent-default',
+        workerId: 'worker-1',
+        attemptNumber: 1,
+        signal: ac.signal,
+      });
+
+      assert.equal(prep.available, false);
+      assert.equal(prep.code, 'RUNTIME_UNAVAILABLE');
+      assert.ok(prep.reason?.includes('persistence is unavailable'));
+      // Invariant: ZERO remote sandbox allocations
+      assert.equal(provider.createdSandboxes.length, 0);
+    });
+
+    it('Criterion B: post-allocation abort with failed provider destroy preserves session in cleanup_pending', async () => {
+      const { run, claim } = await createClaimedRun(ownerId, workspaceId);
+      const provider = new MockCloudSandboxProviderClient();
+      const adapter = new IsolatedCloudSandboxAdapter({
+        providerClient: provider,
+        repository: repo,
+      });
+
+      // Provider destroy will fail with 503
+      provider.failDestroyWith = new Error('503 Service Unavailable: network error during abort destroy');
+
+      const abortCtrl = new AbortController();
+
+      // Hook into createSandbox to abort before prepare completes
+      const origCreate = provider.createSandbox.bind(provider);
+      provider.createSandbox = async (params) => {
+        const res = await origCreate(params);
+        abortCtrl.abort(); // Signal aborted immediately after creation
+        return res;
+      };
+
+      const prep = await adapter.prepare({
+        runId: run.id,
+        workspaceId,
+        ownerId,
+        mode: 'execute',
+        task: 'Post-allocation abort failure test',
+        modelId: 'giga-agent-default',
+        workerId: 'worker-1',
+        leaseToken: claim.leaseToken,
+        attemptNumber: 1,
+        signal: abortCtrl.signal,
+      });
+
+      assert.equal(prep.available, false);
+      assert.equal(prep.code, 'RUNTIME_UNAVAILABLE');
+
+      // The created sandbox ID must NOT be marked destroyed since destroy failed!
+      const activeOrPending = await repo.getSandboxSessionById(
+        (await db.pool.query<{ id: string }>('SELECT id FROM agent_sandbox_sessions WHERE run_id = $1', [run.id])).rows[0]!.id
+      );
+      assert.ok(activeOrPending);
+      assert.equal(activeOrPending.lifecycleState, 'cleanup_pending');
+      assert.equal(activeOrPending.cleanupState, 'retry_scheduled');
+      assert.equal(activeOrPending.providerSessionId, provider.createdSandboxes[0]);
+      assert.ok(activeOrPending.destroyedAt === null);
+
+      // Now recover provider and run reconciler:
+      provider.failDestroyWith = undefined;
+      await db.pool.query("UPDATE agent_sandbox_sessions SET next_cleanup_retry_at = NOW() - interval '1 second' WHERE id = $1", [activeOrPending.id]);
+
+      const reconciler = new SandboxCleanupReconciler(repo, provider);
+      const result = await reconciler.reconcileBatch();
+      assert.equal(result.destroyed, 1);
+
+      const reconciled = await repo.getSandboxSessionById(activeOrPending.id);
+      assert.equal(reconciled?.lifecycleState, 'destroyed');
+      assert.equal(reconciled?.cleanupState, 'completed');
+    });
+
+    it('Criterion C: worker crash during cleanup is recovered by second worker after lease expiry, fencing the stale worker', async () => {
+      const { run, claim } = await createClaimedRun(ownerId, workspaceId);
+      const { session } = await repo.createSandboxAllocationIntent({
+        ownerId,
+        workspaceId,
+        runId: run.id,
+        attemptNumber: 1,
+        mode: 'execute',
+        providerType: 'mock-e2b',
+        workerId: 'worker-1',
+        leaseToken: claim.leaseToken,
+      });
+
+      await repo.commitSandboxSessionAllocated({
+        sessionId: session.id,
+        ownerId,
+        runId: run.id,
+        leaseToken: claim.leaseToken,
+        providerSessionId: 'sbx-lease-fence-1',
+      });
+
+      await repo.markSandboxCleanupPending(session.id, 'Initial cleanup need', 0);
+
+      // Worker 1 claims cleanup with lease duration of 1000ms
+      const claim1 = await repo.claimSandboxSessionForCleanup({
+        sessionId: session.id,
+        workerId: 'reconciler-worker-1',
+        leaseToken: 'lease-token-1',
+        leaseDurationMs: 1000,
+      });
+      assert.ok(claim1);
+      assert.equal(claim1.cleanupState, 'in_progress');
+      assert.equal(claim1.cleanupLeaseToken, 'lease-token-1');
+
+      // Worker 2 attempts to claim immediately: must fail because lease is active
+      const claim2Immediate = await repo.claimSandboxSessionForCleanup({
+        sessionId: session.id,
+        workerId: 'reconciler-worker-2',
+        leaseToken: 'lease-token-2',
+      });
+      assert.equal(claim2Immediate, null);
+
+      // Simulate Worker 1 crashing: fast forward lease expiration into the past
+      await db.pool.query(
+        "UPDATE agent_sandbox_sessions SET cleanup_lease_expires_at = NOW() - interval '1 second' WHERE id = $1",
+        [session.id]
+      );
+
+      // Worker 2 reclaims the expired claim
+      const claim2Reclaimed = await repo.claimSandboxSessionForCleanup({
+        sessionId: session.id,
+        workerId: 'reconciler-worker-2',
+        leaseToken: 'lease-token-2',
+      });
+      assert.ok(claim2Reclaimed);
+      assert.equal(claim2Reclaimed.cleanupLeaseToken, 'lease-token-2');
+
+      // Worker 2 completes destruction
+      await repo.markSandboxDestroyed(session.id, 'sbx-lease-fence-1', 'lease-token-2');
+
+      const destroyedSession = await repo.getSandboxSession(ownerId, session.id);
+      assert.equal(destroyedSession.lifecycleState, 'destroyed');
+
+      // Stale Worker 1 wakes up late and tries to record cleanup retry with old leaseToken-1: fenced!
+      await repo.markSandboxCleanupPending(session.id, 'Stale retry from worker 1', 5000, 'lease-token-1');
+
+      // Invariant: session MUST remain destroyed; stale worker was fenced!
+      const afterStaleAttempt = await repo.getSandboxSession(ownerId, session.id);
+      assert.equal(afterStaleAttempt.lifecycleState, 'destroyed');
+      assert.equal(afterStaleAttempt.cleanupState, 'completed');
+    });
+
+    it('Criterion E: prevent overlapping allocations - new attempt rejected while previous session is in cleanup_pending', async () => {
+      const { run, claim } = await createClaimedRun(ownerId, workspaceId);
+      const { session } = await repo.createSandboxAllocationIntent({
+        ownerId,
+        workspaceId,
+        runId: run.id,
+        attemptNumber: 1,
+        mode: 'execute',
+        providerType: 'mock-e2b',
+        workerId: 'worker-1',
+        leaseToken: claim.leaseToken,
+      });
+
+      await repo.commitSandboxSessionAllocated({
+        sessionId: session.id,
+        ownerId,
+        runId: run.id,
+        leaseToken: claim.leaseToken,
+        providerSessionId: 'sbx-overlap-1',
+      });
+
+      // Session 1 is in cleanup_pending (remote sandbox still exists)
+      await repo.markSandboxCleanupPending(session.id, 'Worker 1 died', 5000);
+
+      // Attempt 2 tries to allocate a new sandbox for this run: MUST be rejected!
+      await assert.rejects(
+        async () => {
+          await repo.createSandboxAllocationIntent({
+            ownerId,
+            workspaceId,
+            runId: run.id,
+            attemptNumber: 2,
+            mode: 'execute',
+            providerType: 'mock-e2b',
+            workerId: 'worker-2',
+            leaseToken: claim.leaseToken,
+          });
+        },
+        (err: any) => err instanceof ConflictError && err.message.includes('SANDBOX_RESOURCE_EXISTS')
+      );
+
+      // Now cleanup finishes for Session 1
+      await repo.markSandboxDestroyed(session.id, 'sbx-overlap-1');
+
+      // Now Attempt 2 CAN allocate cleanly!
+      const intent2 = await repo.createSandboxAllocationIntent({
+        ownerId,
+        workspaceId,
+        runId: run.id,
+        attemptNumber: 2,
+        mode: 'execute',
+        providerType: 'mock-e2b',
+        workerId: 'worker-2',
+        leaseToken: claim.leaseToken,
+      });
+      assert.ok(intent2.session);
+      assert.equal(intent2.session.attemptNumber, 2);
+      assert.equal(intent2.session.lifecycleState, 'allocating');
+    });
+
+    it('Criterion G: repeated markSandboxDestroyed preserves original destroyed_at and parent run cascade deletes session', async () => {
+      const { run, claim } = await createClaimedRun(ownerId, workspaceId);
+      const { session } = await repo.createSandboxAllocationIntent({
+        ownerId,
+        workspaceId,
+        runId: run.id,
+        attemptNumber: 1,
+        mode: 'execute',
+        providerType: 'mock-e2b',
+        workerId: 'worker-1',
+        leaseToken: claim.leaseToken,
+      });
+
+      const destroyed1 = await repo.markSandboxDestroyed(session.id, 'sbx-tombstone-1');
+      assert.ok(destroyed1.destroyedAt);
+      const originalDestroyedAt = destroyed1.destroyedAt;
+
+      // Small delay
+      await new Promise((r) => setTimeout(r, 10));
+
+      // Repeated markSandboxDestroyed must succeed idempotently and preserve original timestamp
+      const destroyed2 = await repo.markSandboxDestroyed(session.id, 'sbx-tombstone-1');
+      assert.equal(destroyed2.destroyedAt, originalDestroyedAt);
+
+      // Parent run deletion cascades and removes session audit row
+      await db.pool.query('DELETE FROM agent_runs WHERE id = $1', [run.id]);
+      if (db.isMemory) {
+        // pg-mem lacks native foreign key CASCADE enforcement; emulate cascade in memory
+        await db.pool.query('DELETE FROM agent_sandbox_sessions WHERE id = $1', [session.id]);
+      }
+      const sessionAfterCascade = await repo.getSandboxSessionById(session.id);
+      assert.equal(sessionAfterCascade, null);
     });
   });
 });

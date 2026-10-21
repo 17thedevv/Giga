@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import type { AgentRepository } from './repository.js';
 import type { CloudSandboxProviderClient } from './sandbox-adapter.js';
 import type { DurableSandboxSession } from './types.js';
@@ -7,6 +8,8 @@ export interface ReconcilerOptions {
   readonly baseBackoffMs?: number;
   readonly maxBackoffMs?: number;
   readonly maxCleanupAttempts?: number;
+  readonly workerId?: string;
+  readonly leaseDurationMs?: number;
 }
 
 export interface ReconciliationBatchResult {
@@ -43,6 +46,8 @@ export class SandboxCleanupReconciler {
   private readonly baseBackoffMs: number;
   private readonly maxBackoffMs: number;
   private readonly maxCleanupAttempts: number;
+  private readonly workerId: string;
+  private readonly leaseDurationMs: number;
   private timer?: NodeJS.Timeout;
   private running = false;
 
@@ -55,6 +60,8 @@ export class SandboxCleanupReconciler {
     this.baseBackoffMs = options.baseBackoffMs ?? DEFAULT_BASE_BACKOFF_MS;
     this.maxBackoffMs = options.maxBackoffMs ?? DEFAULT_MAX_BACKOFF_MS;
     this.maxCleanupAttempts = options.maxCleanupAttempts ?? DEFAULT_MAX_ATTEMPTS;
+    this.workerId = options.workerId ?? `reconciler-${crypto.randomUUID()}`;
+    this.leaseDurationMs = options.leaseDurationMs ?? 30_000;
   }
 
   /**
@@ -95,17 +102,23 @@ export class SandboxCleanupReconciler {
   async reconcileSession(
     session: DurableSandboxSession
   ): Promise<'destroyed' | 'retried' | 'failed' | 'timed_out_allocation' | 'skipped'> {
-    // 1. Claim session for cleanup to prevent duplicate concurrent reconcilers
-    const claimed = await this.repository.claimSandboxSessionForCleanup(session.id);
+    const leaseToken = crypto.randomUUID();
+    // 1. Claim session with an expiring lease to prevent duplicate concurrent reconcilers and fence stale workers
+    const claimed = await this.repository.claimSandboxSessionForCleanup({
+      sessionId: session.id,
+      workerId: this.workerId,
+      leaseToken,
+      leaseDurationMs: this.leaseDurationMs,
+    });
     if (!claimed) {
       return 'skipped';
     }
 
     // 2. Case A: Allocation timed out before provider session ID was ever recorded
     // (Worker crashed during createSandbox or provider timed out)
-    if (!session.providerSessionId) {
+    if (!claimed.providerSessionId) {
       await this.repository.recordSandboxAllocationFailed(
-        session.id,
+        claimed.id,
         'Sandbox allocation timed out before provider session handle was committed',
         { source: 'cleanup_reconciler', crashSuspected: true }
       );
@@ -114,10 +127,10 @@ export class SandboxCleanupReconciler {
 
     // 3. Case B: Provider session ID exists -> issue idempotent destroy to provider
     try {
-      await this.providerClient.destroySandbox(session.providerSessionId);
+      await this.providerClient.destroySandbox(claimed.providerSessionId);
 
-      // Successfully destroyed at provider: record durable tombstone
-      await this.repository.markSandboxDestroyed(session.id, session.providerSessionId);
+      // Successfully destroyed at provider: record durable tombstone, fenced by leaseToken
+      await this.repository.markSandboxDestroyed(claimed.id, claimed.providerSessionId, leaseToken);
       return 'destroyed';
     } catch (err: unknown) {
       const errorMessage = err instanceof Error ? err.message : String(err);
@@ -129,18 +142,18 @@ export class SandboxCleanupReconciler {
         errorMessage.includes('SANDBOX_NOT_FOUND')
       ) {
         // Idempotent success: sandbox already does not exist at provider
-        await this.repository.markSandboxDestroyed(session.id, session.providerSessionId);
+        await this.repository.markSandboxDestroyed(claimed.id, claimed.providerSessionId, leaseToken);
         return 'destroyed';
       }
 
       // Provider error / network outage: schedule retry with exponential backoff
-      const currentAttempts = session.cleanupAttempts + 1;
+      const currentAttempts = claimed.cleanupAttempts + 1;
       if (currentAttempts >= this.maxCleanupAttempts) {
         // Exceeded maximum attempts: retain durable cleanup intent marked as failed
-        await this.repository.markSandboxCleanupPending(
-          session.id,
+        await this.repository.markSandboxCleanupFailed(
+          claimed.id,
           `Max cleanup attempts (${this.maxCleanupAttempts}) exceeded: ${errorMessage}`,
-          this.maxBackoffMs
+          leaseToken
         );
         return 'failed';
       }
@@ -150,7 +163,7 @@ export class SandboxCleanupReconciler {
         this.baseBackoffMs * Math.pow(2, currentAttempts - 1)
       );
 
-      await this.repository.markSandboxCleanupPending(session.id, errorMessage, backoffMs);
+      await this.repository.markSandboxCleanupPending(claimed.id, errorMessage, backoffMs, leaseToken);
       return 'retried';
     }
   }
