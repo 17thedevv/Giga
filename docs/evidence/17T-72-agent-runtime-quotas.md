@@ -7,6 +7,11 @@
 **Branch:** `feat/17t-72-agent-runtime-quotas`
 
 **Base:** `origin/main` at `6ce98b1b8758f6a429a32316f4ed723220d92646`
+
+**Implementation commit:** `6505a93e7d829f00b1ce72d232fbd73a60740778`
+
+**Draft PR:** [#42](https://github.com/17thedevv/Giga/pull/42), linked to 17T-72 as `contributes`
+
 **Owner / reviewer:** Trà / Thư
 
 ## Scope and integration boundary
@@ -98,4 +103,5 @@ Web typecheck was not run because no frontend source or shared DTO package chang
 - Safe release after allocation depends on the 17T-71 sandbox-session lifecycle and its quiescence verifier.
 - Dollar spend is not accounted because trustworthy user-scoped provider cost data is unavailable. Resource ceilings remain the enforcement policy.
 - Runtime and cloud execution remain disabled; no live provider allocation or cloud provisioning was performed.
-- Required GitHub Actions CI, implementation commit SHA, and Draft PR URL will be recorded after branch publication.
+- GitHub Actions on the implementation commit: `Validate Git Workflow` run 144 passed; `Backend CI` run 80 passed its typecheck, build, and unit/integration suite against real PostgreSQL.
+- The GitHub reviewer request for Linear's assigned reviewer was rejected because that user is not a repository collaborator. The connected Linear diff creator was also the assigned reviewer, so no self-review request is left active; an independent review request remains outstanding.
