@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { newDb, DataType } from 'pg-mem';
 import type pg from 'pg';
-import { runMigrations, getAppliedMigrationVersions } from '../src/db/migrate.js';
+import { MIGRATIONS, runMigrations, getAppliedMigrationVersions } from '../src/db/migrate.js';
 import { redactDatabaseUrl, pingDatabase } from '../src/db/client.js';
 
 describe('Database Migrations and Utilities', () => {
@@ -38,8 +38,8 @@ describe('Database Migrations and Utilities', () => {
 
     try {
       // First run: applies all pending migrations
-      const firstRun = await runMigrations(pool);
-      assert.strictEqual(firstRun.length, 13);
+      const firstRun = await runMigrations(pool, MIGRATIONS);
+      assert.strictEqual(firstRun.length, 14);
       assert.strictEqual(firstRun[0], '001_initial_users_and_sessions');
       assert.strictEqual(firstRun[1], '002_conversations_and_messages');
       assert.strictEqual(firstRun[2], '003_skills_and_preferences');
@@ -53,6 +53,7 @@ describe('Database Migrations and Utilities', () => {
       assert.strictEqual(firstRun[10], '011_agent_control_plane');
       assert.strictEqual(firstRun[11], '012_agent_orchestrator');
       assert.strictEqual(firstRun[12], '013_agent_messages');
+      assert.strictEqual(firstRun[13], '015_agent_execution_quotas');
 
       const versions = await getAppliedMigrationVersions(pool);
       assert.ok(versions.has(1));
@@ -68,9 +69,10 @@ describe('Database Migrations and Utilities', () => {
       assert.ok(versions.has(11));
       assert.ok(versions.has(12));
       assert.ok(versions.has(13));
+      assert.ok(versions.has(15));
 
       // Second run: idempotent, applies 0 migrations
-      const secondRun = await runMigrations(pool);
+      const secondRun = await runMigrations(pool, MIGRATIONS);
       assert.strictEqual(secondRun.length, 0);
 
       // Verify ping probe works
