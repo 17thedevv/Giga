@@ -739,6 +739,7 @@ CREATE TABLE agent_execution_reservations (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     started_at TIMESTAMPTZ,
     finished_at TIMESTAMPTZ,
+    reconciliation_event_key VARCHAR(128),
 
     max_sandbox_runtime_ms BIGINT NOT NULL CHECK (max_sandbox_runtime_ms >= 0),
     max_wall_clock_ms BIGINT NOT NULL CHECK (max_wall_clock_ms > 0),
@@ -774,6 +775,13 @@ CREATE TABLE agent_execution_reservations (
     CHECK ((mode = 'execute') = writable),
     CHECK (NOT resource_active OR writable),
     CHECK (NOT writable OR state NOT IN ('active', 'reconciliation_required') OR resource_active),
+    CHECK (state NOT IN ('active', 'reconciliation_required') OR started_at IS NOT NULL),
+    CHECK (started_at IS NULL OR started_at >= created_at),
+    CHECK (NOT resource_active OR state = 'reserved' OR started_at IS NOT NULL),
+    CHECK (reconciliation_event_key IS NULL OR (
+        char_length(reconciliation_event_key) BETWEEN 1 AND 128 AND state = 'committed' AND
+        resource_active = FALSE AND finished_at IS NOT NULL
+    )),
     CHECK ((state IN ('reserved', 'active', 'reconciliation_required')) = (finished_at IS NULL)),
     CHECK (state <> 'released' OR (resource_active = FALSE AND
         accounted_sandbox_runtime_ms = 0 AND accounted_wall_clock_ms = 0 AND accounted_tool_calls = 0 AND
@@ -827,7 +835,28 @@ CREATE TABLE agent_execution_usage_events (
 CREATE INDEX idx_agent_quota_events_owner
     ON agent_execution_usage_events (owner_id, workspace_id, run_id, attempt_number, created_at);
 
+CREATE OR REPLACE FUNCTION guard_agent_execution_usage_event_insert() RETURNS TRIGGER AS $$
+DECLARE
+    finalized_event_key VARCHAR(128);
+BEGIN
+    SELECT reconciliation_event_key INTO finalized_event_key
+    FROM agent_execution_reservations
+    WHERE id = NEW.reservation_id
+    FOR UPDATE;
+    IF finalized_event_key IS NOT NULL THEN
+        RAISE EXCEPTION 'Finalized Agent quota reservation cannot accept usage events';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_agent_execution_usage_event_insert
+    BEFORE INSERT ON agent_execution_usage_events
+    FOR EACH ROW EXECUTE FUNCTION guard_agent_execution_usage_event_insert();
+
 CREATE OR REPLACE FUNCTION guard_agent_execution_reservation_update() RETURNS TRIGGER AS $$
+DECLARE
+    has_reconciliation_event BOOLEAN;
 BEGIN
     IF ROW(NEW.id, NEW.owner_id, NEW.workspace_id, NEW.run_id, NEW.attempt_number, NEW.mode,
         NEW.writable, NEW.policy_version, NEW.lease_token_hash, NEW.created_at,
@@ -849,6 +878,53 @@ BEGIN
     END IF;
     IF OLD.resource_active = FALSE AND NEW.resource_active = TRUE THEN
         RAISE EXCEPTION 'Released Agent quota capacity cannot be reactivated';
+    END IF;
+    IF OLD.started_at IS NULL AND NEW.started_at IS NOT NULL THEN
+        IF OLD.state <> 'reserved' OR NEW.state <> 'active' THEN
+            RAISE EXCEPTION 'Agent execution start timestamp may only be set when allocation starts';
+        END IF;
+        NEW.started_at = clock_timestamp();
+    ELSIF OLD.started_at IS NOT NULL AND NEW.started_at IS DISTINCT FROM OLD.started_at THEN
+        RAISE EXCEPTION 'Agent execution start timestamp is immutable';
+    END IF;
+    IF NEW.actual_wall_clock_ms < OLD.actual_wall_clock_ms THEN
+        RAISE EXCEPTION 'Agent actual wall-clock usage cannot decrease';
+    END IF;
+    IF OLD.reconciliation_event_key IS NOT NULL AND ROW(
+        NEW.reconciliation_event_key, NEW.state, NEW.resource_active, NEW.finished_at,
+        NEW.actual_sandbox_runtime_ms, NEW.actual_wall_clock_ms, NEW.actual_tool_calls,
+        NEW.actual_provider_requests, NEW.actual_command_output_bytes, NEW.actual_artifact_bytes,
+        NEW.actual_workspace_disk_bytes, NEW.actual_workspace_file_count,
+        NEW.accounted_sandbox_runtime_ms, NEW.accounted_wall_clock_ms, NEW.accounted_tool_calls,
+        NEW.accounted_provider_requests, NEW.accounted_command_output_bytes, NEW.accounted_artifact_bytes,
+        NEW.accounted_workspace_disk_bytes, NEW.accounted_workspace_file_count
+    ) IS DISTINCT FROM ROW(
+        OLD.reconciliation_event_key, OLD.state, OLD.resource_active, OLD.finished_at,
+        OLD.actual_sandbox_runtime_ms, OLD.actual_wall_clock_ms, OLD.actual_tool_calls,
+        OLD.actual_provider_requests, OLD.actual_command_output_bytes, OLD.actual_artifact_bytes,
+        OLD.actual_workspace_disk_bytes, OLD.actual_workspace_file_count,
+        OLD.accounted_sandbox_runtime_ms, OLD.accounted_wall_clock_ms, OLD.accounted_tool_calls,
+        OLD.accounted_provider_requests, OLD.accounted_command_output_bytes, OLD.accounted_artifact_bytes,
+        OLD.accounted_workspace_disk_bytes, OLD.accounted_workspace_file_count
+    ) THEN
+        RAISE EXCEPTION 'Finalized Agent quota accounting is immutable';
+    END IF;
+    IF OLD.resource_active = TRUE AND NEW.resource_active = FALSE AND
+       NEW.state = 'committed' AND NEW.reconciliation_event_key IS NULL THEN
+        RAISE EXCEPTION 'Committed Agent quota capacity release requires reconciliation finalization';
+    END IF;
+    IF OLD.reconciliation_event_key IS NULL AND NEW.reconciliation_event_key IS NOT NULL THEN
+        IF NEW.state <> 'committed' OR NEW.resource_active OR NEW.finished_at IS NULL THEN
+            RAISE EXCEPTION 'Agent quota reconciliation finalization has an invalid state';
+        END IF;
+        SELECT EXISTS (
+            SELECT 1 FROM agent_execution_usage_events
+            WHERE reservation_id = NEW.id AND event_key = NEW.reconciliation_event_key
+              AND event_kind = 'reconciled'
+        ) INTO has_reconciliation_event;
+        IF NOT has_reconciliation_event THEN
+            RAISE EXCEPTION 'Agent quota reconciliation finalization requires its audit event';
+        END IF;
     END IF;
     IF OLD.state = 'reserved' AND NEW.state NOT IN ('reserved', 'active', 'released', 'reconciliation_required', 'committed') THEN
         RAISE EXCEPTION 'Invalid Agent quota reservation transition';

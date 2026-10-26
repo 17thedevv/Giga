@@ -318,7 +318,7 @@ describe('GigaAgent durable quota reservations', () => {
     assert.equal(committed.accounted.artifactBytes, 512);
     await finalizeRun(first);
     const quiescent = await new AgentQuotaService(db.pool, DEFAULT_AGENT_QUOTA_POLICY, verifier(true))
-      .reconcileAfterQuiescent(first.reference, committed.actual, 'cleanup:1');
+      .reconcileAfterQuiescent(first.reference, {}, 'cleanup:1');
     assert.equal(quiescent.resourceActive, false);
     assert.equal(quiescent.accounted.commandOutputBytes, 100);
     assert.equal(quiescent.actual.workspaceDiskBytes, 2048);
@@ -338,8 +338,8 @@ describe('GigaAgent durable quota reservations', () => {
     assert.equal(duplicate.actual.providerRequests, first.actual.providerRequests);
     await finalizeRun(run);
     const service = new AgentQuotaService(db.pool, DEFAULT_AGENT_QUOTA_POLICY, verifier(true));
-    await service.reconcileAfterQuiescent(run.reference, first.actual, 'cleanup:stable');
-    await service.reconcileAfterQuiescent(run.reference, first.actual, 'cleanup:stable');
+    await service.reconcileAfterQuiescent(run.reference, {}, 'cleanup:stable');
+    await service.reconcileAfterQuiescent(run.reference, {}, 'cleanup:stable');
     const events = await service.listUsageEvents(run.reference);
     assert.equal(events.filter((event) => event.kind === 'attempt_committed').length, 1);
     assert.equal(events.filter((event) => event.kind === 'reconciled').length, 1);
@@ -354,18 +354,29 @@ describe('GigaAgent durable quota reservations', () => {
     const committed = await quotas.commitAttempt(run.reference, run.leaseToken, 'complete:zero-usage');
     assert.equal(committed.state, 'committed');
     assert.equal(committed.resourceActive, true);
-    assert.deepEqual(committed.accounted, {
-      sandboxRuntimeMs: 0, wallClockMs: 0, toolCalls: 0, providerRequests: 0,
-      commandOutputBytes: 0, artifactBytes: 0, workspaceDiskBytes: 0, workspaceFileCount: 0,
-    });
+    assert.equal(committed.accounted.wallClockMs, committed.actual.wallClockMs);
+    assert.ok(committed.accounted.sandboxRuntimeMs === 0 && committed.accounted.toolCalls === 0 &&
+      committed.accounted.providerRequests === 0 && committed.accounted.commandOutputBytes === 0 &&
+      committed.accounted.artifactBytes === 0 && committed.accounted.workspaceDiskBytes === 0 &&
+      committed.accounted.workspaceFileCount === 0);
+    await assert.rejects(
+      db.pool.query('UPDATE agent_execution_reservations SET resource_active = FALSE WHERE run_id = $1', [run.runId]),
+      /requires reconciliation finalization/i
+    );
     await finalizeRun(run);
 
     const service = new AgentQuotaService(db.pool, DEFAULT_AGENT_QUOTA_POLICY, verifier(true));
     const reconciled = await service.reconcileAfterQuiescent(run.reference, {}, 'cleanup:zero-usage');
     assert.equal(reconciled.state, 'committed');
     assert.equal(reconciled.resourceActive, false);
-    assert.deepEqual(reconciled.actual, committed.actual);
-    assert.deepEqual(reconciled.accounted, committed.actual);
+    assert.ok(reconciled.actual.wallClockMs >= committed.actual.wallClockMs);
+    for (const key of [
+      'sandboxRuntimeMs', 'toolCalls', 'providerRequests', 'commandOutputBytes',
+      'artifactBytes', 'workspaceDiskBytes', 'workspaceFileCount',
+    ] as const) {
+      assert.equal(reconciled.actual[key], committed.actual[key]);
+    }
+    assert.deepEqual(reconciled.accounted, reconciled.actual);
     const repeated = await service.reconcileAfterQuiescent(run.reference, {}, 'cleanup:zero-usage');
     assert.equal(repeated.state, 'committed');
     assert.equal(repeated.resourceActive, false);
@@ -401,7 +412,11 @@ describe('GigaAgent durable quota reservations', () => {
     assert.equal(reconciled.state, 'committed');
     assert.equal(reconciled.resourceActive, false);
     assert.deepEqual(reconciled.actual, reconciled.accounted);
-    assert.ok(Object.values(reconciled.accounted).every((value) => value === 0));
+    assert.ok(reconciled.accounted.wallClockMs >= 0);
+    assert.ok(reconciled.accounted.sandboxRuntimeMs === 0 && reconciled.accounted.toolCalls === 0 &&
+      reconciled.accounted.providerRequests === 0 && reconciled.accounted.commandOutputBytes === 0 &&
+      reconciled.accounted.artifactBytes === 0 && reconciled.accounted.workspaceDiskBytes === 0 &&
+      reconciled.accounted.workspaceFileCount === 0);
     const repeated = await service.reconcileAfterQuiescent(run.reference, {}, 'cleanup:ambiguous-zero');
     assert.equal(repeated.state, 'committed');
     assert.equal(repeated.resourceActive, false);
@@ -419,6 +434,139 @@ describe('GigaAgent durable quota reservations', () => {
       db.pool.query("UPDATE agent_execution_reservations SET state = 'active', resource_active = TRUE WHERE run_id = $1", [preallocation.runId]),
       /Released Agent quota reservation is immutable/i
     );
+  });
+
+  it('derives and durably accounts an over-limit wall-clock duration at commit without usage events', async (t) => {
+    if (db.isMemory) return t.skip('Requires PostgreSQL clock_timestamp and persisted usage auditing');
+    const policy = customPolicy({ execute: { wallClockMs: 25 } });
+    const service = new AgentQuotaService(db.pool, policy);
+    const run = await createClaimedRun();
+    await service.reserveExecutionAttempt(run.reference, run.leaseToken);
+    await service.markAllocationStarted(run.reference, run.leaseToken);
+
+    const beforeCommit = await service.listUsageEvents(run.reference);
+    assert.equal(beforeCommit.filter((event) => ['provider_request', 'tool_call', 'measurement'].includes(event.kind)).length, 0);
+    await db.pool.query('SELECT pg_sleep(0.06)');
+
+    const committed = await service.commitAttempt(run.reference, run.leaseToken, 'complete:wall-clock-overrun');
+    assert.equal(committed.state, 'committed');
+    assert.ok(committed.actual.wallClockMs >= policy.execute.wallClockMs);
+    assert.equal(committed.accounted.wallClockMs, committed.actual.wallClockMs);
+    assert.equal(committed.limitExceeded, true);
+    const commitEvent = (await service.listUsageEvents(run.reference)).find((event) => event.kind === 'attempt_committed');
+    assert.ok(commitEvent);
+    assert.equal(commitEvent.limitExceeded, true);
+    assert.equal(commitEvent.usage.wallClockMs, committed.actual.wallClockMs);
+  });
+
+  it('starts the execution deadline at durable allocation start, after queue wait', async (t) => {
+    if (db.isMemory) return t.skip('Requires PostgreSQL timestamps and clock_timestamp');
+    const wallClockMs = 80;
+    const service = new AgentQuotaService(
+      db.pool,
+      customPolicy({ execute: { wallClockMs } }),
+    );
+    const run = await createClaimedRun();
+    const reserved = await service.reserveExecutionAttempt(run.reference, run.leaseToken);
+    assert.equal(reserved.startedAt, null);
+    assert.equal(reserved.deadlineAt, null);
+
+    await db.pool.query('SELECT pg_sleep(0.15)');
+    const started = await service.markAllocationStarted(run.reference, run.leaseToken);
+    assert.ok(started.startedAt);
+    assert.equal(
+      started.deadlineAt,
+      new Date(Date.parse(started.startedAt!) + wallClockMs).toISOString(),
+    );
+    assert.ok(Date.parse(started.deadlineAt!) > Date.parse(reserved.createdAt) + wallClockMs);
+    await assert.rejects(
+      db.pool.query('UPDATE agent_execution_reservations SET started_at = created_at WHERE run_id = $1', [run.runId]),
+      /start timestamp is immutable/i
+    );
+  });
+
+  it('finalizes reconciliation once, preserves DB-measured time, and rejects later accounting mutations', async (t) => {
+    if (db.isMemory) return t.skip('Requires PostgreSQL transaction and trigger enforcement');
+    const policy = customPolicy({ execute: { wallClockMs: 25 } });
+    const service = new AgentQuotaService(db.pool, policy, verifier(true));
+    const run = await createClaimedRun();
+    await service.reserveExecutionAttempt(run.reference, run.leaseToken);
+    await service.markAllocationStarted(run.reference, run.leaseToken);
+    await service.recordUsage(run.reference, run.leaseToken, {
+      eventKey: 'provider:before-finalization',
+      kind: 'provider_request',
+      usage: { providerRequests: 1 },
+    });
+    await service.markOutcomeUnknown(run.reference, run.leaseToken, 'provider:reconciliation-finalization');
+    await db.pool.query('SELECT pg_sleep(0.06)');
+    await repository.releaseLease(ownerId, run.runId, run.leaseToken);
+
+    const finalUsage = { providerRequests: 2, artifactBytes: 4 };
+    const first = await service.reconcileAfterQuiescent(run.reference, finalUsage, 'cleanup:finalized');
+    assert.equal(first.resourceActive, false);
+    assert.ok(first.actual.wallClockMs >= policy.execute.wallClockMs);
+    assert.equal(first.actual.providerRequests, 2);
+    assert.equal(first.actual.artifactBytes, 4);
+    assert.deepEqual(first.accounted, first.actual);
+    assert.equal(first.limitExceeded, true);
+
+    const beforeRepeat = await db.pool.query<{
+      actual_wall_clock_ms: string;
+      accounted_wall_clock_ms: string;
+      accounted_provider_requests: string;
+      event_count: number;
+    }>(
+      'SELECT r.actual_wall_clock_ms, r.accounted_wall_clock_ms, r.accounted_provider_requests, ' +
+      '(SELECT count(*)::int FROM agent_execution_usage_events e WHERE e.reservation_id = r.id) AS event_count ' +
+      'FROM agent_execution_reservations r WHERE r.run_id = $1',
+      [run.runId]
+    );
+    const duplicate = await service.reconcileAfterQuiescent(run.reference, finalUsage, 'cleanup:finalized');
+    assert.deepEqual(duplicate.actual, first.actual);
+    assert.deepEqual(duplicate.accounted, first.accounted);
+    await assert.rejects(
+      service.reconcileAfterQuiescent(run.reference, finalUsage, 'cleanup:new-key-after-finalization'),
+      /already finalized/i
+    );
+    await assert.rejects(
+      service.reconcileAfterQuiescent(run.reference, { providerRequests: 3, artifactBytes: 4 }, 'cleanup:finalized'),
+      /different measurements/i
+    );
+
+    await assert.rejects(
+      db.pool.query(
+        'UPDATE agent_execution_reservations SET actual_wall_clock_ms = actual_wall_clock_ms + 1, ' +
+        'accounted_wall_clock_ms = accounted_wall_clock_ms + 1 WHERE run_id = $1',
+        [run.runId]
+      ),
+      /finalized agent quota accounting is immutable/i
+    );
+    await assert.rejects(
+      db.pool.query('UPDATE agent_execution_reservations SET resource_active = TRUE WHERE run_id = $1', [run.runId]),
+      /cannot be reactivated/i
+    );
+    const fingerprint = createHash('sha256').update('post-finalization').digest('hex');
+    await assert.rejects(
+      db.pool.query(
+        'INSERT INTO agent_execution_usage_events ' +
+        '(reservation_id, owner_id, workspace_id, run_id, attempt_number, event_key, event_kind, request_fingerprint) ' +
+        'SELECT id, owner_id, workspace_id, run_id, attempt_number, $2, \'reconciled\', $3 ' +
+        'FROM agent_execution_reservations WHERE run_id = $1',
+        [run.runId, 'cleanup:post-finalization-direct', fingerprint]
+      ),
+      /cannot accept usage events/i
+    );
+
+    const afterRepeat = await db.pool.query(
+      'SELECT r.actual_wall_clock_ms, r.accounted_wall_clock_ms, r.accounted_provider_requests, ' +
+      '(SELECT count(*)::int FROM agent_execution_usage_events e WHERE e.reservation_id = r.id) AS event_count ' +
+      'FROM agent_execution_reservations r WHERE r.run_id = $1',
+      [run.runId]
+    );
+    assert.deepEqual(afterRepeat.rows, beforeRepeat.rows);
+    const events = await service.listUsageEvents(run.reference);
+    assert.equal(events.filter((event) => event.kind === 'reconciled').length, 1);
+    assert.equal(events.find((event) => event.kind === 'reconciled')?.limitExceeded, true);
   });
 
   it('ambiguous timeout survives service restart; stale callbacks are fenced after lease takeover', async () => {
@@ -495,6 +643,9 @@ describe('GigaAgent durable quota reservations', () => {
     await finalizeRun(run);
     await service.reconcileAfterQuiescent(run.reference, {}, 'cleanup:resource-caps');
 
+    // pg-mem cannot model PostgreSQL timestamptz subtraction; the isolated PostgreSQL suite
+    // runs this elapsed-time enforcement path against clock_timestamp().
+    if (db.isMemory) return;
     const deadlineService = new AgentQuotaService(db.pool, customPolicy({ execute: { wallClockMs: 30 } }), verifier(true));
     const deadlineRun = await createClaimedRun();
     await deadlineService.reserveExecutionAttempt(deadlineRun.reference, deadlineRun.leaseToken);
@@ -508,7 +659,7 @@ describe('GigaAgent durable quota reservations', () => {
     );
     await deadlineService.markOutcomeUnknown(deadlineRun.reference, deadlineRun.leaseToken, 'deadline:unknown');
     await repository.releaseLease(ownerId, deadlineRun.runId, deadlineRun.leaseToken);
-    const final = await deadlineService.reconcileAfterQuiescent(deadlineRun.reference, { wallClockMs: 40 }, 'deadline:reconciled');
+    const final = await deadlineService.reconcileAfterQuiescent(deadlineRun.reference, {}, 'deadline:reconciled');
     assert.equal(final.resourceActive, false);
     assert.equal((await deadlineService.listUsageEvents(deadlineRun.reference)).some((event) => event.limitExceeded), true);
   });

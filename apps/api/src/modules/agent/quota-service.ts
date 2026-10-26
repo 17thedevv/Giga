@@ -30,8 +30,10 @@ export interface AgentExecutionReservation extends AgentQuotaReference {
   readonly limits: AgentResourceLimits;
   readonly accounted: AgentResourceUsage;
   readonly actual: AgentResourceUsage;
+  readonly limitExceeded: boolean;
   readonly createdAt: string;
-  readonly deadlineAt: string;
+  readonly startedAt: string | null;
+  readonly deadlineAt: string | null;
 }
 
 export interface AgentResourceUsage {
@@ -45,7 +47,8 @@ export interface AgentResourceUsage {
   readonly workspaceFileCount: number;
 }
 
-export type AgentResourceUsageInput = Partial<AgentResourceUsage>;
+/** Wall-clock time is always measured by PostgreSQL from started_at, never supplied by a worker. */
+export type AgentResourceUsageInput = Omit<Partial<AgentResourceUsage>, 'wallClockMs'>;
 
 export interface QuotaQuiescenceVerifier {
   /**
@@ -96,6 +99,7 @@ interface ReservationRow extends Record<string, unknown> {
   lease_token_hash: string;
   created_at: Date | string;
   started_at: Date | string | null;
+  reconciliation_event_key: string | null;
   max_sandbox_runtime_ms: string | number;
   max_wall_clock_ms: string | number;
   max_tool_calls: string | number;
@@ -197,12 +201,14 @@ function parseUsage(input: unknown): MetricValues {
     throw new ValidationError('Usage measurement must be an object');
   }
   const source = input as Record<string, unknown>;
-  const allowed = new Set<string>(METRICS.map((metric) => metric.key));
+  const allowed = new Set<string>(METRICS.filter((metric) => metric.key !== 'wallClockMs').map((metric) => metric.key));
   for (const key of Object.keys(source)) {
     if (!allowed.has(key)) throw new ValidationError('Unknown usage measurement');
   }
   const result = {} as MetricValues;
-  for (const metric of METRICS) result[metric.key] = safeInteger(source[metric.key] ?? 0, metric.key);
+  for (const metric of METRICS) {
+    result[metric.key] = metric.key === 'wallClockMs' ? 0 : safeInteger(source[metric.key] ?? 0, metric.key);
+  }
   return result;
 }
 
@@ -214,12 +220,6 @@ function numberFromDb(value: string | number): number {
   const parsed = typeof value === 'number' ? value : Number(value);
   if (!Number.isSafeInteger(parsed) || parsed < 0) throw new Error('Persisted quota counter is invalid');
   return parsed;
-}
-
-function epochMilliseconds(value: Date | string): number {
-  const milliseconds = value instanceof Date ? value.getTime() : Date.parse(value);
-  if (!Number.isFinite(milliseconds)) throw new Error('Database returned an invalid quota timestamp');
-  return milliseconds;
 }
 
 function dateFromDb(value: Date | string): Date {
@@ -240,7 +240,9 @@ function mapMetrics(row: ReservationRow, prefix: 'max' | 'accounted' | 'actual')
 
 function mapReservation(row: ReservationRow): AgentExecutionReservation {
   const createdAt = dateFromDb(row.created_at);
+  const startedAt = row.started_at === null ? null : dateFromDb(row.started_at);
   const limits = mapMetrics(row, 'max');
+  const actual = mapMetrics(row, 'actual');
   return {
     id: row.id,
     ownerId: row.owner_id,
@@ -252,9 +254,13 @@ function mapReservation(row: ReservationRow): AgentExecutionReservation {
     resourceActive: row.resource_active,
     limits,
     accounted: mapMetrics(row, 'accounted'),
-    actual: mapMetrics(row, 'actual'),
+    actual,
+    limitExceeded: isOverLimit(actual, limits),
     createdAt: createdAt.toISOString(),
-    deadlineAt: new Date(createdAt.getTime() + limits.wallClockMs).toISOString(),
+    startedAt: startedAt?.toISOString() ?? null,
+    deadlineAt: startedAt === null
+      ? null
+      : new Date(startedAt.getTime() + limits.wallClockMs).toISOString(),
   };
 }
 
@@ -403,6 +409,25 @@ export class AgentQuotaService {
     );
   }
 
+  private async measureWallClockMs(client: pg.PoolClient, reservation: ReservationRow): Promise<number> {
+    if (
+      reservation.started_at === null &&
+      (reservation.state === 'active' || reservation.state === 'reconciliation_required' ||
+        (reservation.state === 'committed' && reservation.resource_active))
+    ) {
+      throw new ConflictError('Started reservation is missing its durable execution timestamp');
+    }
+    const result = await client.query<{ wall_clock_ms: string | number }>(
+      'SELECT CASE WHEN started_at IS NULL THEN actual_wall_clock_ms ELSE ' +
+      'GREATEST(actual_wall_clock_ms, CEIL(GREATEST(0::numeric, ' +
+      'EXTRACT(EPOCH FROM (clock_timestamp() - started_at)) * 1000))::bigint) END AS wall_clock_ms ' +
+      'FROM agent_execution_reservations WHERE id = $1',
+      [reservation.id]
+    );
+    if (!result.rows[0]) throw new NotFoundError();
+    return numberFromDb(result.rows[0].wall_clock_ms);
+  }
+
   private async getOwnedReservation(
     client: pg.PoolClient | pg.Pool,
     reference: AgentQuotaReference,
@@ -536,7 +561,7 @@ export class AgentQuotaService {
       const fingerprint = eventFingerprint('allocation_started', empty);
       await this.insertEvent(client, reservation, 'allocation.started', 'allocation_started', fingerprint, empty);
       const result = await client.query<ReservationRow>(
-        'UPDATE agent_execution_reservations SET state = \'active\', started_at = NOW(), updated_at = NOW() ' +
+        'UPDATE agent_execution_reservations SET state = \'active\', started_at = clock_timestamp(), updated_at = NOW() ' +
         'WHERE id = $1 RETURNING *',
         [reservation.id]
       );
@@ -568,22 +593,15 @@ export class AgentQuotaService {
 
       const limits = mapMetrics(reservation, 'max');
       const actual = mapMetrics(reservation, 'actual');
-      const elapsed = await client.query<{ now: Date | string; started_at: Date | string }>(
-        'SELECT NOW() AS now, COALESCE(started_at, created_at) AS started_at ' +
-        'FROM agent_execution_reservations WHERE id = $1',
-        [reservation.id]
-      );
       const next = { ...actual } as MetricValues;
       for (const metric of METRICS) {
+        if (metric.key === 'wallClockMs') continue;
         const value = usage[metric.key];
         next[metric.key] = metric.kind === 'sum'
           ? actual[metric.key] + value
           : Math.max(actual[metric.key], value);
       }
-      next.wallClockMs = Math.max(
-        next.wallClockMs,
-        Math.max(0, epochMilliseconds(elapsed.rows[0]!.now) - epochMilliseconds(elapsed.rows[0]!.started_at))
-      );
+      next.wallClockMs = await this.measureWallClockMs(client, reservation);
       if (isOverLimit(next, limits)) throw new AgentQuotaError('LIMIT_EXCEEDED');
 
       const eventUsage = { ...usage, wallClockMs: next.wallClockMs };
@@ -660,17 +678,22 @@ export class AgentQuotaService {
       await this.lockAndVerifyAttempt(client, reference, leaseToken);
       const reservation = await this.lockOwnedReservation(client, reference);
       const actual = mapMetrics(reservation, 'actual');
-      const fingerprint = eventFingerprint('attempt_committed', actual);
+      const fingerprint = eventFingerprint('attempt_committed', parseUsage({}));
       if (await this.matchingEvent(client, reservation.id, key, fingerprint)) return mapReservation(reservation);
       if (!['active', 'reconciliation_required'].includes(reservation.state)) {
         throw new ConflictError('Reservation cannot be committed');
       }
-      await this.insertEvent(client, reservation, key, 'attempt_committed', fingerprint, actual);
+      actual.wallClockMs = await this.measureWallClockMs(client, reservation);
+      const exceeded = isOverLimit(actual, mapMetrics(reservation, 'max'));
+      await this.insertEvent(client, reservation, key, 'attempt_committed', fingerprint, actual, exceeded);
+      const values = dbMetrics(actual);
+      const actualAssignments = METRICS.map((metric, index) => metric.actual + ' = $' + (index + 1));
+      const accountedAssignments = METRICS.map((metric, index) => metric.accounted + ' = $' + (index + 1));
       const result = await client.query<ReservationRow>(
-        'UPDATE agent_execution_reservations SET state = \'committed\', finished_at = NOW(), updated_at = NOW(), ' +
-        METRICS.map((metric) => metric.accounted + ' = ' + metric.actual).join(', ') +
-        ' WHERE id = $1 RETURNING *',
-        [reservation.id]
+        'UPDATE agent_execution_reservations SET state = \'committed\', finished_at = clock_timestamp(), updated_at = NOW(), ' +
+        actualAssignments.join(', ') + ', ' + accountedAssignments.join(', ') +
+        ' WHERE id = $' + (values.length + 1) + ' RETURNING *',
+        [...values, reservation.id]
       );
       return mapReservation(result.rows[0]!);
     });
@@ -688,6 +711,18 @@ export class AgentQuotaService {
     validateReference(reference);
     const key = validateEventKey(eventKey);
     const reported = parseUsage(finalUsage);
+    const fingerprint = eventFingerprint('reconciled', reported);
+    const alreadyFinalized = await this.transaction(async (client) => {
+      const reservation = await this.lockOwnedReservation(client, reference);
+      if (reservation.reconciliation_event_key === null) return undefined;
+      if (reservation.reconciliation_event_key !== key ||
+        !(await this.matchingEvent(client, reservation.id, key, fingerprint))) {
+        throw new ConflictError('Reservation reconciliation is already finalized');
+      }
+      return mapReservation(reservation);
+    });
+    if (alreadyFinalized) return alreadyFinalized;
+
     if (!this.quiescenceVerifier) throw new ConflictError('Sandbox reconciliation is unavailable');
     try {
       await this.quiescenceVerifier.fenceAttemptAndVerify(reference);
@@ -714,26 +749,34 @@ export class AgentQuotaService {
       }
 
       const reservation = await this.lockOwnedReservation(client, reference);
+      if (reservation.reconciliation_event_key !== null) {
+        if (reservation.reconciliation_event_key !== key ||
+          !(await this.matchingEvent(client, reservation.id, key, fingerprint))) {
+          throw new ConflictError('Reservation reconciliation is already finalized');
+        }
+        return mapReservation(reservation);
+      }
       const actual = mapMetrics(reservation, 'actual');
       const limits = mapMetrics(reservation, 'max');
       const final = { ...actual } as MetricValues;
       for (const metric of METRICS) {
+        if (metric.key === 'wallClockMs') continue;
         final[metric.key] = Math.max(actual[metric.key], reported[metric.key]);
       }
+      final.wallClockMs = await this.measureWallClockMs(client, reservation);
       const exceeded = isOverLimit(final, limits);
-      const fingerprint = eventFingerprint('reconciled', reported);
-      if (await this.matchingEvent(client, reservation.id, key, fingerprint)) return mapReservation(reservation);
       if (!['reconciliation_required', 'committed'].includes(reservation.state)) {
         throw new ConflictError('Reservation is not awaiting reconciliation');
       }
-      await this.insertEvent(client, reservation, key, 'reconciled', fingerprint, reported, exceeded);
+      await this.insertEvent(client, reservation, key, 'reconciled', fingerprint, final, exceeded);
       const result = await client.query<ReservationRow>(
         'UPDATE agent_execution_reservations SET state = \'committed\', resource_active = FALSE, ' +
-        'finished_at = COALESCE(finished_at, NOW()), updated_at = NOW(), ' +
+        'finished_at = COALESCE(finished_at, clock_timestamp()), reconciliation_event_key = $' +
+        (METRICS.length * 2 + 1) + ', updated_at = NOW(), ' +
         METRICS.map((metric) => metric.actual + ' = $' + (METRICS.indexOf(metric) + 1)).join(', ') + ', ' +
         METRICS.map((metric) => metric.accounted + ' = $' + (METRICS.length + METRICS.indexOf(metric) + 1)).join(', ') +
-        ' WHERE id = $' + (METRICS.length * 2 + 1) + ' RETURNING *',
-        [...dbMetrics(final), ...dbMetrics(final), reservation.id]
+        ' WHERE id = $' + (METRICS.length * 2 + 2) + ' RETURNING *',
+        [...dbMetrics(final), ...dbMetrics(final), key, reservation.id]
       );
       return mapReservation(result.rows[0]!);
     });

@@ -152,6 +152,16 @@ export async function createTestDatabase(migrations?: readonly Migration[]): Pro
     if (sql.includes('to_char(updated_at')) {
       return db.public.many(sql.replace(/to_char\(updated_at AT TIME ZONE 'UTC', '[^']+'\) AS cursor_updated_at/g, 'NULL AS cursor_updated_at'));
     }
+    // PostgreSQL derives quota wall time from clock_timestamp() - started_at; pg-mem
+    // cannot subtract timestamptz values, so memory tests retain the persisted counter.
+    const elapsedProjectionStart = sql.indexOf('CASE WHEN started_at IS NULL THEN actual_wall_clock_ms ELSE');
+    const elapsedProjectionEnd = sql.indexOf('END AS wall_clock_ms', elapsedProjectionStart);
+    if (elapsedProjectionStart >= 0 && elapsedProjectionEnd >= 0) {
+      const elapsedProjectionLength = 'END AS wall_clock_ms'.length;
+      const rewritten = sql.slice(0, elapsedProjectionStart) + 'actual_wall_clock_ms AS wall_clock_ms' +
+        sql.slice(elapsedProjectionEnd + elapsedProjectionLength);
+      return db.public.many(rewritten);
+    }
     // Match the names PostgreSQL generates for migration 005's anonymous CHECKs.
     sql = sql.replace("status VARCHAR(20) NOT NULL CHECK", "status VARCHAR(20) NOT NULL CONSTRAINT chat_generations_status_check CHECK")
       .replace("finish_reason VARCHAR(20) CHECK", "finish_reason VARCHAR(20) CONSTRAINT chat_generations_finish_reason_check CHECK")
@@ -206,6 +216,13 @@ export async function createTestDatabase(migrations?: readonly Migration[]): Pro
     returns: DataType.uuid,
     impure: true,
     implementation: () => crypto.randomUUID(),
+  });
+
+  db.public.registerFunction({
+    name: 'clock_timestamp',
+    returns: DataType.timestamptz,
+    impure: true,
+    implementation: () => new Date(),
   });
 
   db.public.registerFunction({
