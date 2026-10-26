@@ -8,6 +8,8 @@
 
 **Base:** `origin/main` at `6ce98b1b8758f6a429a32316f4ed723220d92646` (merged 17T-33 / PR #41)
 
+**Branch sync:** `origin/main` advanced to `207d78327fd58962dd9acdb4f2cf3048234df0d9` through PR #42 while this branch remained based on `6ce98b1`. GitHub reported PR #43 mergeable and no conflicting paths were present; no rebase/history rewrite was needed or performed.
+
 **Related work:** [17T-39](https://linear.app/17thedev/issue/17T-39) is Done; [17T-49](https://linear.app/17thedev/issue/17T-49), [17T-52](https://linear.app/17thedev/issue/17T-52), and [17T-60](https://linear.app/17thedev/issue/17T-60) were Todo when inspected.
 **Historical exposure evidence:** [PR #37](https://github.com/17thedevv/Giga/pull/37) and its deployment preflight record.
 
@@ -140,7 +142,8 @@ Render service/database metadata was inspected without reading secret values. Th
 | `node --test .agents/scripts/validate-git-workflow.test.mjs` | Pass: **6/6**. |
 | `git diff --check` | Pass. |
 | Frontend lint | Not configured; no lint script exists. |
-| Repository Git workflow validator | To be rerun against the committed PR range before push. |
-| GitHub Actions for this follow-up | Pending push; final SHA and exact run links will be recorded after CI completes. |
+| Repository Git workflow validator | Pass on branch `chore/17t-64-frontend-security-audit`, PR title `chore(web): harden frontend security and privacy`, and committed PR range. |
+| GitHub Frontend CI | Pass: run [#48](https://github.com/17thedevv/Giga/actions/runs/40295634793) on implementation commit `7614d1e788663ec581e3e4f1ae021005957bfff6`; typecheck, build, mandatory bundle scan, and all Vitest tests succeeded. |
+| GitHub Validate Git Workflow | Pass: run [#163](https://github.com/17thedevv/Giga/actions/runs/40295634789) on implementation commit `7614d1e788663ec581e3e4f1ae021005957bfff6`. |
 
-This follow-up was tested locally after a clean `npm ci`. It does not include browser validation, an approved Real API session, or deployed security verification. The production bundle script is mandatory in `.github/workflows/web-ci.yml` after `npm run build`; unit tests exercise its scanner using temporary fixtures and do not depend on pre-existing `dist/` output.
+The final code/test implementation commit for these findings is `7614d1e788663ec581e3e4f1ae021005957bfff6`. This follow-up was tested locally after a clean `npm ci` and verified by both GitHub workflows above. The production bundle script is mandatory in `.github/workflows/web-ci.yml` after `npm run build`; unit tests exercise its scanner using temporary fixtures and do not depend on pre-existing `dist/` output. This does not include browser validation, an approved Real API session, or deployed security verification.
