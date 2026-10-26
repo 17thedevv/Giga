@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { SseStreamParser, type SseEvent } from '../src/lib/api/sse-parser.js';
+import { SseStreamParser, SseValidationError, validateChatStreamEvent, type SseEvent } from '../src/lib/api/sse-parser.js';
 
 describe('SseStreamParser', () => {
   it('parses standard complete SSE events', () => {
@@ -86,5 +86,36 @@ describe('SseStreamParser', () => {
 
     expect(events).toHaveLength(1);
     expect(events[0].event).toBe('ping');
+  });
+
+  it('projects known event fields, redacts provider credentials, and never retains raw payloads in errors', () => {
+    const secret = 'AIzaSyntheticStreamSentinelKey0123456789';
+    const event = validateChatStreamEvent('message.failed', {
+      messageId: 'message-1', generationId: 'generation-1',
+      error: { code: 'PROVIDER_ERROR', message: `Provider rejected ${secret}` },
+      workerLeaseToken: 'internal-only', providerResponse: { reasoning: 'private' },
+    });
+    expect(event).toEqual({
+      event: 'message.failed',
+      data: { messageId: 'message-1', generationId: 'generation-1', error: { code: 'PROVIDER_ERROR', message: 'Provider rejected [redacted credential]' } },
+    });
+    expect(JSON.stringify(event)).not.toContain(secret);
+    expect(JSON.stringify(event)).not.toContain('workerLeaseToken');
+
+    let error: unknown;
+    try {
+      validateChatStreamEvent('message.delta', { messageId: 'message-1', generationId: 'generation-1', text: 42, secret });
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(SseValidationError);
+    expect(error).not.toHaveProperty('rawData');
+    expect((error as Error).message).not.toContain(secret);
+  });
+
+  it('ignores unknown events and rejects malformed JSON payloads without echoing them', () => {
+    expect(validateChatStreamEvent('provider.debug', { apiKey: 'sentinel' })).toBeNull();
+    expect(() => validateChatStreamEvent('message.started', 'malformed-secret-payload'))
+      .toThrowError(/payload must be a JSON object/);
   });
 });

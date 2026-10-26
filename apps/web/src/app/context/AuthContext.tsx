@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import type { User } from '../../lib/api/types.js';
-import { realApiClient, ApiException } from '../../lib/api/client.js';
+import { realApiClient, ApiException, SESSION_EXPIRED_EVENT } from '../../lib/api/client.js';
 import { mockDataAdapter } from '../../lib/api/mock-adapter.js';
 import { useApiMode } from './ApiModeContext.js';
 
@@ -24,6 +24,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [sessionExpired, setSessionExpired] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (mode !== 'real' || typeof window === 'undefined') return;
+    const invalidateSession = () => {
+      setUser(null);
+      setIsLoading(false);
+      setError(null);
+      setSessionExpired(false);
+    };
+    window.addEventListener(SESSION_EXPIRED_EVENT, invalidateSession);
+    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, invalidateSession);
+  }, [mode]);
 
   const checkSession = useCallback(async () => {
     setIsLoading(true);

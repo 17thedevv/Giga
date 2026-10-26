@@ -1,12 +1,7 @@
 import type {
   ChatStreamEvent,
-  MessageStartedEventData,
-  MessageDeltaEventData,
-  MessageCompletedEventData,
-  StreamErrorEventData,
-  MessageFailedEventData,
-  MessageStoppedEventData,
 } from './types.js';
+import { sanitizeUntrustedText } from '../security/untrusted-content.js';
 
 export interface SseEvent<T = unknown> {
   id?: string;
@@ -19,8 +14,7 @@ export type SseEventHandler<T = unknown> = (event: SseEvent<T>) => void;
 export class SseValidationError extends Error {
   constructor(
     message: string,
-    public readonly event: string,
-    public readonly rawData: unknown
+    public readonly event: string
   ) {
     super(message);
     this.name = 'SseValidationError';
@@ -49,73 +43,75 @@ export function validateChatStreamEvent(event: string, data: unknown): ChatStrea
   }
 
   if (!data || typeof data !== 'object') {
-    throw new SseValidationError(
-      `Known event '${event}' payload must be a JSON object`,
-      event,
-      data
-    );
+    throw new SseValidationError(`Known event '${event}' payload must be a JSON object`, event);
   }
 
   const d = data as Record<string, unknown>;
 
   if (typeof d.messageId !== 'string' || typeof d.generationId !== 'string') {
-    throw new SseValidationError(
-      `Known event '${event}' missing required 'messageId' or 'generationId'`,
-      event,
-      data
-    );
+    throw new SseValidationError(`Known event '${event}' missing required 'messageId' or 'generationId'`, event);
   }
 
   switch (event) {
     case 'message.started':
       if (typeof d.conversationId !== 'string') {
-        throw new SseValidationError(
-          `'message.started' event missing 'conversationId'`,
-          event,
-          data
-        );
+        throw new SseValidationError(`'message.started' event missing 'conversationId'`, event);
       }
-      return { event: 'message.started', data: d as unknown as MessageStartedEventData };
+      return { event: 'message.started', data: { messageId: d.messageId as string, generationId: d.generationId as string, conversationId: d.conversationId as string } };
 
     case 'message.delta':
       if (typeof d.text !== 'string') {
-        throw new SseValidationError(
-          `'message.delta' event missing required string 'text'`,
-          event,
-          data
-        );
+        throw new SseValidationError(`'message.delta' event missing required string 'text'`, event);
       }
-      return { event: 'message.delta', data: d as unknown as MessageDeltaEventData };
+      return { event: 'message.delta', data: { messageId: d.messageId as string, generationId: d.generationId as string, text: sanitizeUntrustedText(d.text as string) } };
 
     case 'message.completed':
-      return { event: 'message.completed', data: d as unknown as MessageCompletedEventData };
+      if ((d.createdAt !== undefined && typeof d.createdAt !== 'string') || (d.finishReason !== undefined && typeof d.finishReason !== 'string')) {
+        throw new SseValidationError(`'message.completed' event contains invalid optional fields`, event);
+      }
+      return {
+        event: 'message.completed',
+        data: {
+          messageId: d.messageId as string,
+          generationId: d.generationId as string,
+          ...(typeof d.createdAt === 'string' ? { createdAt: d.createdAt } : {}),
+          ...(typeof d.finishReason === 'string' ? { finishReason: d.finishReason } : {}),
+        },
+      };
 
     case 'stream.error':
       if (!d.error || typeof d.error !== 'object') {
-        throw new SseValidationError(
-          `'stream.error' event missing 'error' object`,
-          event,
-          data
-        );
+        throw new SseValidationError(`'stream.error' event missing 'error' object`, event);
       }
-      return { event: 'stream.error', data: d as unknown as StreamErrorEventData };
+      return { event: 'stream.error', data: { messageId: d.messageId as string, generationId: d.generationId as string, error: safeStreamError(d.error, event) } };
 
     case 'message.failed':
       if (!d.error || typeof d.error !== 'object') {
-        throw new SseValidationError(
-          `'message.failed' event missing 'error' object`,
-          event,
-          data
-        );
+        throw new SseValidationError(`'message.failed' event missing 'error' object`, event);
       }
-      return { event: 'message.failed', data: d as unknown as MessageFailedEventData };
+      return { event: 'message.failed', data: { messageId: d.messageId as string, generationId: d.generationId as string, error: safeStreamError(d.error, event) } };
 
     case 'message.stopped':
-      return { event: 'message.stopped', data: d as unknown as MessageStoppedEventData };
+      if (d.finishReason !== undefined && typeof d.finishReason !== 'string') {
+        throw new SseValidationError(`'message.stopped' event contains invalid finishReason`, event);
+      }
+      return { event: 'message.stopped', data: { messageId: d.messageId as string, generationId: d.generationId as string, ...(typeof d.finishReason === 'string' ? { finishReason: d.finishReason } : {}) } };
 
     default:
       return null;
   }
+}
+
+function safeStreamError(value: unknown, event: string): { readonly code: string; readonly message: string } {
+  if (!value || typeof value !== 'object') throw new SseValidationError('Stream error payload must be an object', event);
+  const error = value as Record<string, unknown>;
+  if (typeof error.code !== 'string' || typeof error.message !== 'string') {
+    throw new SseValidationError('Stream error payload has invalid fields', event);
+  }
+  return {
+    code: /^[A-Za-z0-9_.-]{1,80}$/.test(error.code) ? error.code : 'STREAM_ERROR',
+    message: sanitizeUntrustedText(error.message).slice(0, 500),
+  };
 }
 
 /**

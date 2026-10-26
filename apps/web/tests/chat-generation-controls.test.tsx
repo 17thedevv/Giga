@@ -755,7 +755,10 @@ describe('latest-turn generation controls', () => {
 
 describe('implemented HTTP contract', () => {
   it('cancel has zero body bytes; variants are owner-cookie GET; retry consumes stopped SSE', async () => {
-    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(JSON.stringify({ generation: {} }), { headers: { 'content-type': 'application/json' } }))
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(JSON.stringify({ generation: {
+      id: 'g2', conversationId: 'c/1', userMessageId: 'u/1', modelId: 'giga-chat-default',
+      status: 'streaming', partialContent: '', createdAt: '2026-10-01T00:00:00.000Z',
+    } }), { headers: { 'content-type': 'application/json' } }))
       .mockResolvedValueOnce(new Response(JSON.stringify(variants), { headers: { 'content-type': 'application/json' } }))
       .mockResolvedValueOnce(new Response('event: message.started\ndata: {"messageId":"g2","generationId":"g2","conversationId":"c1"}\n\nevent: message.stopped\ndata: {"messageId":"g2","generationId":"g2","finishReason":"cancelled"}\n\n', { headers: { 'content-type': 'text/event-stream' } }));
     const client = new RealApiClient();

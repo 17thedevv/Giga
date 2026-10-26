@@ -1141,6 +1141,24 @@ describe('Workspace-First GigaAgent UX (17T-40)', () => {
       expect(screen.queryByText('Run not found in workspace session.')).toBeNull();
     });
 
+    it('redacts credential-shaped values before demo workspace data is persisted or rehydrated', () => {
+      const workspace = workspaceFixtureStore.createWorkspace('Credential privacy test');
+      const sentinel = 'AIzaSyntheticStorageSentinelKey0123456789';
+      const run = workspaceFixtureStore.createDemoRun({
+        workspaceId: workspace.id,
+        task: `Review key ${sentinel} and DATABASE_URL=postgres://demo:synthetic@db.example/giga`,
+        mode: 'plan',
+      });
+      const persisted = localStorage.getItem(DEMO_STORAGE_KEY_RUNS) ?? '';
+      expect(persisted).not.toContain(sentinel);
+      expect(persisted).not.toContain('postgres://');
+
+      workspaceFixtureStore.rehydrateFromStorage();
+      const restored = workspaceFixtureStore.getRun(run.id);
+      expect(restored?.task).toContain('[redacted credential]');
+      expect(restored?.task).toContain('[redacted connection URL]');
+    });
+
     it('renders persisted workspaces and runs in AgentLauncherView after browser refresh', async () => {
       const customWs = workspaceFixtureStore.createWorkspace('Mobile App Prototype');
       const customRun = workspaceFixtureStore.createDemoRun({

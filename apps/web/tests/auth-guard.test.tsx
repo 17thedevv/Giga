@@ -1,11 +1,57 @@
-import { describe, it, expect } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { describe, it, expect, vi } from 'vitest';
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { ApiModeProvider } from '../src/app/context/ApiModeContext.js';
 import { AuthProvider, useAuth } from '../src/app/context/AuthContext.js';
 import { RouterProvider } from '../src/app/router.js';
 import { LoginView } from '../src/features/auth/LoginView.js';
+import { AuthGuard } from '../src/features/auth/AuthGuard.js';
+import { realApiClient } from '../src/lib/api/client.js';
+import { useRouter } from '../src/app/router.js';
+
+const RouteProbe: React.FC = () => <span data-testid="route-probe">{useRouter().path}</span>;
+const ParamsProbe: React.FC = () => <span data-testid="params-probe">{JSON.stringify(useRouter().params)}</span>;
 
 describe('Auth & Routing Integration', () => {
+  it('treats malformed percent-encoded route parameters as unmatched instead of throwing', () => {
+    render(<RouterProvider initialPath="/chat/%E0%A4%A"><ParamsProbe /></RouterProvider>);
+    expect(screen.getByTestId('params-probe').textContent).toBe('{}');
+  });
+
+  it('clears cached protected UI and routes to login after a real API returns 401', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.includes('/auth/me')) {
+        return Promise.resolve(new Response(JSON.stringify({ user: { id: 'user-1', email: 'private@example.test', displayName: 'Private' } }), {
+          status: 200, headers: { 'content-type': 'application/json' },
+        }));
+      }
+      return Promise.resolve(new Response(JSON.stringify({ error: { code: 'UNAUTHORIZED', message: 'Session expired' } }), {
+        status: 401, headers: { 'content-type': 'application/json' },
+      }));
+    }));
+
+    render(
+      <ApiModeProvider initialMode="real">
+        <AuthProvider>
+          <RouterProvider initialPath="/settings">
+            <AuthGuard><div>protected cached content</div></AuthGuard>
+            <RouteProbe />
+          </RouterProvider>
+        </AuthProvider>
+      </ApiModeProvider>
+    );
+
+    await waitFor(() => expect(screen.getByText('protected cached content')).toBeDefined());
+    await act(async () => {
+      await expect(realApiClient.getConversation('private-id')).rejects.toMatchObject({ status: 401 });
+    });
+    await waitFor(() => {
+      expect(screen.queryByText('protected cached content')).toBeNull();
+      expect(screen.getByTestId('route-probe').textContent).toBe('/login');
+    });
+    vi.unstubAllGlobals();
+  });
+
   it('renders login view with demo accounts notice and form inputs', () => {
     render(
       <ApiModeProvider>

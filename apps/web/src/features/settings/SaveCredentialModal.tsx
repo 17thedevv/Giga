@@ -4,6 +4,7 @@ import { Button } from '../../components/Button.js';
 import { Alert } from '../../components/Alert.js';
 import { KeyIcon, EyeIcon, EyeOffIcon, ShieldIcon } from '../../components/Icons.js';
 import type { ProviderCredential } from '../../lib/api/types.js';
+import { sanitizeUntrustedText } from '../../lib/security/untrusted-content.js';
 
 interface SaveCredentialModalProps {
   isOpen: boolean;
@@ -76,7 +77,9 @@ export const SaveCredentialModal: React.FC<SaveCredentialModalProps> = ({
       onClose();
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Failed to save credential';
-      setError(message);
+      setApiKey('');
+      setShowKey(false);
+      setError(sanitizeUntrustedText(message, [trimmed]));
     } finally {
       setIsSubmitting(false);
     }

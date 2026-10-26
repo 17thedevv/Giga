@@ -5,6 +5,7 @@ import type {
   AgentStatus,
   VerifiedCheck,
 } from '../../lib/api/agent-contract.js';
+import { sanitizeUntrustedValue } from '../../lib/security/untrusted-content.js';
 
 export interface PlanStep {
   readonly id: string;
@@ -961,7 +962,7 @@ export class WorkspaceFixtureStore {
     try {
       const raw = storage.getItem(DEMO_STORAGE_KEY_WORKSPACES);
       if (!raw) return [];
-      const parsed = JSON.parse(raw);
+      const parsed = sanitizeUntrustedValue(JSON.parse(raw));
       if (!Array.isArray(parsed)) return [];
       return parsed
         .filter(isValidWorkspace)
@@ -978,7 +979,7 @@ export class WorkspaceFixtureStore {
     try {
       const raw = storage.getItem(DEMO_STORAGE_KEY_RUNS);
       if (!raw) return [];
-      const parsed = JSON.parse(raw);
+      const parsed = sanitizeUntrustedValue(JSON.parse(raw));
       if (!Array.isArray(parsed)) return [];
       return parsed
         .filter(isValidRunDetail)
@@ -1000,7 +1001,7 @@ export class WorkspaceFixtureStore {
       const userWorkspaces = this.workspaces
         .filter((w) => !INITIAL_WORKSPACE_IDS.has(w.id))
         .slice(0, MAX_USER_DEMO_WORKSPACES);
-      storage.setItem(DEMO_STORAGE_KEY_WORKSPACES, JSON.stringify(userWorkspaces));
+      storage.setItem(DEMO_STORAGE_KEY_WORKSPACES, JSON.stringify(sanitizeUntrustedValue(userWorkspaces)));
     } catch {
       // safe fallback
     }
@@ -1017,7 +1018,7 @@ export class WorkspaceFixtureStore {
           ...r,
           isDemo: true as const,
         }));
-      storage.setItem(DEMO_STORAGE_KEY_RUNS, JSON.stringify(userRuns));
+      storage.setItem(DEMO_STORAGE_KEY_RUNS, JSON.stringify(sanitizeUntrustedValue(userRuns)));
     } catch {
       // safe fallback
     }
