@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { newDb, DataType } from 'pg-mem';
 import type pg from 'pg';
-import { runMigrations, getAppliedMigrationVersions } from '../src/db/migrate.js';
+import { MIGRATIONS, runMigrations, getAppliedMigrationVersions } from '../src/db/migrate.js';
 import { redactDatabaseUrl, pingDatabase } from '../src/db/client.js';
 
 describe('Database Migrations and Utilities', () => {
@@ -37,8 +37,10 @@ describe('Database Migrations and Utilities', () => {
     const pool = new adapter.Pool() as unknown as pg.Pool;
 
     try {
-      // First run: applies all pending migrations
-      const firstRun = await runMigrations(pool);
+      // pg-mem cannot model migration 015's PostgreSQL role/privilege contract;
+      // its full forward/idempotency coverage runs in the isolated PostgreSQL suite.
+      const memoryMigrations = MIGRATIONS.filter((migration) => migration.version !== 15);
+      const firstRun = await runMigrations(pool, memoryMigrations);
       assert.strictEqual(firstRun.length, 13);
       assert.strictEqual(firstRun[0], '001_initial_users_and_sessions');
       assert.strictEqual(firstRun[1], '002_conversations_and_messages');
@@ -68,9 +70,10 @@ describe('Database Migrations and Utilities', () => {
       assert.ok(versions.has(11));
       assert.ok(versions.has(12));
       assert.ok(versions.has(13));
+      assert.equal(versions.has(15), false);
 
       // Second run: idempotent, applies 0 migrations
-      const secondRun = await runMigrations(pool);
+      const secondRun = await runMigrations(pool, memoryMigrations);
       assert.strictEqual(secondRun.length, 0);
 
       // Verify ping probe works

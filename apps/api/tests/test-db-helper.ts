@@ -2,12 +2,21 @@ import crypto from 'node:crypto';
 import type pg from 'pg';
 import { newDb, DataType } from 'pg-mem';
 import { createDatabasePool, redactDatabaseUrl } from '../src/db/client.js';
-import { runMigrations, type Migration } from '../src/db/migrate.js';
+import { MIGRATIONS, runMigrations, type Migration } from '../src/db/migrate.js';
 
 export interface TestDbInstance {
   readonly pool: pg.Pool;
   readonly cleanup: () => Promise<void>;
   readonly isMemory: boolean;
+}
+
+export function migrationsSupportedByTestDatabase(
+  isMemory: boolean,
+  migrations: readonly Migration[] = MIGRATIONS
+): readonly Migration[] {
+  // pg-mem cannot model PostgreSQL roles, column privileges, SECURITY DEFINER
+  // procedures or the DO blocks in migration 015.
+  return isMemory ? migrations.filter((migration) => migration.version !== 15) : migrations;
 }
 
 export interface TestDbSafetyCheckResult {
@@ -152,6 +161,16 @@ export async function createTestDatabase(migrations?: readonly Migration[]): Pro
     if (sql.includes('to_char(updated_at')) {
       return db.public.many(sql.replace(/to_char\(updated_at AT TIME ZONE 'UTC', '[^']+'\) AS cursor_updated_at/g, 'NULL AS cursor_updated_at'));
     }
+    // PostgreSQL derives quota wall time from clock_timestamp() - started_at; pg-mem
+    // cannot subtract timestamptz values, so memory tests retain the persisted counter.
+    const elapsedProjectionStart = sql.indexOf('CASE WHEN started_at IS NULL THEN actual_wall_clock_ms ELSE');
+    const elapsedProjectionEnd = sql.indexOf('END AS wall_clock_ms', elapsedProjectionStart);
+    if (elapsedProjectionStart >= 0 && elapsedProjectionEnd >= 0) {
+      const elapsedProjectionLength = 'END AS wall_clock_ms'.length;
+      const rewritten = sql.slice(0, elapsedProjectionStart) + 'actual_wall_clock_ms AS wall_clock_ms' +
+        sql.slice(elapsedProjectionEnd + elapsedProjectionLength);
+      return db.public.many(rewritten);
+    }
     // Match the names PostgreSQL generates for migration 005's anonymous CHECKs.
     sql = sql.replace("status VARCHAR(20) NOT NULL CHECK", "status VARCHAR(20) NOT NULL CONSTRAINT chat_generations_status_check CHECK")
       .replace("finish_reason VARCHAR(20) CHECK", "finish_reason VARCHAR(20) CONSTRAINT chat_generations_finish_reason_check CHECK")
@@ -209,6 +228,13 @@ export async function createTestDatabase(migrations?: readonly Migration[]): Pro
   });
 
   db.public.registerFunction({
+    name: 'clock_timestamp',
+    returns: DataType.timestamptz,
+    impure: true,
+    implementation: () => new Date(),
+  });
+
+  db.public.registerFunction({
     name: 'length',
     args: [DataType.text],
     returns: DataType.integer,
@@ -232,10 +258,13 @@ export async function createTestDatabase(migrations?: readonly Migration[]): Pro
   const adapter = db.adapters.createPg();
   const pool = new adapter.Pool() as unknown as pg.Pool;
 
-  await runMigrations(pool, migrations);
+  const memoryMigrations = migrationsSupportedByTestDatabase(true, migrations ?? MIGRATIONS);
+  await runMigrations(pool, memoryMigrations);
 
   const cleanup = async (): Promise<void> => {
     try {
+      await pool.query('DELETE FROM agent_execution_usage_events;');
+      await pool.query('DELETE FROM agent_execution_reservations;');
       await pool.query('DELETE FROM agent_messages;');
       await pool.query('DELETE FROM agent_run_steps;');
       await pool.query('DELETE FROM agent_run_events;');

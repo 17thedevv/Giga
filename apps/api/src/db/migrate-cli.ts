@@ -4,14 +4,15 @@ import { loadConfig } from '../app/config.js';
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  console.log(`[giga-db] Connecting to database: ${redactDatabaseUrl(config.databaseUrl)}`);
+  const migrationUrl = config.migrationDatabaseUrl ?? config.databaseUrl;
+  console.log(`[giga-db] Connecting to database: ${redactDatabaseUrl(migrationUrl)}`);
 
-  if (!config.databaseUrl) {
-    console.error('[giga-db] Error: DATABASE_URL environment variable is not configured.');
+  if (!migrationUrl) {
+    console.error('[giga-db] Error: DATABASE_URL or MIGRATION_DATABASE_URL environment variable is not configured.');
     process.exit(1);
   }
 
-  const pool = createDatabasePool({ connectionString: config.databaseUrl });
+  const pool = createDatabasePool({ connectionString: migrationUrl });
 
   try {
     const applied = await runMigrations(pool);

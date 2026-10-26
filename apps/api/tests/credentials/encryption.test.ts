@@ -42,7 +42,13 @@ describe('Chat credential encryption', () => {
       assert.throws(() => loadConfig({ NODE_ENV: 'test', CREDENTIAL_ENCRYPTION_KEY: bad }));
     }
     assert.equal(loadConfig({ NODE_ENV: 'test' }).credentialEncryption, undefined);
-    const production = { NODE_ENV: 'production', DATABASE_URL: 'postgres://localhost/config_test', ALLOWED_ORIGINS: 'https://example.com', CHAT_ENABLED: 'false' };
+    const production = {
+      NODE_ENV: 'production',
+      DATABASE_URL: 'postgres://api_user@localhost/config_test',
+      MIGRATION_DATABASE_URL: 'postgres://migration_user@localhost/config_test',
+      ALLOWED_ORIGINS: 'https://example.com',
+      CHAT_ENABLED: 'false',
+    };
     assert.equal(loadConfig(production).credentialEncryption, undefined);
     assert.throws(() => loadConfig({ ...production, CREDENTIAL_ENCRYPTION_KEY: 'malformed' }), { message: 'Invalid credential encryption configuration' });
   });

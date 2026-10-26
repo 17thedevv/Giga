@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import type pg from 'pg';
 import { createApp } from '../../src/app/create-app.js';
-import { createTestDatabase, type TestDbInstance } from '../test-db-helper.js';
+import { createTestDatabase, migrationsSupportedByTestDatabase, type TestDbInstance } from '../test-db-helper.js';
 import { MIGRATIONS, runMigrations } from '../../src/db/migrate.js';
 import { SessionRepository } from '../../src/db/repositories/session-repository.js';
 import { UserRepository } from '../../src/db/repositories/user-repository.js';
@@ -745,7 +745,7 @@ describe('Persisted Chat Runtime', { timeout: 30000 }, () => {
     const sql = await readFile(new URL('../../src/db/migrations/005_chat_generations.sql', import.meta.url), 'utf8');
     assert.equal(MIGRATIONS.find((m) => m.version === 5)!.sql.trim(), sql.replace(/\r\n/g, '\n').trim());
     await db.pool.query(sql);
-    assert.deepEqual(await runMigrations(db.pool), []);
+    assert.deepEqual(await runMigrations(db.pool, migrationsSupportedByTestDatabase(db.isMemory)), []);
   });
 
   it('database prevents a second active generation independently of service admission', async (t) => {
