@@ -105,3 +105,39 @@ Web typecheck was not run because no frontend source or shared DTO package chang
 - Runtime and cloud execution remain disabled; no live provider allocation or cloud provisioning was performed.
 - GitHub Actions on the implementation commit: `Validate Git Workflow` run 144 passed; `Backend CI` run 80 passed its typecheck, build, and unit/integration suite against real PostgreSQL.
 - The GitHub reviewer request for Linear's assigned reviewer was rejected because that user is not a repository collaborator. The connected Linear diff creator was also the assigned reviewer, so no self-review request is left active; an independent review request remains outstanding.
+
+## Review follow-up — 2026-10-26
+
+Validated implementation commit: `37001c45ce6d671763643366b6d48b565f96a1c6` on `feat/17t-72-agent-runtime-quotas`.
+
+### Finding 1: reconciliation fencing
+
+`reconcileAfterQuiescent()` no longer accepts a point-in-time boolean. Its lifecycle adapter must implement `fenceAttemptAndVerify()` with an exact-attempt durable fence and must wait for allocation/runtime operations to settle. The quota transaction then locks the `agent_runs` row before the reservation and refuses release while the same attempt still has a live run lease. `active` reservations are no longer reconcilable. Failure to establish the lifecycle fence or a still-live lease leaves `resource_active = true`.
+
+The PostgreSQL regression test pauses the lifecycle fence, races the quota allocation-start gate, and verifies that reconciliation rejects and another writable run remains blocked. This checks the quota/run-lease boundary; it is not an end-to-end sandbox-provider race test.
+
+**The production lifecycle fence is not implemented on this branch, so Finding 1 is not fully closed.** Inspection of the separate `feat/17t-71-agent-sandbox-sessions` checkout at `c98eb1d4d1f673aea8a92729592c71e2aff6ad73` found a durable session registry and an allocation-intent transaction that locks `agent_runs`. It did not provide a durable proof that an external allocation request has settled. In particular, `SandboxCleanupReconciler` marks an `allocating` session `failed` when its provider ID is absent; that state does not rule out a late provider response. The 17T-72 branch also has no concrete `QuotaQuiescenceVerifier` implementation or 17T-71 migration 014.
+
+Required dependency before this can be treated as solved: 17T-71 must provide a durable exact-attempt fence serialized with allocation-intent creation, track an allocation RPC until it definitively settles (an expired intent or missing provider ID is ambiguous), and expose cleanup completion only after that operation is settled and any resulting sandbox is destroyed. 17T-73 must use the same fence for provider/tool operations and drain already-started work. Until those pieces are integrated, a missing or unavailable verifier must fail closed; runtime execution stays disabled. The existing 17T-71 checkout's six unrelated modified web files were left untouched.
+
+### Finding 2: zero-usage reconciliation
+
+Post-allocation reconciliation now preserves `committed` for both nonzero and zero final usage and only releases the writable slot by setting `resource_active = false`. Migration 015 requires writable `active` and `reconciliation_required` rows to retain their slot, disallows `reconciliation_required -> released`, and prevents any inactive reservation from becoming active again. Pre-allocation refunds remain `released` and terminal.
+
+Real PostgreSQL regressions cover a committed zero-usage attempt, an ambiguous zero-usage attempt, repeated reconciliation, accurate zero accounting, late usage rejection, direct invalid transitions, and slot availability. Migration 015 upgrade-from-013, registry/file parity, idempotent rerun, and later independent migration 014 ordering tests also pass.
+
+### Follow-up validation
+
+| Check | Command / environment | Result |
+|---|---|---|
+| API typecheck | `npm run typecheck --prefix apps/api` | Exit 0 |
+| API production build | `npm run build --prefix apps/api` | Exit 0 |
+| Full API suite | `NODE_ENV=test`, `TEST_DATABASE_URL` unset; `npm test --prefix apps/api` | Exit 0; 562 tests, 531 passed, 31 PostgreSQL-specific skips, 0 failed |
+| Isolated PostgreSQL quota and migration suite | `NODE_ENV=test`, disposable PostgreSQL 18.4 `giga_quota_review_test`; `npx --prefix apps/api tsx --test --test-concurrency=1 apps/api/tests/agent/agent-quotas.test.ts apps/api/tests/agent/agent-migration.test.ts` | Exit 0; 22 passed, 0 skipped, 0 failed |
+| Git Workflow validator tests | `node --test .agents/scripts/validate-git-workflow.test.mjs` | Exit 0; 6 passed, 0 skipped, 0 failed |
+| Whitespace check | `git diff --check` | Exit 0 |
+| GitHub Actions on implementation commit `37001c45ce6d671763643366b6d48b565f96a1c6` | Backend CI run 82; Validate Git Workflow run 147 | Both completed successfully |
+
+The first full-suite run was parallel to typecheck/build and hit one unrelated chat persistence ordering assertion when messages shared a millisecond timestamp. Rerunning the full suite by itself completed with 531 passed, 31 expected PostgreSQL-specific skips, and 0 failed.
+
+The GitHub Actions above ran on the implementation commit; the evidence-only follow-up commit is checked separately on the PR. No production database, cloud service, sandbox provider, or runtime was enabled; no merge or deployment was performed.
