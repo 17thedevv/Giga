@@ -1,6 +1,6 @@
 import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { createTestDatabase, type TestDbInstance } from '../test-db-helper.js';
+import { createTestDatabase, migrationsSupportedByTestDatabase, type TestDbInstance } from '../test-db-helper.js';
 import { UserRepository } from '../../src/db/repositories/user-repository.js';
 import { ConversationRepository } from '../../src/db/repositories/conversation-repository.js';
 import { MessageRepository } from '../../src/db/repositories/message-repository.js';
@@ -53,7 +53,7 @@ describe('Conversations & Messages PostgreSQL Persistence', () => {
     assert.ok(versions.has(2), 'Migration 002 applied');
     assert.ok(versions.has(3), 'Migration 003 applied');
 
-    const secondRun = await runMigrations(db.pool);
+    const secondRun = await runMigrations(db.pool, migrationsSupportedByTestDatabase(db.isMemory));
     assert.strictEqual(secondRun.length, 0, 'Migration rerun must be idempotent');
   });
 

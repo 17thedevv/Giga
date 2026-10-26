@@ -18,7 +18,7 @@
 
 This change adds a server-controlled quota policy, durable PostgreSQL reservations, measured usage accounting, stable quota errors, and migration 015. It does not enable cloud execution or alter the disabled public `POST /runs` behavior. The API v0.2 document remains a draft candidate.
 
-At preflight, 17T-71's migration 014 and sandbox-session work were still unmerged from `main`. Migration 015 does not depend on migration 014 and its upgrade test applies a later 014 after 015. 17T-71 must supply a verifier that can confirm the exact owner/workspace/run/attempt is quiescent before reconciliation releases an allocated writable slot.
+At preflight, 17T-71's migration 014 and sandbox-session work were still unmerged from `main`. Migration 015 does not depend on migration 014; its ordering test uses a synthetic later-version-014 migration probe because the actual 17T-71 migration is absent from this branch. 17T-71 must supply a verifier that can confirm the exact owner/workspace/run/attempt is quiescent before reconciliation releases an allocated writable slot.
 
 17T-73 must call `reserveExecutionAttempt` before queue dispatch or runtime allocation, call `markAllocationStarted` immediately before allocation, submit idempotent measured usage through `recordUsage`, and use `markOutcomeUnknown` for ambiguous provider results. It must commit measured usage and release resource capacity only after the 17T-71 lifecycle verifier confirms quiescence. Cancellation and retry orchestration remain disabled until this integration is implemented and tested. No end-to-end quota enforcement claim is made for an execution path that does not yet call this service.
 
@@ -71,7 +71,7 @@ The usage audit stores numeric measurements and sanitized event metadata only. D
 
 ## Schema and API behavior
 
-Migration `015_agent_execution_quotas` adds `agent_execution_reservations` and `agent_execution_usage_events`, owner/workspace/run/attempt foreign keys, uniqueness, state/measurement constraints, budget and active-capacity indexes, and immutable-audit guards. It also allows the three quota error codes in the existing internal Agent error constraints. The migration runner sorts versions and skips applied entries; migration tests verify upgrade from 013, idempotent rerun, and late arrival of independent migration 014.
+Migration `015_agent_execution_quotas` adds `agent_execution_reservations` and `agent_execution_usage_events`, owner/workspace/run/attempt foreign keys, uniqueness, state/measurement constraints, budget and active-capacity indexes, and immutable-audit guards. It also allows the three quota error codes in the existing internal Agent error constraints. The migration runner sorts versions and skips applied entries; migration tests verify upgrade from 013, idempotent rerun, and late-arrival ordering with a synthetic migration numbered 014. The actual 17T-71 migration 014 is not present on this branch.
 
 Quota errors use the existing common error DTO:
 
@@ -124,7 +124,7 @@ Required dependency before this can be treated as solved: 17T-71 must provide a 
 
 Post-allocation reconciliation now preserves `committed` for both nonzero and zero final usage and only releases the writable slot by setting `resource_active = false`. Migration 015 requires writable `active` and `reconciliation_required` rows to retain their slot, disallows `reconciliation_required -> released`, and prevents any inactive reservation from becoming active again. Pre-allocation refunds remain `released` and terminal.
 
-Real PostgreSQL regressions cover a committed zero-usage attempt, an ambiguous zero-usage attempt, repeated reconciliation, accurate zero accounting, late usage rejection, direct invalid transitions, and slot availability. Migration 015 upgrade-from-013, registry/file parity, idempotent rerun, and later independent migration 014 ordering tests also pass.
+Real PostgreSQL regressions cover a committed zero-usage attempt, an ambiguous zero-usage attempt, repeated reconciliation, accurate zero accounting, late usage rejection, direct invalid transitions, and slot availability. Migration 015 upgrade-from-013, registry/file parity, idempotent rerun, and a synthetic later-version-014 ordering probe also pass; the actual lifecycle migration 014 remains an upstream dependency.
 
 ### Follow-up validation
 
@@ -167,9 +167,33 @@ Migration 015 enforces the finalization boundary: the marker is only accepted wi
 | API typecheck | `npm run typecheck --prefix apps/api` | Exit 0 |
 | API production build | `npm run build --prefix apps/api` | Exit 0 |
 | Full API suite | `NODE_ENV=test`, `TEST_DATABASE_URL` unset; `npm test --prefix apps/api` | Exit 0; 565 tests, 531 passed, 34 PostgreSQL-specific skips, 0 failed |
-| Isolated PostgreSQL quota and migration suite | PostgreSQL 18.4, disposable `giga_17t72_followup2_test`; `npx --prefix apps/api tsx --test --test-concurrency=1 apps/api/tests/agent/agent-quotas.test.ts apps/api/tests/agent/agent-migration.test.ts` | Exit 0; 25 passed, 0 skipped, 0 failed. Includes populated upgrade from 013, idempotent rerun, later independent 014 application, wall-clock regressions and finalization guards. |
+| Isolated PostgreSQL quota and migration suite | PostgreSQL 18.4, disposable `giga_17t72_followup2_test`; `npx --prefix apps/api tsx --test --test-concurrency=1 apps/api/tests/agent/agent-quotas.test.ts apps/api/tests/agent/agent-migration.test.ts` | Exit 0; 25 passed, 0 skipped, 0 failed. Includes populated upgrade from 013, idempotent rerun, synthetic later-version-014 ordering probe, wall-clock regressions and finalization guards. |
 | Git Workflow validator | `node --test .agents/scripts/validate-git-workflow.test.mjs` | Exit 0; 6 passed, 0 skipped, 0 failed |
 | Whitespace check | `git diff --check` | Exit 0 |
 | GitHub Actions on implementation commit `1b3b7368a4ec1a7790859ab234712ac894f347db` | [Backend CI run 84](https://github.com/17thedevv/Giga/actions/runs/40281947311); [Validate Git Workflow run 150](https://github.com/17thedevv/Giga/actions/runs/40281947253) | Both completed successfully on this exact SHA. |
 
 The in-memory adapter cannot model PostgreSQL `timestamptz` subtraction. It retains prior wall-clock counters for broad unit runs; elapsed-time correctness and state-transition triggers are verified in the isolated PostgreSQL suite. The 17T-71 production lifecycle fence and 17T-73 runtime integration remain unresolved. There is still no end-to-end provider-allocation/cleanup/quota-release race proof. Keep the PR Draft and runtime disabled; do not mark this work merge-ready.
+
+## Review follow-up — 2026-10-26 (database finalization privilege boundary)
+
+This follow-up addresses the independent review finding that a caller with broad direct quota-table write access could insert a fabricated `reconciled` event before setting the reservation marker and releasing its writable slot. The original API and migration connections shared one login, so a trigger alone could not identify the trusted service path.
+
+Migration 015 now creates separate `NOLOGIN` roles for quota-table ownership, normal API runtime access, and reconciliation finalization. Quota tables and the finalizer function are owned by `giga_agent_quota_owner`. The API role can write ordinary reservation and usage columns but cannot insert a reconciliation event or update `reconciliation_event_key`; the finalizer role can execute the function but cannot directly insert events or mutate the marker. `finalize_agent_execution_reconciliation(...)` is a `SECURITY DEFINER` operation with a fixed search path. It locks the reservation, stages final actual/accounted measurements while retaining the slot, inserts the matching audit event, and releases the slot plus records its key atomically. Database triggers also require audit measurements to match both final actual and accounted values. A migration login is separate from the API login in production, and startup checks that the API identity is a non-superuser member of `giga_api_runtime` and not a quota owner/finalizer.
+
+The production finalizer login is intentionally not configured or wired by this change. The runbook records that it must be a distinct identity and must only be connected after 17T-71 provides the durable exact-attempt lifecycle fence and 17T-73 integrates it. Migration credentials must not be used as a runtime finalizer. `reconcileAfterQuiescent()` still requires a verifier, locks/rechecks the durable run lease after fencing, and fails closed without the verifier. This closes the direct-event/marker bypass at the PostgreSQL privilege boundary; it does **not** close the outstanding provider-allocation, late-response, sandbox-destruction, or in-flight-operation lifecycle blocker.
+
+The isolated PostgreSQL regression creates API-runtime, quota-owner and quota-finalizer role sessions and reproduces the bypass attempts. It proves that runtime and finalizer SQL cannot insert a forged reconciled event or release capacity directly; quota-owner SQL cannot insert mismatched audit measurements or release the slot without a matching event; and the legitimate service path atomically finalizes, preserves exact-request idempotency, rejects changed keys/measurements and blocks later accounting mutation, late events and capacity reactivation. Existing PostgreSQL coverage also verifies zero-usage committed and ambiguous outcomes release the slot only after the service's verifier succeeds, keep `committed` accounting state, and remain terminal on repeated reconciliation. Migration tests assert role ownership and effective privileges, migration-source/registry parity, upgrade from 013, idempotent rerun and independent later application of 014.
+
+### Follow-up validation
+
+| Check | Command / environment | Result |
+|---|---|---|
+| API typecheck | `npm run typecheck --prefix apps/api` | Exit 0 |
+| API production build | `npm run build --prefix apps/api` | Exit 0 |
+| Full API suite | `NODE_ENV=test`, `TEST_DATABASE_URL` unset; `npm test --prefix apps/api` | Exit 0; 544 tests, 518 passed, 26 skipped, 0 failed (43.4 s). PostgreSQL-dependent cases are separately exercised below. |
+| Full API suite on isolated PostgreSQL | PostgreSQL 18.4, fresh disposable `giga_17t72_api_full_postgres_test`; `npm test --prefix apps/api` | Exit 0; 565 passed, 0 skipped, 0 failed (96.7 s). This run includes all persistence, migration, concurrency and quota role-boundary tests against PostgreSQL. |
+| Isolated PostgreSQL quota and migration suite | PostgreSQL 18.4, fresh disposable `giga_17t72_finalizer_role2_test`; `npx --prefix apps/api tsx --test --test-concurrency=1 apps/api/tests/agent/agent-quotas.test.ts apps/api/tests/agent/agent-migration.test.ts` | Exit 0; 25 passed, 0 skipped, 0 failed. Covers database role boundary and forged/mismatched event regression, legitimate finalization, zero-usage paths, lease/concurrency checks, migration upgrade/rerun and the synthetic later-version-014 ordering probe. |
+| Git Workflow validator | `node --test .agents/scripts/validate-git-workflow.test.mjs` | Exit 0; 6 passed, 0 skipped, 0 failed |
+| Whitespace check | `git diff --check` | Exit 0 |
+
+This local evidence record does not claim hosted CI success; see PR #42 for checks on the pushed head. No cloud resource, production database, sandbox provider, or runtime was enabled; no merge or deployment was performed. Keep PR #42 Draft. The 17T-71/17T-73 lifecycle dependency and independent review remain outstanding.

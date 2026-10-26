@@ -134,10 +134,14 @@ it('012 upgrades populated current 011 preserving all existing agent and product
   }
 });
 
-it('015 upgrades populated current 013 independently of 014 and reruns idempotently', async () => {
+it('015 upgrades populated current 013 independently of 014 and reruns idempotently', async (t) => {
   const base13 = MIGRATIONS.filter((migration) => migration.version <= 13);
   const quotaMigration = MIGRATIONS.filter((migration) => migration.version === 15);
   const initial = await createTestDatabase(base13);
+  if (initial.isMemory) {
+    await initial.pool.end();
+    return t.skip('Migration 015 role and privilege invariants require real PostgreSQL');
+  }
   let pool = initial.pool;
   const schema = `agent_upgrade_015_${randomUUID().replaceAll('-', '')}`;
   if (!initial.isMemory) {
@@ -159,6 +163,46 @@ it('015 upgrades populated current 013 independently of 014 and reruns idempoten
     assert.equal((await pool.query('SELECT id FROM agent_workspaces WHERE id = $1', [workspace.id])).rows.length, 1);
     assert.equal(Number((await pool.query('SELECT COUNT(*)::int AS count FROM agent_execution_reservations')).rows[0]!.count), 0);
     assert.equal(Number((await pool.query('SELECT COUNT(*)::int AS count FROM agent_execution_usage_events')).rows[0]!.count), 0);
+    const privilegeBoundary = await pool.query<{
+      reservation_owner: string;
+      event_owner: string;
+      runtime_can_select: boolean;
+      runtime_can_insert_event: boolean;
+      runtime_can_insert_owner_id: boolean;
+      runtime_can_update_finalization: boolean;
+      finalizer_owner: string;
+      finalizer_is_security_definer: boolean;
+      runtime_can_execute_finalizer: boolean;
+      finalizer_role_can_execute: boolean;
+      finalizer_role_can_insert_event: boolean;
+      finalizer_role_can_update_marker: boolean;
+    }>(
+      'SELECT ' +
+      "(SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = 'agent_execution_reservations'::regclass) AS reservation_owner, " +
+      "(SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = 'agent_execution_usage_events'::regclass) AS event_owner, " +
+      "has_table_privilege('giga_api_runtime', 'agent_execution_reservations', 'SELECT') AS runtime_can_select, " +
+      "has_table_privilege('giga_api_runtime', 'agent_execution_usage_events', 'INSERT') AS runtime_can_insert_event, " +
+      "has_column_privilege('giga_api_runtime', 'agent_execution_reservations', 'owner_id', 'INSERT') AS runtime_can_insert_owner_id, " +
+      "has_column_privilege('giga_api_runtime', 'agent_execution_reservations', 'reconciliation_event_key', 'UPDATE') AS runtime_can_update_finalization, " +
+      "(SELECT pg_get_userbyid(proowner) FROM pg_proc WHERE oid = to_regprocedure('finalize_agent_execution_reconciliation(uuid,character varying,character,bigint,bigint,bigint,bigint,bigint,bigint,bigint,bigint,boolean)')) AS finalizer_owner, " +
+      "(SELECT prosecdef FROM pg_proc WHERE oid = to_regprocedure('finalize_agent_execution_reconciliation(uuid,character varying,character,bigint,bigint,bigint,bigint,bigint,bigint,bigint,bigint,boolean)')) AS finalizer_is_security_definer, " +
+      "has_function_privilege('giga_api_runtime', to_regprocedure('finalize_agent_execution_reconciliation(uuid,character varying,character,bigint,bigint,bigint,bigint,bigint,bigint,bigint,bigint,boolean)'), 'EXECUTE') AS runtime_can_execute_finalizer, " +
+      "has_function_privilege('giga_agent_quota_finalizer', to_regprocedure('finalize_agent_execution_reconciliation(uuid,character varying,character,bigint,bigint,bigint,bigint,bigint,bigint,bigint,bigint,boolean)'), 'EXECUTE') AS finalizer_role_can_execute, " +
+      "has_table_privilege('giga_agent_quota_finalizer', 'agent_execution_usage_events', 'INSERT') AS finalizer_role_can_insert_event, " +
+      "has_column_privilege('giga_agent_quota_finalizer', 'agent_execution_reservations', 'reconciliation_event_key', 'UPDATE') AS finalizer_role_can_update_marker"
+    );
+    assert.equal(privilegeBoundary.rows[0]?.reservation_owner, 'giga_agent_quota_owner');
+    assert.equal(privilegeBoundary.rows[0]?.event_owner, 'giga_agent_quota_owner');
+    assert.equal(privilegeBoundary.rows[0]?.runtime_can_select, true);
+    assert.equal(privilegeBoundary.rows[0]?.runtime_can_insert_event, false);
+    assert.equal(privilegeBoundary.rows[0]?.runtime_can_insert_owner_id, true);
+    assert.equal(privilegeBoundary.rows[0]?.runtime_can_update_finalization, false);
+    assert.equal(privilegeBoundary.rows[0]?.finalizer_owner, 'giga_agent_quota_owner');
+    assert.equal(privilegeBoundary.rows[0]?.finalizer_is_security_definer, true);
+    assert.equal(privilegeBoundary.rows[0]?.runtime_can_execute_finalizer, false);
+    assert.equal(privilegeBoundary.rows[0]?.finalizer_role_can_execute, true);
+    assert.equal(privilegeBoundary.rows[0]?.finalizer_role_can_insert_event, false);
+    assert.equal(privilegeBoundary.rows[0]?.finalizer_role_can_update_marker, false);
     assert.deepEqual(await runMigrations(pool, [...base13, ...quotaMigration]), []);
 
     const sql = await readFile(new URL('../../src/db/migrations/015_agent_execution_quotas.sql', import.meta.url), 'utf8');

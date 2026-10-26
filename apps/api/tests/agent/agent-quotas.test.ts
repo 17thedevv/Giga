@@ -2,6 +2,7 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { createTestDatabase, type TestDbInstance } from '../test-db-helper.js';
+import { createDatabasePool } from '../../src/db/client.js';
 import { AgentRepository } from '../../src/modules/agent/repository.js';
 import {
   AgentQuotaError,
@@ -11,7 +12,9 @@ import {
 } from '../../src/modules/agent/quota-service.js';
 import { DEFAULT_AGENT_QUOTA_POLICY, type AgentQuotaPolicy } from '../../src/modules/agent/quota-policy.js';
 
-describe('GigaAgent durable quota reservations', () => {
+describe('GigaAgent durable quota reservations', {
+  skip: process.env.TEST_DATABASE_URL ? false : 'Agent quota persistence and privilege invariants require isolated PostgreSQL',
+}, () => {
   let db: TestDbInstance;
   let repository: AgentRepository;
   let ownerId: string;
@@ -489,6 +492,34 @@ describe('GigaAgent durable quota reservations', () => {
     if (db.isMemory) return t.skip('Requires PostgreSQL transaction and trigger enforcement');
     const policy = customPolicy({ execute: { wallClockMs: 25 } });
     const service = new AgentQuotaService(db.pool, policy, verifier(true));
+    const runtimePool = createDatabasePool({
+      connectionString: process.env.TEST_DATABASE_URL,
+      options: '-c role=giga_api_runtime',
+    });
+    const quotaOwnerPool = createDatabasePool({
+      connectionString: process.env.TEST_DATABASE_URL,
+      options: '-c role=giga_agent_quota_owner',
+    });
+    const quotaFinalizerPool = createDatabasePool({
+      connectionString: process.env.TEST_DATABASE_URL,
+      options: '-c role=giga_agent_quota_finalizer',
+    });
+    t.after(async () => {
+      await Promise.all([runtimePool.end(), quotaOwnerPool.end(), quotaFinalizerPool.end()]);
+    });
+    const runtimeIdentity = await runtimePool.query<{
+      current_user: string;
+      is_superuser: boolean;
+      is_quota_owner: boolean;
+    }>(
+      'SELECT current_user, role.rolsuper AS is_superuser, ' +
+      "pg_has_role(current_user, 'giga_agent_quota_owner', 'MEMBER') AS is_quota_owner " +
+      'FROM pg_roles AS role WHERE role.rolname = current_user'
+    );
+    assert.equal(runtimeIdentity.rows[0]?.current_user, 'giga_api_runtime');
+    assert.equal(runtimeIdentity.rows[0]?.is_superuser, false);
+    assert.equal(runtimeIdentity.rows[0]?.is_quota_owner, false);
+
     const run = await createClaimedRun();
     await service.reserveExecutionAttempt(run.reference, run.leaseToken);
     await service.markAllocationStarted(run.reference, run.leaseToken);
@@ -502,7 +533,78 @@ describe('GigaAgent durable quota reservations', () => {
     await repository.releaseLease(ownerId, run.runId, run.leaseToken);
 
     const finalUsage = { providerRequests: 2, artifactBytes: 4 };
-    const first = await service.reconcileAfterQuiescent(run.reference, finalUsage, 'cleanup:finalized');
+    const fabricatedFingerprint = createHash('sha256').update('fabricated-reconciliation').digest('hex');
+    await assert.rejects(
+      runtimePool.query(
+        'INSERT INTO agent_execution_usage_events ' +
+        '(reservation_id, owner_id, workspace_id, run_id, attempt_number, event_key, event_kind, request_fingerprint) ' +
+        'SELECT id, owner_id, workspace_id, run_id, attempt_number, $2, \'reconciled\', $3 ' +
+        'FROM agent_execution_reservations WHERE run_id = $1',
+        [run.runId, 'cleanup:forged-runtime', fabricatedFingerprint]
+      ),
+      /controlled finalization operation/i
+    );
+    await assert.rejects(
+      quotaFinalizerPool.query(
+        'INSERT INTO agent_execution_usage_events ' +
+        '(reservation_id, owner_id, workspace_id, run_id, attempt_number, event_key, event_kind, request_fingerprint) ' +
+        'SELECT id, owner_id, workspace_id, run_id, attempt_number, $2, \'reconciled\', $3 ' +
+        'FROM agent_execution_reservations WHERE run_id = $1',
+        [run.runId, 'cleanup:forged-finalizer', fabricatedFingerprint]
+      ),
+      /permission denied.*agent_execution_usage_events/i
+    );
+    await assert.rejects(
+      runtimePool.query(
+        "UPDATE agent_execution_reservations SET state = 'committed', resource_active = FALSE, " +
+        "finished_at = clock_timestamp(), reconciliation_event_key = 'cleanup:forged-runtime' WHERE run_id = $1",
+        [run.runId]
+      ),
+      /permission denied.*agent_execution_reservations/i
+    );
+    await assert.rejects(
+      quotaFinalizerPool.query(
+        "UPDATE agent_execution_reservations SET resource_active = FALSE, " +
+        "reconciliation_event_key = 'cleanup:forged-finalizer' WHERE run_id = $1",
+        [run.runId]
+      ),
+      /permission denied.*agent_execution_reservations/i
+    );
+
+    // Exercise the table owner's direct SQL path: even this role cannot stage a
+    // mismatched event or release the slot without the controlled finalizer.
+    await quotaOwnerPool.query(
+      "UPDATE agent_execution_reservations SET state = 'committed', finished_at = clock_timestamp(), " +
+      'actual_provider_requests = 2, accounted_provider_requests = 2 WHERE run_id = $1',
+      [run.runId]
+    );
+    await assert.rejects(
+      quotaOwnerPool.query(
+        'INSERT INTO agent_execution_usage_events ' +
+        '(reservation_id, owner_id, workspace_id, run_id, attempt_number, event_key, event_kind, request_fingerprint, provider_requests) ' +
+        'SELECT id, owner_id, workspace_id, run_id, attempt_number, $2, \'reconciled\', $3, 1 ' +
+        'FROM agent_execution_reservations WHERE run_id = $1',
+        [run.runId, 'cleanup:mismatched-owner', fabricatedFingerprint]
+      ),
+      /measurements do not match reservation accounting/i
+    );
+    await assert.rejects(
+      quotaOwnerPool.query(
+        "UPDATE agent_execution_reservations SET resource_active = FALSE, " +
+        "reconciliation_event_key = 'cleanup:forged-owner' WHERE run_id = $1",
+        [run.runId]
+      ),
+      /matching audit event and accounting/i
+    );
+    const held = await db.pool.query<{ resource_active: boolean; reconciliation_event_key: string | null }>(
+      'SELECT resource_active, reconciliation_event_key FROM agent_execution_reservations WHERE run_id = $1',
+      [run.runId]
+    );
+    assert.equal(held.rows[0]?.resource_active, true);
+    assert.equal(held.rows[0]?.reconciliation_event_key, null);
+
+    const runtimeService = new AgentQuotaService(runtimePool, policy, verifier(true), quotaFinalizerPool);
+    const first = await runtimeService.reconcileAfterQuiescent(run.reference, finalUsage, 'cleanup:finalized');
     assert.equal(first.resourceActive, false);
     assert.ok(first.actual.wallClockMs >= policy.execute.wallClockMs);
     assert.equal(first.actual.providerRequests, 2);
@@ -521,15 +623,15 @@ describe('GigaAgent durable quota reservations', () => {
       'FROM agent_execution_reservations r WHERE r.run_id = $1',
       [run.runId]
     );
-    const duplicate = await service.reconcileAfterQuiescent(run.reference, finalUsage, 'cleanup:finalized');
+    const duplicate = await runtimeService.reconcileAfterQuiescent(run.reference, finalUsage, 'cleanup:finalized');
     assert.deepEqual(duplicate.actual, first.actual);
     assert.deepEqual(duplicate.accounted, first.accounted);
     await assert.rejects(
-      service.reconcileAfterQuiescent(run.reference, finalUsage, 'cleanup:new-key-after-finalization'),
+      runtimeService.reconcileAfterQuiescent(run.reference, finalUsage, 'cleanup:new-key-after-finalization'),
       /already finalized/i
     );
     await assert.rejects(
-      service.reconcileAfterQuiescent(run.reference, { providerRequests: 3, artifactBytes: 4 }, 'cleanup:finalized'),
+      runtimeService.reconcileAfterQuiescent(run.reference, { providerRequests: 3, artifactBytes: 4 }, 'cleanup:finalized'),
       /different measurements/i
     );
 
@@ -545,14 +647,14 @@ describe('GigaAgent durable quota reservations', () => {
       db.pool.query('UPDATE agent_execution_reservations SET resource_active = TRUE WHERE run_id = $1', [run.runId]),
       /cannot be reactivated/i
     );
-    const fingerprint = createHash('sha256').update('post-finalization').digest('hex');
+    const postFinalizationFingerprint = createHash('sha256').update('post-finalization').digest('hex');
     await assert.rejects(
       db.pool.query(
         'INSERT INTO agent_execution_usage_events ' +
         '(reservation_id, owner_id, workspace_id, run_id, attempt_number, event_key, event_kind, request_fingerprint) ' +
         'SELECT id, owner_id, workspace_id, run_id, attempt_number, $2, \'reconciled\', $3 ' +
         'FROM agent_execution_reservations WHERE run_id = $1',
-        [run.runId, 'cleanup:post-finalization-direct', fingerprint]
+        [run.runId, 'cleanup:post-finalization-direct', postFinalizationFingerprint]
       ),
       /cannot accept usage events/i
     );

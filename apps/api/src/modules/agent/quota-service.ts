@@ -274,17 +274,26 @@ function isOverLimit(actual: MetricValues, limits: MetricValues): boolean {
 
 export class AgentQuotaService {
   readonly policy: AgentQuotaPolicy;
+  private readonly finalizationPool: pg.Pool;
 
   constructor(
     private readonly pool: pg.Pool,
     policy: AgentQuotaPolicy = DEFAULT_AGENT_QUOTA_POLICY,
-    private readonly quiescenceVerifier?: QuotaQuiescenceVerifier
+    private readonly quiescenceVerifier?: QuotaQuiescenceVerifier,
+    finalizationPool?: pg.Pool
   ) {
     this.policy = validateAgentQuotaPolicy(policy);
+    // Production wiring must supply a separate connection for the non-login quota
+    // owner role. A runtime-role pool cannot execute the finalization operation.
+    this.finalizationPool = finalizationPool ?? pool;
   }
 
   private async transaction<T>(fn: (client: pg.PoolClient) => Promise<T>): Promise<T> {
-    const client = await this.pool.connect();
+    return this.transactionOn(this.pool, fn);
+  }
+
+  private async transactionOn<T>(pool: pg.Pool, fn: (client: pg.PoolClient) => Promise<T>): Promise<T> {
+    const client = await pool.connect();
     try {
       await client.query('BEGIN');
       try {
@@ -730,7 +739,7 @@ export class AgentQuotaService {
       throw new ConflictError('Sandbox reconciliation could not establish a durable attempt fence');
     }
 
-    return this.transaction(async (client) => {
+    return this.transactionOn(this.finalizationPool, async (client) => {
       // Allocation admission and quota mutation both lock this run row. Rechecking it after the
       // lifecycle fence closes the gap between the verifier's external cleanup and this commit.
       const runResult = await client.query<RunQuotaRow>(
@@ -768,17 +777,12 @@ export class AgentQuotaService {
       if (!['reconciliation_required', 'committed'].includes(reservation.state)) {
         throw new ConflictError('Reservation is not awaiting reconciliation');
       }
-      await this.insertEvent(client, reservation, key, 'reconciled', fingerprint, final, exceeded);
-      const result = await client.query<ReservationRow>(
-        'UPDATE agent_execution_reservations SET state = \'committed\', resource_active = FALSE, ' +
-        'finished_at = COALESCE(finished_at, clock_timestamp()), reconciliation_event_key = $' +
-        (METRICS.length * 2 + 1) + ', updated_at = NOW(), ' +
-        METRICS.map((metric) => metric.actual + ' = $' + (METRICS.indexOf(metric) + 1)).join(', ') + ', ' +
-        METRICS.map((metric) => metric.accounted + ' = $' + (METRICS.length + METRICS.indexOf(metric) + 1)).join(', ') +
-        ' WHERE id = $' + (METRICS.length * 2 + 2) + ' RETURNING *',
-        [...dbMetrics(final), ...dbMetrics(final), key, reservation.id]
+      const values = dbMetrics(final);
+      await client.query(
+        'SELECT finalize_agent_execution_reconciliation($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)',
+        [reservation.id, key, fingerprint, ...values, exceeded]
       );
-      return mapReservation(result.rows[0]!);
+      return mapReservation(await this.getOwnedReservation(client, reference));
     });
   }
 

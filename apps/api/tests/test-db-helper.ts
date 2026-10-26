@@ -2,12 +2,21 @@ import crypto from 'node:crypto';
 import type pg from 'pg';
 import { newDb, DataType } from 'pg-mem';
 import { createDatabasePool, redactDatabaseUrl } from '../src/db/client.js';
-import { runMigrations, type Migration } from '../src/db/migrate.js';
+import { MIGRATIONS, runMigrations, type Migration } from '../src/db/migrate.js';
 
 export interface TestDbInstance {
   readonly pool: pg.Pool;
   readonly cleanup: () => Promise<void>;
   readonly isMemory: boolean;
+}
+
+export function migrationsSupportedByTestDatabase(
+  isMemory: boolean,
+  migrations: readonly Migration[] = MIGRATIONS
+): readonly Migration[] {
+  // pg-mem cannot model PostgreSQL roles, column privileges, SECURITY DEFINER
+  // procedures or the DO blocks in migration 015.
+  return isMemory ? migrations.filter((migration) => migration.version !== 15) : migrations;
 }
 
 export interface TestDbSafetyCheckResult {
@@ -249,7 +258,8 @@ export async function createTestDatabase(migrations?: readonly Migration[]): Pro
   const adapter = db.adapters.createPg();
   const pool = new adapter.Pool() as unknown as pg.Pool;
 
-  await runMigrations(pool, migrations);
+  const memoryMigrations = migrationsSupportedByTestDatabase(true, migrations ?? MIGRATIONS);
+  await runMigrations(pool, memoryMigrations);
 
   const cleanup = async (): Promise<void> => {
     try {

@@ -1,6 +1,33 @@
 -- Migration 015: durable, owner-scoped Agent execution quota reservations.
 -- Version 014 is reserved for the independent sandbox-session lifecycle change.
 
+-- The application login is not an owner of quota tables. Migrations run with a
+-- separate privileged MIGRATION_DATABASE_URL; its login becomes a member of the
+-- NOLOGIN owner role. Grant giga_api_runtime to the API login and reserve
+-- giga_agent_quota_finalizer for the post-fence finalization connection.
+DO $$
+DECLARE
+    migration_login NAME := current_user;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'giga_agent_quota_owner') THEN
+        EXECUTE 'CREATE ROLE giga_agent_quota_owner NOLOGIN NOINHERIT';
+    ELSIF (SELECT rolcanlogin FROM pg_roles WHERE rolname = 'giga_agent_quota_owner') THEN
+        RAISE EXCEPTION 'giga_agent_quota_owner must be a NOLOGIN role';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'giga_api_runtime') THEN
+        EXECUTE 'CREATE ROLE giga_api_runtime NOLOGIN NOINHERIT';
+    ELSIF (SELECT rolcanlogin FROM pg_roles WHERE rolname = 'giga_api_runtime') THEN
+        RAISE EXCEPTION 'giga_api_runtime must be a NOLOGIN role';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'giga_agent_quota_finalizer') THEN
+        EXECUTE 'CREATE ROLE giga_agent_quota_finalizer NOLOGIN NOINHERIT';
+    ELSIF (SELECT rolcanlogin FROM pg_roles WHERE rolname = 'giga_agent_quota_finalizer') THEN
+        RAISE EXCEPTION 'giga_agent_quota_finalizer must be a NOLOGIN role';
+    END IF;
+    EXECUTE format('GRANT giga_agent_quota_owner TO %I', migration_login);
+END;
+$$;
+
 ALTER TABLE agent_runs DROP CONSTRAINT IF EXISTS chk_agent_runs_error_code;
 ALTER TABLE agent_runs ADD CONSTRAINT chk_agent_runs_error_code CHECK (
     error_code IS NULL OR error_code IN (
@@ -139,14 +166,44 @@ CREATE INDEX idx_agent_quota_events_owner
 
 CREATE OR REPLACE FUNCTION guard_agent_execution_usage_event_insert() RETURNS TRIGGER AS $$
 DECLARE
-    finalized_event_key VARCHAR(128);
+    reservation_row agent_execution_reservations%ROWTYPE;
 BEGIN
-    SELECT reconciliation_event_key INTO finalized_event_key
+    SELECT * INTO reservation_row
     FROM agent_execution_reservations
     WHERE id = NEW.reservation_id
     FOR UPDATE;
-    IF finalized_event_key IS NOT NULL THEN
+    IF reservation_row.reconciliation_event_key IS NOT NULL THEN
         RAISE EXCEPTION 'Finalized Agent quota reservation cannot accept usage events';
+    END IF;
+    IF NEW.event_kind = 'reconciled' THEN
+        IF current_user <> 'giga_agent_quota_owner' THEN
+            RAISE EXCEPTION 'Reconciliation audit events require the controlled finalization operation';
+        END IF;
+        IF reservation_row.state <> 'committed' OR NOT reservation_row.resource_active OR
+           reservation_row.finished_at IS NULL THEN
+            RAISE EXCEPTION 'Reconciliation audit event does not match a held committed reservation';
+        END IF;
+        IF ROW(
+            NEW.sandbox_runtime_ms, NEW.wall_clock_ms, NEW.tool_calls, NEW.provider_requests,
+            NEW.command_output_bytes, NEW.artifact_bytes, NEW.workspace_disk_bytes, NEW.workspace_file_count
+        ) IS DISTINCT FROM ROW(
+            reservation_row.actual_sandbox_runtime_ms, reservation_row.actual_wall_clock_ms,
+            reservation_row.actual_tool_calls, reservation_row.actual_provider_requests,
+            reservation_row.actual_command_output_bytes, reservation_row.actual_artifact_bytes,
+            reservation_row.actual_workspace_disk_bytes, reservation_row.actual_workspace_file_count
+        ) OR ROW(
+            reservation_row.actual_sandbox_runtime_ms, reservation_row.actual_wall_clock_ms,
+            reservation_row.actual_tool_calls, reservation_row.actual_provider_requests,
+            reservation_row.actual_command_output_bytes, reservation_row.actual_artifact_bytes,
+            reservation_row.actual_workspace_disk_bytes, reservation_row.actual_workspace_file_count
+        ) IS DISTINCT FROM ROW(
+            reservation_row.accounted_sandbox_runtime_ms, reservation_row.accounted_wall_clock_ms,
+            reservation_row.accounted_tool_calls, reservation_row.accounted_provider_requests,
+            reservation_row.accounted_command_output_bytes, reservation_row.accounted_artifact_bytes,
+            reservation_row.accounted_workspace_disk_bytes, reservation_row.accounted_workspace_file_count
+        ) THEN
+            RAISE EXCEPTION 'Reconciliation audit measurements do not match reservation accounting';
+        END IF;
     END IF;
     RETURN NEW;
 END;
@@ -216,6 +273,9 @@ BEGIN
         RAISE EXCEPTION 'Committed Agent quota capacity release requires reconciliation finalization';
     END IF;
     IF OLD.reconciliation_event_key IS NULL AND NEW.reconciliation_event_key IS NOT NULL THEN
+        IF current_user <> 'giga_agent_quota_owner' THEN
+            RAISE EXCEPTION 'Agent quota reconciliation finalization requires the controlled database operation';
+        END IF;
         IF NEW.state <> 'committed' OR NEW.resource_active OR NEW.finished_at IS NULL THEN
             RAISE EXCEPTION 'Agent quota reconciliation finalization has an invalid state';
         END IF;
@@ -223,9 +283,26 @@ BEGIN
             SELECT 1 FROM agent_execution_usage_events
             WHERE reservation_id = NEW.id AND event_key = NEW.reconciliation_event_key
               AND event_kind = 'reconciled'
+              AND sandbox_runtime_ms = NEW.actual_sandbox_runtime_ms
+              AND wall_clock_ms = NEW.actual_wall_clock_ms
+              AND tool_calls = NEW.actual_tool_calls
+              AND provider_requests = NEW.actual_provider_requests
+              AND command_output_bytes = NEW.actual_command_output_bytes
+              AND artifact_bytes = NEW.actual_artifact_bytes
+              AND workspace_disk_bytes = NEW.actual_workspace_disk_bytes
+              AND workspace_file_count = NEW.actual_workspace_file_count
+              AND ROW(
+                  NEW.actual_sandbox_runtime_ms, NEW.actual_wall_clock_ms, NEW.actual_tool_calls,
+                  NEW.actual_provider_requests, NEW.actual_command_output_bytes, NEW.actual_artifact_bytes,
+                  NEW.actual_workspace_disk_bytes, NEW.actual_workspace_file_count
+              ) IS NOT DISTINCT FROM ROW(
+                  NEW.accounted_sandbox_runtime_ms, NEW.accounted_wall_clock_ms, NEW.accounted_tool_calls,
+                  NEW.accounted_provider_requests, NEW.accounted_command_output_bytes, NEW.accounted_artifact_bytes,
+                  NEW.accounted_workspace_disk_bytes, NEW.accounted_workspace_file_count
+              )
         ) INTO has_reconciliation_event;
         IF NOT has_reconciliation_event THEN
-            RAISE EXCEPTION 'Agent quota reconciliation finalization requires its audit event';
+            RAISE EXCEPTION 'Agent quota reconciliation finalization requires a matching audit event and accounting';
         END IF;
     END IF;
     IF OLD.state = 'reserved' AND NEW.state NOT IN ('reserved', 'active', 'released', 'reconciliation_required', 'committed') THEN
@@ -271,3 +348,177 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER trg_agent_execution_usage_event_update
     BEFORE UPDATE OR DELETE ON agent_execution_usage_events
     FOR EACH ROW EXECUTE FUNCTION guard_agent_execution_usage_event_update();
+
+-- This SECURITY DEFINER operation is the only application path that can create
+-- a reconciled event and release committed writable capacity. It stages the
+-- final accounting, inserts its matching audit event, and releases the slot in
+-- one transaction. The API role cannot write the marker or reconciled events.
+DO $finalizer$
+DECLARE
+    quota_schema TEXT := current_schema();
+BEGIN
+    EXECUTE format($function$
+        CREATE OR REPLACE FUNCTION %I.finalize_agent_execution_reconciliation(
+            p_reservation_id UUID,
+            p_event_key VARCHAR,
+            p_request_fingerprint CHAR(64),
+            p_sandbox_runtime_ms BIGINT,
+            p_wall_clock_ms BIGINT,
+            p_tool_calls BIGINT,
+            p_provider_requests BIGINT,
+            p_command_output_bytes BIGINT,
+            p_artifact_bytes BIGINT,
+            p_workspace_disk_bytes BIGINT,
+            p_workspace_file_count BIGINT,
+            p_limit_exceeded BOOLEAN
+        ) RETURNS VOID
+        LANGUAGE plpgsql
+        SECURITY DEFINER
+        SET search_path = pg_catalog, %I
+        AS $body$
+        DECLARE
+            reservation_row agent_execution_reservations%%ROWTYPE;
+            existing_event agent_execution_usage_events%%ROWTYPE;
+        BEGIN
+            IF p_event_key IS NULL OR char_length(p_event_key) NOT BETWEEN 1 AND 128 OR
+               p_request_fingerprint IS NULL OR p_request_fingerprint::TEXT !~ '^[0-9a-f]{64}$' THEN
+                RAISE EXCEPTION 'Invalid Agent quota reconciliation identity';
+            END IF;
+            SELECT * INTO reservation_row
+            FROM agent_execution_reservations
+            WHERE id = p_reservation_id
+            FOR UPDATE;
+            IF NOT FOUND THEN
+                RAISE EXCEPTION 'Agent quota reservation does not exist';
+            END IF;
+
+            IF reservation_row.reconciliation_event_key IS NOT NULL THEN
+                SELECT * INTO existing_event
+                FROM agent_execution_usage_events
+                WHERE reservation_id = p_reservation_id
+                  AND event_key = reservation_row.reconciliation_event_key;
+                IF reservation_row.reconciliation_event_key = p_event_key AND
+                   existing_event.event_kind = 'reconciled' AND
+                   existing_event.request_fingerprint = p_request_fingerprint AND
+                   ROW(
+                       existing_event.sandbox_runtime_ms, existing_event.wall_clock_ms,
+                       existing_event.tool_calls, existing_event.provider_requests,
+                       existing_event.command_output_bytes, existing_event.artifact_bytes,
+                       existing_event.workspace_disk_bytes, existing_event.workspace_file_count,
+                       existing_event.limit_exceeded
+                   ) IS NOT DISTINCT FROM ROW(
+                       p_sandbox_runtime_ms, p_wall_clock_ms, p_tool_calls, p_provider_requests,
+                       p_command_output_bytes, p_artifact_bytes, p_workspace_disk_bytes,
+                       p_workspace_file_count, p_limit_exceeded
+                   ) AND ROW(
+                       reservation_row.actual_sandbox_runtime_ms, reservation_row.actual_wall_clock_ms,
+                       reservation_row.actual_tool_calls, reservation_row.actual_provider_requests,
+                       reservation_row.actual_command_output_bytes, reservation_row.actual_artifact_bytes,
+                       reservation_row.actual_workspace_disk_bytes, reservation_row.actual_workspace_file_count
+                   ) IS NOT DISTINCT FROM ROW(
+                       p_sandbox_runtime_ms, p_wall_clock_ms, p_tool_calls, p_provider_requests,
+                       p_command_output_bytes, p_artifact_bytes, p_workspace_disk_bytes, p_workspace_file_count
+                   ) AND ROW(
+                       reservation_row.accounted_sandbox_runtime_ms, reservation_row.accounted_wall_clock_ms,
+                       reservation_row.accounted_tool_calls, reservation_row.accounted_provider_requests,
+                       reservation_row.accounted_command_output_bytes, reservation_row.accounted_artifact_bytes,
+                       reservation_row.accounted_workspace_disk_bytes, reservation_row.accounted_workspace_file_count
+                   ) IS NOT DISTINCT FROM ROW(
+                       p_sandbox_runtime_ms, p_wall_clock_ms, p_tool_calls, p_provider_requests,
+                       p_command_output_bytes, p_artifact_bytes, p_workspace_disk_bytes, p_workspace_file_count
+                   ) THEN
+                    RETURN;
+                END IF;
+                RAISE EXCEPTION 'Agent quota reconciliation is already finalized with another request';
+            END IF;
+
+            IF reservation_row.state NOT IN ('reconciliation_required', 'committed') OR
+               NOT reservation_row.resource_active THEN
+                RAISE EXCEPTION 'Agent quota reservation is not held for reconciliation';
+            END IF;
+
+            UPDATE agent_execution_reservations SET
+                state = 'committed',
+                finished_at = COALESCE(finished_at, clock_timestamp()),
+                actual_sandbox_runtime_ms = p_sandbox_runtime_ms,
+                actual_wall_clock_ms = p_wall_clock_ms,
+                actual_tool_calls = p_tool_calls,
+                actual_provider_requests = p_provider_requests,
+                actual_command_output_bytes = p_command_output_bytes,
+                actual_artifact_bytes = p_artifact_bytes,
+                actual_workspace_disk_bytes = p_workspace_disk_bytes,
+                actual_workspace_file_count = p_workspace_file_count,
+                accounted_sandbox_runtime_ms = p_sandbox_runtime_ms,
+                accounted_wall_clock_ms = p_wall_clock_ms,
+                accounted_tool_calls = p_tool_calls,
+                accounted_provider_requests = p_provider_requests,
+                accounted_command_output_bytes = p_command_output_bytes,
+                accounted_artifact_bytes = p_artifact_bytes,
+                accounted_workspace_disk_bytes = p_workspace_disk_bytes,
+                accounted_workspace_file_count = p_workspace_file_count
+            WHERE id = p_reservation_id;
+
+            INSERT INTO agent_execution_usage_events (
+                reservation_id, owner_id, workspace_id, run_id, attempt_number,
+                event_key, event_kind, request_fingerprint,
+                sandbox_runtime_ms, wall_clock_ms, tool_calls, provider_requests,
+                command_output_bytes, artifact_bytes, workspace_disk_bytes, workspace_file_count,
+                limit_exceeded
+            ) VALUES (
+                reservation_row.id, reservation_row.owner_id, reservation_row.workspace_id,
+                reservation_row.run_id, reservation_row.attempt_number,
+                p_event_key, 'reconciled', p_request_fingerprint,
+                p_sandbox_runtime_ms, p_wall_clock_ms, p_tool_calls, p_provider_requests,
+                p_command_output_bytes, p_artifact_bytes, p_workspace_disk_bytes, p_workspace_file_count,
+                p_limit_exceeded
+            );
+
+            UPDATE agent_execution_reservations SET
+                resource_active = FALSE,
+                reconciliation_event_key = p_event_key
+            WHERE id = p_reservation_id;
+        END;
+        $body$
+    $function$, quota_schema, quota_schema);
+END;
+$finalizer$;
+
+-- Establish the actual privilege boundary. The application group retains the
+-- API's pre-existing table access, then receives only the quota columns and
+-- operations needed by AgentQuotaService. It cannot insert reconciliation
+-- events or update reconciliation_event_key.
+DO $quota_privileges$
+DECLARE
+    quota_schema TEXT := current_schema();
+    migration_login NAME := current_user;
+BEGIN
+    EXECUTE format('GRANT USAGE, CREATE ON SCHEMA %I TO giga_agent_quota_owner', quota_schema);
+    EXECUTE format('GRANT USAGE ON SCHEMA %I TO giga_api_runtime', quota_schema);
+    EXECUTE format('GRANT SELECT ON %I.agent_runs TO giga_agent_quota_owner', quota_schema);
+    EXECUTE format('GRANT UPDATE (updated_at) ON %I.agent_runs TO giga_agent_quota_owner', quota_schema);
+
+    EXECUTE format('ALTER TABLE %I.agent_execution_reservations OWNER TO giga_agent_quota_owner', quota_schema);
+    EXECUTE format('ALTER TABLE %I.agent_execution_usage_events OWNER TO giga_agent_quota_owner', quota_schema);
+    EXECUTE format('ALTER FUNCTION %I.finalize_agent_execution_reconciliation(uuid, character varying, character, bigint, bigint, bigint, bigint, bigint, bigint, bigint, bigint, boolean) OWNER TO giga_agent_quota_owner', quota_schema);
+
+    EXECUTE format('GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA %I TO giga_api_runtime', quota_schema);
+    EXECUTE format('GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA %I TO giga_api_runtime', quota_schema);
+    EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT ALL PRIVILEGES ON TABLES TO giga_api_runtime', migration_login, quota_schema);
+    EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT ALL PRIVILEGES ON SEQUENCES TO giga_api_runtime', migration_login, quota_schema);
+
+    EXECUTE format('REVOKE ALL PRIVILEGES ON %I.agent_execution_reservations FROM giga_api_runtime', quota_schema);
+    EXECUTE format('REVOKE ALL PRIVILEGES ON %I.agent_execution_usage_events FROM giga_api_runtime', quota_schema);
+    EXECUTE format('GRANT SELECT ON %I.agent_execution_reservations TO giga_api_runtime', quota_schema);
+    EXECUTE format('GRANT SELECT ON %I.agent_execution_usage_events TO giga_api_runtime', quota_schema);
+    EXECUTE format('GRANT INSERT (owner_id, workspace_id, run_id, attempt_number, mode, state, resource_active, writable, policy_version, lease_token_hash, max_sandbox_runtime_ms, max_wall_clock_ms, max_tool_calls, max_provider_requests, max_command_output_bytes, max_artifact_bytes, max_workspace_disk_bytes, max_workspace_file_count, accounted_sandbox_runtime_ms, accounted_wall_clock_ms, accounted_tool_calls, accounted_provider_requests, accounted_command_output_bytes, accounted_artifact_bytes, accounted_workspace_disk_bytes, accounted_workspace_file_count) ON %I.agent_execution_reservations TO giga_api_runtime', quota_schema);
+    EXECUTE format('GRANT UPDATE (state, resource_active, updated_at, started_at, finished_at, actual_sandbox_runtime_ms, actual_wall_clock_ms, actual_tool_calls, actual_provider_requests, actual_command_output_bytes, actual_artifact_bytes, actual_workspace_disk_bytes, actual_workspace_file_count, accounted_sandbox_runtime_ms, accounted_wall_clock_ms, accounted_tool_calls, accounted_provider_requests, accounted_command_output_bytes, accounted_artifact_bytes, accounted_workspace_disk_bytes, accounted_workspace_file_count) ON %I.agent_execution_reservations TO giga_api_runtime', quota_schema);
+    EXECUTE format('GRANT INSERT (reservation_id, owner_id, workspace_id, run_id, attempt_number, event_key, event_kind, request_fingerprint, sandbox_runtime_ms, wall_clock_ms, tool_calls, provider_requests, command_output_bytes, artifact_bytes, workspace_disk_bytes, workspace_file_count, limit_exceeded) ON %I.agent_execution_usage_events TO giga_api_runtime', quota_schema);
+
+    EXECUTE format('REVOKE ALL ON FUNCTION %I.finalize_agent_execution_reconciliation(uuid, character varying, character, bigint, bigint, bigint, bigint, bigint, bigint, bigint, bigint, boolean) FROM PUBLIC', quota_schema);
+    EXECUTE format('GRANT USAGE ON SCHEMA %I TO giga_agent_quota_finalizer', quota_schema);
+    EXECUTE format('GRANT SELECT ON %I.agent_runs, %I.agent_execution_reservations, %I.agent_execution_usage_events TO giga_agent_quota_finalizer', quota_schema, quota_schema, quota_schema);
+    EXECUTE format('GRANT UPDATE (updated_at) ON %I.agent_runs TO giga_agent_quota_finalizer', quota_schema);
+    EXECUTE format('GRANT UPDATE (updated_at) ON %I.agent_execution_reservations TO giga_agent_quota_finalizer', quota_schema);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.finalize_agent_execution_reconciliation(uuid, character varying, character, bigint, bigint, bigint, bigint, bigint, bigint, bigint, bigint, boolean) TO giga_agent_quota_finalizer', quota_schema);
+END;
+$quota_privileges$;
