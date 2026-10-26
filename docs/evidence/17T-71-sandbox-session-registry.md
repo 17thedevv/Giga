@@ -9,7 +9,7 @@
 **Draft PR:** [#44](https://github.com/17thedevv/Giga/pull/44)
 **Decision:** NO-GO for 17T-73 runtime integration until independent review and provider settlement limits below are closed.
 
-This document supersedes earlier 17T-71 evidence. In particular, allocation TTL, a missing in-process sandbox handle, or a lost provider response is not proof of quiescence. No live E2B call, cloud resource, deployment, merge, or runtime enablement was used for this work.
+This document supersedes earlier 17T-71 evidence. In particular, allocation TTL, a missing in-process sandbox handle, or a lost provider response is not proof of quiescence. No pull request was merged; no live E2B call, cloud resource, deployment, or runtime enablement was used for this work.
 
 ## Lifecycle invariants implemented
 
@@ -43,6 +43,7 @@ All PostgreSQL checks below ran against an isolated local PostgreSQL 18.4 test d
 | Git Workflow validator | `node --test .agents/scripts/validate-git-workflow.test.mjs` | 6 passed, 0 failed, 0 skipped. |
 | Whitespace check | `git diff --check` and `git diff --cached --check` | Passed, exit 0 on staged merge and unstaged implementation/evidence changes. |
 | GitHub Actions on superseded PR head `3e4efc625acd707fcd06d25722c930f4edb481be` | [Validate Git Workflow #167](https://github.com/17thedevv/Giga/actions/runs/40296879602) passed. [Backend CI #88](https://github.com/17thedevv/Giga/actions/runs/40296879655) failed one cleanup concurrency assertion: five destroy calls for four sessions, with the same sandbox ID twice. The failure identified the live-lease reset corrected in commit `eb0d3e0`. CI for the corrected head is pending push. |
+| GitHub Actions on corrected code head `1232f115d94560335ff0abea2116dbff02f19d7c` | [Validate Git Workflow #170](https://github.com/17thedevv/Giga/actions/runs/40298478005) passed. [Backend CI #89](https://github.com/17thedevv/Giga/actions/runs/40298478028) passed, including PostgreSQL integration tests. A docs-only evidence commit follows; its final-head checks will be reported separately. |
 
 The broader sandbox test file was run against real PostgreSQL; these concurrency results do not depend on pg-mem's locking emulation. Migration 015 continues to enforce the distinct quota-owner, API-runtime and quota-finalizer privilege boundary. The new migration is forward-only and does not edit migrations 014 or 015.
 
@@ -50,4 +51,4 @@ The broader sandbox test file was run against real PostgreSQL; these concurrency
 
 The implementation adds migration 016 and updates the embedded migration registry, repository fencing and takeover logic, E2B provider metadata lookup, cleanup reconciliation, lifecycle verifier, lifecycle types, PostgreSQL migration/lifecycle tests, pg-mem test support, and this evidence record. PR #42's merged quota, migration 015, runtime-role and evidence changes are included as the requested upstream merge dependency.
 
-No cloud runtime was enabled. PR #42 remains merged upstream. Draft PR #44 is open, and an independent review has been requested from `@17thedevv`; no independent review has been submitted yet. The corrected-head Actions result is pending push and must pass before this handoff is considered validated. Do not interpret local evidence as provider isolation proof or independent approval.
+No cloud runtime was enabled. PR #42 remains merged upstream. Draft PR #44 is open, and an independent review has been requested from `@17thedevv`; no independent review has been submitted yet. The lifecycle code head's Actions passed; checks for the following docs-only evidence head are pending. Do not interpret local evidence as provider isolation proof or independent approval.
