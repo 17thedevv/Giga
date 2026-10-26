@@ -5,7 +5,7 @@
 **Branch:** `feat/17t-71-agent-sandbox-sessions`
 **Merged dependency:** PR #42, merge commit `207d78327fd58962dd9acdb4f2cf3048234df0d9`
 **Baseline 17T-71 commit:** `c98eb1d4d1f673aea8a92729592c71e2aff6ad73`
-**Implementation HEAD:** pending final commits
+**Lifecycle implementation commit:** `b59b44f` (`fix(agent): fence sandbox allocation lifecycle per attempt`)
 **Decision:** NO-GO for 17T-73 runtime integration until independent review and provider settlement limits below are closed.
 
 This document supersedes earlier 17T-71 evidence. In particular, allocation TTL, a missing in-process sandbox handle, or a lost provider response is not proof of quiescence. No live E2B call, cloud resource, deployment, merge, or runtime enablement was used for this work.
