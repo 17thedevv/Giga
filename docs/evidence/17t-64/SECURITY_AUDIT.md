@@ -234,11 +234,11 @@ The existing API suite includes negative tests for untrusted, missing and malfor
 
 ### Compatible staging plan — not deployed
 
-The current PR #43 head is `aad27f84edfaa4b9fd4c65bfe17fef3d762ad8fb`; latest fetched `origin/main` is `207d78327fd58962dd9acdb4f2cf3048234df0d9`. Their merge base is `6ce98b1b8758f6a429a32316f4ed723220d92646`; main has 8 commits not in the PR branch and the PR branch has 10 commits not in main. A single Node service must build the Web bundle and API from one integrated repository SHA, so neither two unrelated deploy SHAs nor the stale PR branch should be sent to staging without an approved integration/rebase decision. No staging SHA exists yet.
+At the branch comparison on 2026-10-26, PR #43 HEAD was `c066125be900f1977023f535dcab508a1e3f56ef`; latest fetched `origin/main` was `207d78327fd58962dd9acdb4f2cf3048234df0d9`. Their merge base is `6ce98b1b8758f6a429a32316f4ed723220d92646`; main has 8 commits not in the PR branch and the PR branch has 10 commits not in main. A single Node service must build the Web bundle and API from one integrated repository SHA, so neither two unrelated deploy SHAs nor the stale PR branch should be sent to staging without an approved integration/rebase decision. No staging SHA exists yet.
 
 | Staging input | Exact available SHA | State |
 |---|---|---|
-| Web code under PR #43 review | `aad27f84edfaa4b9fd4c65bfe17fef3d762ad8fb` | Draft branch source; not deployed. |
+| Web code under PR #43 review | `c066125be900f1977023f535dcab508a1e3f56ef` | Draft branch source; not deployed. |
 | Latest API integration base | `207d78327fd58962dd9acdb4f2cf3048234df0d9` | Current `main`; not deployed to this demo. |
 | Existing live API | `d676288090d3c3b5ecb63516f797cf3928885769` | Current demo API; predates PR #43 and latest `main`. |
 | Integrated one-service staging commit | Not available | Must be produced after the reviewed frontend branch is safely integrated with current `main`; no deployment is authorized yet. |
@@ -265,6 +265,7 @@ The connected Render tools expose service/database metadata, but no managed Post
 | Web checks on PR #43 source | Pass: clean install, typecheck, **263 tests / 17 files**, build, production bundle scan, audit 0 vulnerabilities. Frontend source was not changed in this follow-up. |
 | Git workflow tests / whitespace | Pass: **6/6** and `git diff --check`. |
 | GitHub CI on PR #43 HEAD `aad27f84edfaa4b9fd4c65bfe17fef3d762ad8fb` | Pass: [Frontend CI #54](https://github.com/17thedevv/Giga/actions/runs/40304199187) and [Validate Git Workflow #178](https://github.com/17thedevv/Giga/actions/runs/40304199297). |
+| GitHub CI on origin/infrastructure evidence HEAD `c066125be900f1977023f535dcab508a1e3f56ef` | Pass: [Frontend CI #55](https://github.com/17thedevv/Giga/actions/runs/40307199867) and [Validate Git Workflow #180](https://github.com/17thedevv/Giga/actions/runs/40307199918). |
 | Authenticated Playwright / live PostgreSQL | **BLOCKED / NOT TESTED**: the approved account/runner is not connected; hosted SQL cannot connect with the current empty DB allowlist. |
 
 ### Current gate
