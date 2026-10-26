@@ -25,6 +25,17 @@ export class SseValidationError extends Error {
   }
 }
 
+/** Limits are in UTF-16 code units: 64 Ki per incomplete line and 256 Ki per event payload. */
+export const MAX_SSE_LINE_CHARACTERS = 64 * 1024;
+export const MAX_SSE_EVENT_DATA_CHARACTERS = 256 * 1024;
+
+export class SseBufferLimitError extends Error {
+  constructor(public readonly limit: 'line' | 'event') {
+    super(limit === 'line' ? 'SSE line exceeded the configured size limit' : 'SSE event exceeded the configured size limit');
+    this.name = 'SseBufferLimitError';
+  }
+}
+
 /**
  * Validates whether an incoming SSE event is a known GigaChat streaming event
  * and conforms to the expected contract.
@@ -130,8 +141,10 @@ export class SseStreamParser {
   private currentEvent = 'message';
   private currentId?: string;
   private currentDataLines: string[] = [];
+  private currentDataCharacters = 0;
   private decoder?: TextDecoder;
   private terminalDispatched = false;
+  private failed = false;
 
   constructor(
     private readonly onEvent: SseEventHandler,
@@ -146,6 +159,7 @@ export class SseStreamParser {
    * Uses TextDecoder with streaming mode to handle multi-byte UTF-8 sequences.
    */
   feedBytes(chunk: Uint8Array): void {
+    if (this.failed) return;
     if (!this.decoder) {
       this.decoder = new TextDecoder('utf-8', { fatal: false });
     }
@@ -157,15 +171,53 @@ export class SseStreamParser {
    * Feed a new raw string chunk from the readable stream reader.
    */
   feed(chunk: string): void {
-    this.buffer += chunk;
+    if (this.failed || chunk.length === 0) return;
 
-    // Normalize Windows CRLF to LF and split lines
-    let newlineIndex: number;
-    while ((newlineIndex = this.buffer.indexOf('\n')) !== -1) {
-      const line = this.buffer.slice(0, newlineIndex).replace(/\r$/, '');
-      this.buffer = this.buffer.slice(newlineIndex + 1);
+    // Consume a chunk line by line. Check each fragment before copying it into
+    // the incomplete-line buffer so a large network chunk cannot be appended
+    // wholesale and retained before the limit is enforced.
+    let segmentStart = 0;
+    while (segmentStart < chunk.length) {
+      const newlineIndex = chunk.indexOf('\n', segmentStart);
+      const segmentEnd = newlineIndex === -1 ? chunk.length : newlineIndex;
+      if (!this.appendLineFragment(chunk, segmentStart, segmentEnd)) return;
+
+      if (newlineIndex === -1) return;
+
+      const line = this.buffer.endsWith('\r') ? this.buffer.slice(0, -1) : this.buffer;
+      this.buffer = '';
       this.processLine(line);
+      if (this.failed) return;
+      segmentStart = newlineIndex + 1;
     }
+  }
+
+  private appendLineFragment(chunk: string, start: number, end: number): boolean {
+    const fragmentLength = end - start;
+    if (this.buffer.length + fragmentLength > MAX_SSE_LINE_CHARACTERS) {
+      this.fail('line');
+      return false;
+    }
+    this.buffer += chunk.slice(start, end);
+    return true;
+  }
+
+  private fail(limit: 'line' | 'event'): void {
+    if (this.failed) return;
+    this.failed = true;
+    // Drop all retained input before reporting a generic error; never echo an
+    // oversized untrusted payload into logs or error objects.
+    this.buffer = '';
+    this.currentDataLines = [];
+    this.currentDataCharacters = 0;
+    this.currentEvent = 'message';
+    this.currentId = undefined;
+    const error = new SseBufferLimitError(limit);
+    if (this.options?.onError) {
+      this.options.onError(error);
+      return;
+    }
+    throw error;
   }
 
   private processLine(line: string): void {
@@ -197,6 +249,14 @@ export class SseStreamParser {
         this.currentEvent = value;
         break;
       case 'data':
+        {
+          const separatorLength = this.currentDataLines.length > 0 ? 1 : 0;
+          if (this.currentDataCharacters + separatorLength + value.length > MAX_SSE_EVENT_DATA_CHARACTERS) {
+            this.fail('event');
+            return;
+          }
+          this.currentDataCharacters += separatorLength + value.length;
+        }
         this.currentDataLines.push(value);
         break;
       case 'id':
@@ -209,8 +269,10 @@ export class SseStreamParser {
   }
 
   private dispatch(): void {
+    if (this.failed) return;
     if (this.currentDataLines.length === 0) {
       this.currentEvent = 'message';
+      this.currentDataCharacters = 0;
       return;
     }
 
@@ -226,6 +288,7 @@ export class SseStreamParser {
 
     // Reset buffer for next event
     this.currentDataLines = [];
+    this.currentDataCharacters = 0;
     this.currentEvent = 'message';
 
     const isTerminal = ['message.completed', 'message.failed', 'message.stopped'].includes(
@@ -261,16 +324,17 @@ export class SseStreamParser {
    * Flush any remaining buffered data at end of stream.
    */
   flush(): void {
+    if (this.failed) return;
     if (this.decoder) {
       const remaining = this.decoder.decode();
       if (remaining) {
         this.feed(remaining);
       }
     }
-    if (this.buffer.trim().length > 0) {
-      this.processLine(this.buffer);
-      this.buffer = '';
-    }
+    const pendingLine = this.buffer.endsWith('\r') ? this.buffer.slice(0, -1) : this.buffer;
+    this.buffer = '';
+    if (pendingLine.trim().length > 0) this.processLine(pendingLine);
+    if (this.failed) return;
     this.dispatch();
   }
 

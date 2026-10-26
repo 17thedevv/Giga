@@ -40,5 +40,8 @@ jobs:
       - name: Build Web Application
         run: npm run build
 
+      - name: Run mandatory production bundle security check
+        run: npm run test:production-security
+
       - name: Run Vitest unit & integration tests
         run: npm test

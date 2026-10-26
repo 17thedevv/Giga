@@ -30,23 +30,53 @@ import { agentRunSchema, readAgentCapabilities, type AgentCapabilities, type Age
 import { extractSensitiveRequestValues, sanitizeUntrustedText, sanitizeUntrustedValue } from '../security/untrusted-content.js';
 
 export const SESSION_EXPIRED_EVENT = 'giga:session-expired';
-let sessionEpoch = 0;
+let sessionGeneration = 0;
+
+/** Return the current client-side authentication generation. */
+export function getSessionGeneration(): number {
+  return sessionGeneration;
+}
+
+/**
+ * Fence requests started before login, logout, session invalidation, or an
+ * API-mode change. AuthContext uses this same generation for state updates.
+ */
+export function advanceSessionGeneration(): number {
+  sessionGeneration++;
+  return sessionGeneration;
+}
+
+export function isCurrentSessionGeneration(generation: number): boolean {
+  return generation === sessionGeneration;
+}
 
 function isSessionExemptPath(path: string): boolean {
   return /\/auth\/(?:login|register)(?:\?|$)/.test(path);
 }
 
 function assertSessionEpoch(requestEpoch: number, path: string): void {
-  if (requestEpoch !== sessionEpoch && !isSessionExemptPath(path)) {
+  if (requestEpoch !== sessionGeneration && !isSessionExemptPath(path)) {
     throw new ApiException(401, 'SESSION_EXPIRED', 'Session expired; please sign in again');
   }
 }
 
-function notifyUnauthorized(path: string, status: number): void {
-  if (status !== 401 || isSessionExemptPath(path)) return;
-  sessionEpoch++;
-  if (typeof window === 'undefined') return;
-  window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT));
+function notifyUnauthorized(requestEpoch: number, path: string, status: number): number | null {
+  if (status !== 401 || isSessionExemptPath(path)) return null;
+  // Only the first 401 from the current generation invalidates the session.
+  // Late responses from an older session must not log out a newer one.
+  if (requestEpoch !== sessionGeneration) return null;
+  const invalidatedGeneration = advanceSessionGeneration();
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT));
+  }
+  return invalidatedGeneration;
+}
+
+function assertResponseGeneration(requestEpoch: number, path: string, invalidatedGeneration: number | null): void {
+  // Preserve the API's first current-session 401 code/message. If another
+  // login/logout happens while that error body is being read, treat it as stale.
+  if (invalidatedGeneration !== null && invalidatedGeneration === sessionGeneration) return;
+  assertSessionEpoch(requestEpoch, path);
 }
 
 function safeApiErrorCode(value: unknown, status: number): string {
@@ -521,7 +551,7 @@ export class RealApiClient {
   }
 
   private async request(path: string, options: RequestInit = {}): Promise<unknown> {
-    const requestEpoch = sessionEpoch;
+    const requestEpoch = sessionGeneration;
     const url = `${this.baseUrl}${path}`;
     const headers = new Headers(options.headers);
 
@@ -534,10 +564,13 @@ export class RealApiClient {
       headers,
       credentials: 'include', // Ensure session cookie is sent and received
     });
-    notifyUnauthorized(path, response.status);
+    const invalidatedGeneration = notifyUnauthorized(requestEpoch, path, response.status);
+
+    // Check before consuming an untrusted response body and again after its
+    // asynchronous read so stale protected data can never reach a caller.
+    assertResponseGeneration(requestEpoch, path, invalidatedGeneration);
 
     if (response.status === 204) {
-      assertSessionEpoch(requestEpoch, path);
       return null;
     }
 
@@ -548,11 +581,14 @@ export class RealApiClient {
       try {
         data = await response.json();
       } catch {
+        assertResponseGeneration(requestEpoch, path, invalidatedGeneration);
         throw new ApiException(response.status, 'PARSE_ERROR', 'Failed to parse JSON response');
       }
     } else {
       data = await response.text();
     }
+
+    assertResponseGeneration(requestEpoch, path, invalidatedGeneration);
 
     if (!response.ok) {
       const error = readApiError(data, response.status, response.statusText || 'Request failed');
@@ -564,13 +600,19 @@ export class RealApiClient {
 
   // Auth Operations
   async login(email: string, password: string): Promise<{ user: User }> {
-    return projectUserEnvelope(await this.request('/api/v1/auth/login', {
+    const generation = advanceSessionGeneration();
+    const result = projectUserEnvelope(await this.request('/api/v1/auth/login', {
       method: 'POST',
       body: JSON.stringify({ email, password }),
     }));
+    if (!isCurrentSessionGeneration(generation)) {
+      throw new ApiException(401, 'SESSION_EXPIRED', 'Session changed during sign in; please try again');
+    }
+    return result;
   }
 
   async logout(): Promise<void> {
+    advanceSessionGeneration();
     await this.request('/api/v1/auth/logout', {
       method: 'POST',
     });
@@ -637,7 +679,7 @@ export class RealApiClient {
       reasoningEffort?: ReasoningEffort;
     }
   ): Promise<void> {
-    const requestEpoch = sessionEpoch;
+    const requestEpoch = sessionGeneration;
     const url = `${this.baseUrl}/api/v1/conversations/${encodeURIComponent(conversationId)}/messages:stream`;
     const headers = new Headers();
     headers.set('Content-Type', 'application/json');
@@ -668,7 +710,8 @@ export class RealApiClient {
       credentials: 'include',
       signal: options?.signal,
     });
-    notifyUnauthorized(url, response.status);
+    const invalidatedGeneration = notifyUnauthorized(requestEpoch, url, response.status);
+    assertResponseGeneration(requestEpoch, url, invalidatedGeneration);
 
     if (!response.ok) {
       let errPayload: unknown;
@@ -687,7 +730,7 @@ export class RealApiClient {
       );
     }
 
-    assertSessionEpoch(requestEpoch, url);
+    assertResponseGeneration(requestEpoch, url, invalidatedGeneration);
 
     const contentType = response.headers.get('content-type') ?? '';
     if (!contentType.includes('text/event-stream')) {
@@ -734,6 +777,13 @@ export class RealApiClient {
           parser.feedBytes(value);
         }
       }
+    } catch (error: unknown) {
+      try {
+        await reader.cancel();
+      } catch {
+        // Ignore stream cleanup errors; preserve the parser/request failure.
+      }
+      throw error;
     } finally {
       reader.releaseLock();
     }
@@ -752,7 +802,7 @@ export class RealApiClient {
       reasoningEffort?: ReasoningEffort;
     }
   ): Promise<void> {
-    const requestEpoch = sessionEpoch;
+    const requestEpoch = sessionGeneration;
     const url = `${this.baseUrl}/api/v1/conversations/${encodeURIComponent(conversationId)}/generations:stream`;
     const headers = new Headers();
     headers.set('Content-Type', 'application/json');
@@ -784,7 +834,8 @@ export class RealApiClient {
       credentials: 'include',
       signal: options?.signal,
     });
-    notifyUnauthorized(url, response.status);
+    const invalidatedGeneration = notifyUnauthorized(requestEpoch, url, response.status);
+    assertResponseGeneration(requestEpoch, url, invalidatedGeneration);
 
     if (!response.ok) {
       let errPayload: unknown;
@@ -803,7 +854,7 @@ export class RealApiClient {
       );
     }
 
-    assertSessionEpoch(requestEpoch, url);
+    assertResponseGeneration(requestEpoch, url, invalidatedGeneration);
 
     const contentType = response.headers.get('content-type') ?? '';
     if (!contentType.includes('text/event-stream')) {
@@ -850,6 +901,13 @@ export class RealApiClient {
           parser.feedBytes(value);
         }
       }
+    } catch (error: unknown) {
+      try {
+        await reader.cancel();
+      } catch {
+        // Ignore stream cleanup errors; preserve the parser/request failure.
+      }
+      throw error;
     } finally {
       reader.releaseLock();
     }
