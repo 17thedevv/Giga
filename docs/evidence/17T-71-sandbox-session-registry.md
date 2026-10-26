@@ -5,7 +5,8 @@
 **Branch:** `feat/17t-71-agent-sandbox-sessions`
 **Merged dependency:** PR #42, merge commit `207d78327fd58962dd9acdb4f2cf3048234df0d9`
 **Baseline 17T-71 commit:** `c98eb1d4d1f673aea8a92729592c71e2aff6ad73`
-**Lifecycle implementation commit:** `b59b44f` (`fix(agent): fence sandbox allocation lifecycle per attempt`)
+**Lifecycle commits:** `b59b44f` (`fix(agent): fence sandbox allocation lifecycle per attempt`), `eb0d3e02b1a3913911a9c126abc31f96b263eada` (preserve active cleanup lease)
+**Draft PR:** [#44](https://github.com/17thedevv/Giga/pull/44)
 **Decision:** NO-GO for 17T-73 runtime integration until independent review and provider settlement limits below are closed.
 
 This document supersedes earlier 17T-71 evidence. In particular, allocation TTL, a missing in-process sandbox handle, or a lost provider response is not proof of quiescence. No live E2B call, cloud resource, deployment, merge, or runtime enablement was used for this work.
@@ -17,6 +18,7 @@ This document supersedes earlier 17T-71 evidence. In particular, allocation TTL,
 - An expired worker lease fences its prior attempt before takeover. The replacement claim is refused while allocation is ambiguous/in progress, a provider resource remains undestroyed, or runtime/tool work is unresolved. A late successful allocation callback records its provider ID on the original generation as cleanup pending; takeover remains blocked until cleanup is confirmed.
 - Allocation TTL is only a cleanup scheduling hint. A `not_started` operation can be settled resource-free; an in-progress or ambiguous operation cannot be converted to no-resource by elapsed time.
 - Cleanup persists provider identity before marking destruction complete, validates the settled allocation identity, and respects the cleanup lease. A terminal run is not rewritten merely to persist its attempt fence.
+- Attempt fencing preserves a live `destroying` / `in_progress` cleanup lease. Resetting it to `pending` had allowed a second worker to claim the same session while provider destruction was outstanding; the deterministic overlap regression reproduced five provider calls for four sessions before the fix and now confirms one destroy per ID.
 - E2B creation metadata carries the allocation operation ID and attempt generation. Recovery can find running/paused sandboxes through the SDK metadata listing and destroy by durable provider ID after a process restart. Multiple matching IDs are ambiguous.
 
 ## Remaining provider and integration dependencies
@@ -31,16 +33,16 @@ All PostgreSQL checks below ran against an isolated local PostgreSQL 18.4 test d
 
 | Check | Command | Result |
 |---|---|---|
-| Sandbox lifecycle suite on PostgreSQL | `npx --prefix apps/api tsx --test --test-concurrency=1 apps/api/tests/agent/agent-sandbox-sessions.test.ts` | 28 passed, 0 failed, 0 skipped. Includes deterministic queued PostgreSQL fence/allocation race, expired-lease takeover blocked by ambiguous allocation, late callback persistence/cleanup, concurrent cleanup, terminal-run fencing, tombstones, quota-capacity retention under ambiguous provider state, and controlled release after verified cleanup. |
+| Sandbox lifecycle suite on PostgreSQL | `npx --prefix apps/api tsx --test --test-concurrency=1 apps/api/tests/agent/agent-sandbox-sessions.test.ts` | 28 passed, 0 failed, 0 skipped. Includes deterministic queued PostgreSQL fence/allocation race, forced overlapping cleanup workers with no duplicate provider destroy, expired-lease takeover blocked by ambiguous allocation, late callback persistence/cleanup, tombstones, quota retention while ambiguous, and controlled release after verified cleanup. |
 | E2B adapter suite (injected SDK, no network) | `npx --prefix apps/api tsx --test --test-concurrency=1 apps/api/tests/agent/agent-e2b-provider.test.ts` | 50 passed, 0 failed, 0 skipped. Includes metadata-based ID recovery and confirms an empty running/paused listing remains `pending`. |
 | Migration and database utility suites on PostgreSQL | `npx --prefix apps/api tsx --test --test-concurrency=1 apps/api/tests/agent/agent-migration.test.ts apps/api/tests/db-migrations.test.ts` | 7 passed, 0 failed, 0 skipped. Verifies actual 014→015→016 application, populated pre-016 allocation backfill to `ambiguous`, source/registry parity, role privileges and idempotent reruns. |
 | Combined quota, migration and sandbox suites on PostgreSQL | `npx --prefix apps/api tsx --test --test-concurrency=1 apps/api/tests/agent/agent-quotas.test.ts apps/api/tests/agent/agent-migration.test.ts apps/api/tests/agent/agent-sandbox-sessions.test.ts` | 54 passed, 0 failed, 0 skipped. Confirms the exact-attempt fence/allocation lock race, ambiguous allocation holds quota, verified cleanup permits controlled release, and migrations through 016 upgrade populated schemas and rerun idempotently. |
 | API typecheck | `npm run typecheck --prefix apps/api` | Passed, exit 0. |
-| Full API suite on isolated PostgreSQL | PostgreSQL 18.4, `NODE_ENV=test`, dedicated `TEST_DATABASE_URL`; `npm test --prefix apps/api` | 595 passed, 0 failed, 0 skipped; duration 142.5 seconds. |
+| Full API suite on isolated PostgreSQL | PostgreSQL 18.4, `NODE_ENV=test`, dedicated `TEST_DATABASE_URL`; `npm test --prefix apps/api` | 595 passed, 0 failed, 0 skipped; duration 116.1 seconds after the cleanup lease fix. |
 | API production build | `npm run build --prefix apps/api` | Passed, exit 0, rerun on this tree. |
 | Git Workflow validator | `node --test .agents/scripts/validate-git-workflow.test.mjs` | 6 passed, 0 failed, 0 skipped. |
 | Whitespace check | `git diff --check` and `git diff --cached --check` | Passed, exit 0 on staged merge and unstaged implementation/evidence changes. |
-| GitHub Actions on final SHA | Pending push. |
+| GitHub Actions on superseded PR head `3e4efc625acd707fcd06d25722c930f4edb481be` | [Validate Git Workflow #167](https://github.com/17thedevv/Giga/actions/runs/40296879602) passed. [Backend CI #88](https://github.com/17thedevv/Giga/actions/runs/40296879655) failed one cleanup concurrency assertion: five destroy calls for four sessions, with the same sandbox ID twice. The failure identified the live-lease reset corrected in commit `eb0d3e0`. CI for the corrected head is pending push. |
 
 The broader sandbox test file was run against real PostgreSQL; these concurrency results do not depend on pg-mem's locking emulation. Migration 015 continues to enforce the distinct quota-owner, API-runtime and quota-finalizer privilege boundary. The new migration is forward-only and does not edit migrations 014 or 015.
 
@@ -48,4 +50,4 @@ The broader sandbox test file was run against real PostgreSQL; these concurrency
 
 The implementation adds migration 016 and updates the embedded migration registry, repository fencing and takeover logic, E2B provider metadata lookup, cleanup reconciliation, lifecycle verifier, lifecycle types, PostgreSQL migration/lifecycle tests, pg-mem test support, and this evidence record. PR #42's merged quota, migration 015, runtime-role and evidence changes are included as the requested upstream merge dependency.
 
-No cloud runtime was enabled. PR #42 remains merged upstream. No existing 17T-71 PR was found; open a new Draft PR after pushing the final commit. Do not interpret this local evidence as hosted CI success or independent approval.
+No cloud runtime was enabled. PR #42 remains merged upstream. Draft PR #44 is open, and an independent review has been requested from `@17thedevv`; no independent review has been submitted yet. The corrected-head Actions result is pending push and must pass before this handoff is considered validated. Do not interpret local evidence as provider isolation proof or independent approval.
