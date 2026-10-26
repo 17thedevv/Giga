@@ -1,9 +1,7 @@
 import type {
   User,
-  ApiError,
   Conversation,
   Message,
-  AgentRun,
   ChangeProposal,
   SkillListItem,
   SkillDefinition,
@@ -20,6 +18,7 @@ import type {
   ChatTurnVariants,
   ChatStreamEvent,
   ReasoningEffort,
+  ModelMetadata,
   ModelsResponse,
   ProviderCredential,
   ChatCredentialPreference,
@@ -27,13 +26,26 @@ import type {
   SetCredentialPreferenceDto,
 } from './types.js';
 import { SseStreamParser, validateChatStreamEvent } from './sse-parser.js';
-import { readAgentCapabilities, type AgentCapabilities } from './agent-contract.js';
+import { agentRunSchema, readAgentCapabilities, type AgentCapabilities, type AgentRun as WorkspaceAgentRun } from './agent-contract.js';
 import { extractSensitiveRequestValues, sanitizeUntrustedText, sanitizeUntrustedValue } from '../security/untrusted-content.js';
 
 export const SESSION_EXPIRED_EVENT = 'giga:session-expired';
+let sessionEpoch = 0;
+
+function isSessionExemptPath(path: string): boolean {
+  return /\/auth\/(?:login|register)(?:\?|$)/.test(path);
+}
+
+function assertSessionEpoch(requestEpoch: number, path: string): void {
+  if (requestEpoch !== sessionEpoch && !isSessionExemptPath(path)) {
+    throw new ApiException(401, 'SESSION_EXPIRED', 'Session expired; please sign in again');
+  }
+}
 
 function notifyUnauthorized(path: string, status: number): void {
-  if (status !== 401 || /\/auth\/(?:login|register)(?:\?|$)/.test(path) || typeof window === 'undefined') return;
+  if (status !== 401 || isSessionExemptPath(path)) return;
+  sessionEpoch++;
+  if (typeof window === 'undefined') return;
   window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT));
 }
 
@@ -49,6 +61,23 @@ function safeApiErrorMessage(value: unknown, fallback: string): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+}
+
+function isNonEmptyString(value: unknown, maxLength = 4096): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= maxLength;
+}
+
+function projectUser(value: unknown): User {
+  if (!isRecord(value) || !isNonEmptyString(value.id, 256) || !isNonEmptyString(value.email, 320) ||
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.email) || !isNonEmptyString(value.displayName, 256)) {
+    throw invalidDto();
+  }
+  return { id: value.id, email: value.email, displayName: sanitizeUntrustedText(value.displayName) };
+}
+
+function projectUserEnvelope(value: unknown): { user: User } {
+  if (!isRecord(value)) throw invalidDto();
+  return { user: projectUser(value.user) };
 }
 
 function invalidDto(): ApiException {
@@ -89,6 +118,37 @@ function projectConversationList(value: unknown): { items: Conversation[]; nextC
   if (!isRecord(value) || !Array.isArray(value.items) ||
       (value.nextCursor !== null && typeof value.nextCursor !== 'string')) throw invalidDto();
   return { items: value.items.map(projectConversation), nextCursor: value.nextCursor };
+}
+
+function projectConversationEnvelope(value: unknown): { conversation: Conversation } {
+  if (!isRecord(value)) throw invalidDto();
+  return { conversation: projectConversation(value.conversation) };
+}
+
+const MODEL_CAPABILITIES = ['text', 'streaming', 'structured', 'embeddings', 'tool_calling'] as const;
+
+function projectModelsResponse(value: unknown): ModelsResponse {
+  if (!isRecord(value) || !Array.isArray(value.models)) throw invalidDto();
+  return {
+    models: value.models.map((item): ModelMetadata => {
+      if (!isRecord(item) || !isNonEmptyString(item.id, 256)) throw invalidDto();
+      const capabilities = Array.isArray(item.capabilities)
+        ? item.capabilities.filter((capability): capability is ModelMetadata['capabilities'][number] =>
+            typeof capability === 'string' && MODEL_CAPABILITIES.includes(capability as typeof MODEL_CAPABILITIES[number]))
+        : [];
+      const reasoning = isRecord(item.reasoning) ? item.reasoning : {};
+      const efforts = Array.isArray(reasoning.efforts)
+        ? reasoning.efforts.filter((effort): effort is ReasoningEffort =>
+            typeof effort === 'string' && REASONING_EFFORTS.includes(effort as typeof REASONING_EFFORTS[number]))
+        : [];
+      const supported = reasoning.supported === true && efforts.length > 0;
+      return {
+        id: sanitizeUntrustedText(item.id),
+        capabilities,
+        reasoning: { supported, efforts: supported ? efforts : [] },
+      };
+    }),
+  };
 }
 
 const GENERATION_STATUSES = ['pending', 'queued', 'streaming', 'running', 'completed', 'failed', 'interrupted', 'stopped'] as const;
@@ -155,6 +215,20 @@ function projectGenerationErrorDetails(details: unknown, topLevelGeneration?: un
   }
 }
 
+function readApiError(value: unknown, status: number, fallback: string): {
+  code: string;
+  message: string;
+  details?: Record<string, unknown>;
+} {
+  const envelope = isRecord(value) ? value : undefined;
+  const error = envelope && isRecord(envelope.error) ? envelope.error : undefined;
+  return {
+    code: safeApiErrorCode(error?.code, status),
+    message: safeApiErrorMessage(error?.message, fallback),
+    ...(error ? { details: projectGenerationErrorDetails(error.details, envelope?.generation) } : {}),
+  };
+}
+
 function projectChatTurnVariants(value: unknown): ChatTurnVariants {
   if (!isRecord(value) || typeof value.userMessageId !== 'string' || value.userMessageId.length === 0 ||
       (value.selectedGenerationId !== null && typeof value.selectedGenerationId !== 'string') ||
@@ -185,6 +259,196 @@ function projectChatTurnVariants(value: unknown): ChatTurnVariants {
     };
   });
   return { userMessageId: value.userMessageId, selectedGenerationId: value.selectedGenerationId, items };
+}
+
+function projectWorkspaceAgentRunEnvelope(value: unknown): { run: WorkspaceAgentRun } {
+  if (!isRecord(value)) throw invalidDto();
+  try {
+    const parsed = agentRunSchema.parse(value.run);
+    return {
+      run: {
+        ...parsed,
+        task: sanitizeUntrustedText(parsed.task),
+        ...(parsed.error ? { error: { code: safeApiErrorCode(parsed.error.code, 502), message: sanitizeUntrustedText(parsed.error.message).slice(0, 500) } } : {}),
+        ...(parsed.result ? {
+          result: {
+            summary: sanitizeUntrustedText(parsed.result.summary),
+            artifactIds: [...parsed.result.artifactIds],
+            verifiedChecks: parsed.result.verifiedChecks.map(check => ({
+              name: sanitizeUntrustedText(check.name),
+              outcome: check.outcome,
+              ...(check.summary !== undefined ? { summary: sanitizeUntrustedText(check.summary) } : {}),
+            })),
+          },
+        } : {}),
+      },
+    };
+  } catch {
+    throw invalidDto();
+  }
+}
+
+function projectChangeProposalEnvelope(value: unknown): { proposal: ChangeProposal } {
+  if (!isRecord(value) || !isRecord(value.proposal)) throw invalidDto();
+  const proposal = value.proposal;
+  if (!isNonEmptyString(proposal.id, 256) || !isNonEmptyString(proposal.runId, 256) ||
+      !isNonEmptyString(proposal.baseCommitSha, 256) || !isDateString(proposal.createdAt) ||
+      !Array.isArray(proposal.files)) throw invalidDto();
+  return {
+    proposal: {
+      id: proposal.id,
+      runId: proposal.runId,
+      baseCommitSha: proposal.baseCommitSha,
+      createdAt: proposal.createdAt,
+      files: proposal.files.map((file): ChangeProposal['files'][number] => {
+        if (!isRecord(file) || !isNonEmptyString(file.path, 4096) ||
+            !['added', 'modified', 'deleted'].includes(String(file.status)) ||
+            typeof file.unifiedDiff !== 'string' ||
+            (file.additions !== undefined && (!Number.isSafeInteger(file.additions) || Number(file.additions) < 0)) ||
+            (file.deletions !== undefined && (!Number.isSafeInteger(file.deletions) || Number(file.deletions) < 0))) {
+          throw invalidDto();
+        }
+        return {
+          path: sanitizeUntrustedText(file.path),
+          status: file.status as ChangeProposal['files'][number]['status'],
+          unifiedDiff: sanitizeUntrustedText(file.unifiedDiff),
+          ...(typeof file.additions === 'number' ? { additions: file.additions } : {}),
+          ...(typeof file.deletions === 'number' ? { deletions: file.deletions } : {}),
+        };
+      }),
+    },
+  };
+}
+
+const PRODUCT_TARGETS = ['chat', 'agent'] as const;
+
+function projectSkillDefinition(value: unknown): SkillDefinition {
+  if (!isRecord(value) || !isNonEmptyString(value.id, 256) ||
+      (value.ownerId !== null && !isNonEmptyString(value.ownerId, 256)) ||
+      !isNonEmptyString(value.slug, 128) || !isNonEmptyString(value.title, 256) ||
+      typeof value.description !== 'string' || !['built_in', 'private'].includes(String(value.visibility)) ||
+      !Array.isArray(value.supportedProducts) ||
+      value.supportedProducts.some(product => !PRODUCT_TARGETS.includes(product as typeof PRODUCT_TARGETS[number])) ||
+      !isDateString(value.createdAt) ||
+      (value.revision !== undefined && (!Number.isSafeInteger(value.revision) || Number(value.revision) < 1))) {
+    throw invalidDto();
+  }
+  return {
+    id: value.id,
+    ownerId: value.ownerId,
+    slug: sanitizeUntrustedText(value.slug),
+    title: sanitizeUntrustedText(value.title),
+    description: sanitizeUntrustedText(value.description),
+    visibility: value.visibility as SkillDefinition['visibility'],
+    supportedProducts: [...value.supportedProducts] as SkillDefinition['supportedProducts'],
+    ...(typeof value.revision === 'number' ? { revision: value.revision } : {}),
+    createdAt: value.createdAt,
+  };
+}
+
+function projectSkillListItem(value: unknown): SkillListItem {
+  if (!isRecord(value) || typeof value.installed !== 'boolean' || typeof value.enabled !== 'boolean' ||
+      (value.selectedVersionId !== null && !isNonEmptyString(value.selectedVersionId, 256))) throw invalidDto();
+  const definition = projectSkillDefinition(value);
+  return {
+    ...definition,
+    installed: value.installed,
+    enabled: value.enabled,
+    selectedVersionId: value.selectedVersionId,
+  };
+}
+
+function projectSkillVersion(value: unknown): SkillVersion {
+  if (!isRecord(value) || !isNonEmptyString(value.id, 256) || !isNonEmptyString(value.skillId, 256) ||
+      !Number.isSafeInteger(value.versionNumber) || Number(value.versionNumber) < 1 ||
+      !isNonEmptyString(value.contentHash, 256) || typeof value.instructions !== 'string' || !isDateString(value.createdAt)) {
+    throw invalidDto();
+  }
+  return {
+    id: value.id,
+    skillId: value.skillId,
+    versionNumber: Number(value.versionNumber),
+    contentHash: value.contentHash,
+    instructions: sanitizeUntrustedText(value.instructions),
+    createdAt: value.createdAt,
+  };
+}
+
+function projectSkillInstallation(value: unknown): SkillInstallation {
+  if (!isRecord(value) || !isNonEmptyString(value.id, 256) || !isNonEmptyString(value.userId, 256) ||
+      !isNonEmptyString(value.skillId, 256) || !isNonEmptyString(value.selectedVersionId, 256) ||
+      typeof value.enabled !== 'boolean' || !isDateString(value.installedAt)) throw invalidDto();
+  return {
+    id: value.id,
+    userId: value.userId,
+    skillId: value.skillId,
+    selectedVersionId: value.selectedVersionId,
+    enabled: value.enabled,
+    installedAt: value.installedAt,
+  };
+}
+
+function projectSkillListEnvelope(value: unknown): { items: SkillListItem[]; nextCursor: string | null } {
+  if (!isRecord(value) || !Array.isArray(value.items) ||
+      (value.nextCursor !== null && typeof value.nextCursor !== 'string')) throw invalidDto();
+  return { items: value.items.map(projectSkillListItem), nextCursor: value.nextCursor };
+}
+
+function projectSkillEnvelope(value: unknown): { skill: SkillDefinition } {
+  if (!isRecord(value)) throw invalidDto();
+  return { skill: projectSkillDefinition(value.skill) };
+}
+
+function projectSkillDetailEnvelope(value: unknown): { skill: SkillDefinition & { versions?: SkillVersion[]; installation?: SkillInstallation } } {
+  if (!isRecord(value) || !isRecord(value.skill)) throw invalidDto();
+  const skill = value.skill;
+  const definition = projectSkillDefinition(skill);
+  if ((skill.versions !== undefined && !Array.isArray(skill.versions)) ||
+      (skill.installation !== undefined && skill.installation !== null && !isRecord(skill.installation))) throw invalidDto();
+  return {
+    skill: {
+      ...definition,
+      ...(Array.isArray(skill.versions) ? { versions: skill.versions.map(projectSkillVersion) } : {}),
+      ...(isRecord(skill.installation) ? { installation: projectSkillInstallation(skill.installation) } : {}),
+    },
+  };
+}
+
+function projectSkillVersionEnvelope(value: unknown): { version: SkillVersion } {
+  if (!isRecord(value)) throw invalidDto();
+  return { version: projectSkillVersion(value.version) };
+}
+
+function projectSkillInstallationEnvelope(value: unknown): { installation: SkillInstallation } {
+  if (!isRecord(value)) throw invalidDto();
+  return { installation: projectSkillInstallation(value.installation) };
+}
+
+function projectPreferencesEnvelope(value: unknown): { preferences: UserPreferences } {
+  if (!isRecord(value) || !isRecord(value.preferences)) throw invalidDto();
+  const preferences = value.preferences;
+  if (!Number.isSafeInteger(preferences.revision) || Number(preferences.revision) < 0 ||
+      !['concise', 'balanced', 'detailed'].includes(String(preferences.responseLength)) ||
+      !['professional', 'casual', 'technical'].includes(String(preferences.responseStyle)) ||
+      typeof preferences.customInstructions !== 'string' ||
+      (preferences.preferredLanguage !== undefined && preferences.preferredLanguage !== null && typeof preferences.preferredLanguage !== 'string')) {
+    throw invalidDto();
+  }
+  return {
+    preferences: {
+      revision: Number(preferences.revision),
+      ...(preferences.preferredLanguage !== undefined ? { preferredLanguage: preferences.preferredLanguage as string | null } : {}),
+      responseLength: preferences.responseLength as UserPreferences['responseLength'],
+      responseStyle: preferences.responseStyle as UserPreferences['responseStyle'],
+      customInstructions: sanitizeUntrustedText(preferences.customInstructions),
+    },
+  };
+}
+
+function projectChatCredentialPreference(value: unknown): ChatCredentialPreference {
+  if (!isRecord(value) || !['platform', 'byok'].includes(String(value.mode)) ||
+      (value.credentialId !== null && !isNonEmptyString(value.credentialId, 256))) throw invalidDto();
+  return { mode: value.mode as ChatCredentialPreference['mode'], credentialId: value.credentialId };
 }
 
 function projectProviderCredential(value: unknown): ProviderCredential {
@@ -234,8 +498,18 @@ export class ApiException extends Error {
   ) {
     super(sanitizeUntrustedText(message, knownSecrets));
     this.code = sanitizeUntrustedText(code, knownSecrets).slice(0, 80);
-    this.details = details ? sanitizeUntrustedValue(details, knownSecrets) as Record<string, unknown> : undefined;
+    const sanitizedDetails = details ? sanitizeUntrustedValue(details, knownSecrets) : undefined;
+    this.details = isRecord(sanitizedDetails) ? sanitizedDetails : undefined;
     this.name = 'ApiException';
+  }
+
+  get generation(): ChatGeneration | undefined {
+    if (!this.details || this.details.generation === undefined) return undefined;
+    try {
+      return projectChatGeneration(this.details.generation);
+    } catch {
+      return undefined;
+    }
   }
 }
 
@@ -246,7 +520,8 @@ export class RealApiClient {
     this.baseUrl = baseUrl;
   }
 
-  private async request<T>(path: string, options: RequestInit = {}): Promise<T> {
+  private async request(path: string, options: RequestInit = {}): Promise<unknown> {
+    const requestEpoch = sessionEpoch;
     const url = `${this.baseUrl}${path}`;
     const headers = new Headers(options.headers);
 
@@ -262,7 +537,8 @@ export class RealApiClient {
     notifyUnauthorized(path, response.status);
 
     if (response.status === 204) {
-      return null as T;
+      assertSessionEpoch(requestEpoch, path);
+      return null;
     }
 
     const contentType = response.headers.get('content-type') ?? '';
@@ -279,53 +555,50 @@ export class RealApiClient {
     }
 
     if (!response.ok) {
-      const errPayload = isRecord(data) ? data as { error?: ApiError } : undefined;
-      const code = safeApiErrorCode(errPayload?.error?.code, response.status);
-      const message = safeApiErrorMessage(errPayload?.error?.message, response.statusText || 'Request failed');
-      const details = projectGenerationErrorDetails(errPayload?.error?.details);
-      throw new ApiException(response.status, code, message, details, extractSensitiveRequestValues(options.body));
+      const error = readApiError(data, response.status, response.statusText || 'Request failed');
+      throw new ApiException(response.status, error.code, error.message, error.details, extractSensitiveRequestValues(options.body));
     }
 
-    return data as T;
+    return data;
   }
 
   // Auth Operations
   async login(email: string, password: string): Promise<{ user: User }> {
-    return this.request<{ user: User }>('/api/v1/auth/login', {
+    return projectUserEnvelope(await this.request('/api/v1/auth/login', {
       method: 'POST',
       body: JSON.stringify({ email, password }),
-    });
+    }));
   }
 
   async logout(): Promise<void> {
-    await this.request<void>('/api/v1/auth/logout', {
+    await this.request('/api/v1/auth/logout', {
       method: 'POST',
     });
   }
 
   async getMe(): Promise<{ user: User }> {
-    return this.request<{ user: User }>('/api/v1/auth/me', {
+    return projectUserEnvelope(await this.request('/api/v1/auth/me', {
       method: 'GET',
-    });
+    }));
   }
 
   async register(email: string, password: string, displayName: string): Promise<{ user: User }> {
-    return this.request<{ user: User }>('/api/v1/auth/register', {
+    return projectUserEnvelope(await this.request('/api/v1/auth/register', {
       method: 'POST',
       body: JSON.stringify({ email, password, displayName }),
-    });
+    }));
   }
 
   // Conversation & Chat Operations
   async listConversations(): Promise<{ items: Conversation[]; nextCursor: string | null }> {
-    const response = await this.request<unknown>('/api/v1/conversations', {
+    const response = await this.request('/api/v1/conversations', {
       method: 'GET',
     });
     return projectConversationList(response);
   }
 
   async getConversation(id: string): Promise<{ conversation: Conversation; messages: Message[] }> {
-    const response = await this.request<unknown>(`/api/v1/conversations/${encodeURIComponent(id)}`, {
+    const response = await this.request(`/api/v1/conversations/${encodeURIComponent(id)}`, {
       method: 'GET',
     });
     if (!isRecord(response) || !Array.isArray(response.messages)) throw invalidDto();
@@ -333,23 +606,23 @@ export class RealApiClient {
   }
 
   async createConversation(title?: string): Promise<{ conversation: Conversation }> {
-    return this.request<{ conversation: Conversation }>('/api/v1/conversations', {
+    return projectConversationEnvelope(await this.request('/api/v1/conversations', {
       method: 'POST',
       body: JSON.stringify({ title }),
-    });
+    }));
   }
 
   async deleteConversation(id: string): Promise<void> {
-    await this.request<void>(`/api/v1/conversations/${encodeURIComponent(id)}`, {
+    await this.request(`/api/v1/conversations/${encodeURIComponent(id)}`, {
       method: 'DELETE',
     });
   }
 
   // Model Capabilities Discovery (Task 17T-41 / 17T-42)
   async listModels(): Promise<ModelsResponse> {
-    return this.request<ModelsResponse>('/api/v1/models', {
+    return projectModelsResponse(await this.request('/api/v1/models', {
       method: 'GET',
-    });
+    }));
   }
 
   // Streaming Chat & Generation Operations
@@ -364,6 +637,7 @@ export class RealApiClient {
       reasoningEffort?: ReasoningEffort;
     }
   ): Promise<void> {
+    const requestEpoch = sessionEpoch;
     const url = `${this.baseUrl}/api/v1/conversations/${encodeURIComponent(conversationId)}/messages:stream`;
     const headers = new Headers();
     headers.set('Content-Type', 'application/json');
@@ -397,22 +671,23 @@ export class RealApiClient {
     notifyUnauthorized(url, response.status);
 
     if (!response.ok) {
-      let errPayload: { error?: ApiError; generation?: ChatGeneration } | undefined;
+      let errPayload: unknown;
       try {
         errPayload = await response.json();
       } catch {
         // Fallback for non-JSON error
       }
-      const code = safeApiErrorCode(errPayload?.error?.code, response.status);
-      const message = safeApiErrorMessage(errPayload?.error?.message, response.statusText || 'Chat stream request failed');
+      const error = readApiError(errPayload, response.status, response.statusText || 'Chat stream request failed');
       throw new ApiException(
         response.status,
-        code,
-        message,
-        projectGenerationErrorDetails(errPayload?.error?.details, errPayload?.generation),
+        error.code,
+        error.message,
+        error.details,
         extractSensitiveRequestValues(JSON.stringify(body))
       );
     }
+
+    assertSessionEpoch(requestEpoch, url);
 
     const contentType = response.headers.get('content-type') ?? '';
     if (!contentType.includes('text/event-stream')) {
@@ -450,6 +725,7 @@ export class RealApiClient {
         }
 
         const { done, value } = await reader.read();
+        assertSessionEpoch(requestEpoch, url);
         if (done) {
           parser.flush();
           break;
@@ -476,6 +752,7 @@ export class RealApiClient {
       reasoningEffort?: ReasoningEffort;
     }
   ): Promise<void> {
+    const requestEpoch = sessionEpoch;
     const url = `${this.baseUrl}/api/v1/conversations/${encodeURIComponent(conversationId)}/generations:stream`;
     const headers = new Headers();
     headers.set('Content-Type', 'application/json');
@@ -510,22 +787,23 @@ export class RealApiClient {
     notifyUnauthorized(url, response.status);
 
     if (!response.ok) {
-      let errPayload: { error?: ApiError; generation?: ChatGeneration } | undefined;
+      let errPayload: unknown;
       try {
         errPayload = await response.json();
       } catch {
         // Fallback for non-JSON error
       }
-      const code = safeApiErrorCode(errPayload?.error?.code, response.status);
-      const message = safeApiErrorMessage(errPayload?.error?.message, response.statusText || 'Variant stream request failed');
+      const error = readApiError(errPayload, response.status, response.statusText || 'Variant stream request failed');
       throw new ApiException(
         response.status,
-        code,
-        message,
-        projectGenerationErrorDetails(errPayload?.error?.details, errPayload?.generation),
+        error.code,
+        error.message,
+        error.details,
         extractSensitiveRequestValues(JSON.stringify(body))
       );
     }
+
+    assertSessionEpoch(requestEpoch, url);
 
     const contentType = response.headers.get('content-type') ?? '';
     if (!contentType.includes('text/event-stream')) {
@@ -563,6 +841,7 @@ export class RealApiClient {
         }
 
         const { done, value } = await reader.read();
+        assertSessionEpoch(requestEpoch, url);
         if (done) {
           parser.flush();
           break;
@@ -580,7 +859,7 @@ export class RealApiClient {
     conversationId: string,
     generationId: string
   ): Promise<{ generation: ChatGeneration }> {
-    return projectGenerationEnvelope(await this.request<unknown>(
+    return projectGenerationEnvelope(await this.request(
       `/api/v1/conversations/${encodeURIComponent(conversationId)}/generations/${encodeURIComponent(generationId)}`,
       { method: 'GET' }
     ));
@@ -599,7 +878,7 @@ export class RealApiClient {
         : `cancel_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`);
     headers.set('Idempotency-Key', key);
 
-    return projectGenerationEnvelope(await this.request<unknown>(
+    return projectGenerationEnvelope(await this.request(
       `/api/v1/conversations/${encodeURIComponent(conversationId)}/generations/${encodeURIComponent(generationId)}/cancel`,
       {
         method: 'POST',
@@ -609,50 +888,50 @@ export class RealApiClient {
   }
 
   async getTurnVariants(conversationId: string, userMessageId: string): Promise<ChatTurnVariants> {
-    return projectChatTurnVariants(await this.request<unknown>(
+    return projectChatTurnVariants(await this.request(
       `/api/v1/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(userMessageId)}/generations`
     ));
   }
 
   // Agent Operations
   async getAgentCapabilities(): Promise<AgentCapabilities> {
-    return readAgentCapabilities(await this.request<unknown>('/api/v1/agent/capabilities'));
+    return readAgentCapabilities(await this.request('/api/v1/agent/capabilities'));
   }
 
-  async createAgentRun(task: string, repository: string, baseRef?: string): Promise<{ run: AgentRun }> {
-    return this.request<{ run: AgentRun }>('/api/v1/agent/runs', {
+  async createAgentRun(task: string, repository: string, baseRef?: string): Promise<{ run: WorkspaceAgentRun }> {
+    return projectWorkspaceAgentRunEnvelope(await this.request('/api/v1/agent/runs', {
       method: 'POST',
       body: JSON.stringify({ task, repository, baseRef }),
-    });
+    }));
   }
 
-  async getAgentRun(id: string): Promise<{ run: AgentRun }> {
-    return this.request<{ run: AgentRun }>(`/api/v1/agent/runs/${encodeURIComponent(id)}`, {
+  async getAgentRun(id: string): Promise<{ run: WorkspaceAgentRun }> {
+    return projectWorkspaceAgentRunEnvelope(await this.request(`/api/v1/agent/runs/${encodeURIComponent(id)}`, {
       method: 'GET',
-    });
+    }));
   }
 
-  async getRun(id: string): Promise<{ run: AgentRun }> {
+  async getRun(id: string): Promise<{ run: WorkspaceAgentRun }> {
     return this.getAgentRun(id);
   }
 
   async getProposal(runId: string): Promise<{ proposal: ChangeProposal }> {
-    return this.request<{ proposal: ChangeProposal }>(`/api/v1/agent/runs/${encodeURIComponent(runId)}/proposal`, {
+    return projectChangeProposalEnvelope(await this.request(`/api/v1/agent/runs/${encodeURIComponent(runId)}/proposal`, {
       method: 'GET',
-    });
+    }));
   }
 
-  async submitDecision(runId: string, proposalId: string, decision: 'approve' | 'reject'): Promise<{ run: AgentRun }> {
-    return this.request<{ run: AgentRun }>(`/api/v1/agent/runs/${encodeURIComponent(runId)}/decision`, {
+  async submitDecision(runId: string, proposalId: string, decision: 'approve' | 'reject'): Promise<{ run: WorkspaceAgentRun }> {
+    return projectWorkspaceAgentRunEnvelope(await this.request(`/api/v1/agent/runs/${encodeURIComponent(runId)}/decision`, {
       method: 'POST',
       body: JSON.stringify({ proposalId, decision }),
-    });
+    }));
   }
 
-  async cancelAgentRun(runId: string): Promise<{ run: AgentRun }> {
-    return this.request<{ run: AgentRun }>(`/api/v1/agent/runs/${encodeURIComponent(runId)}/cancel`, {
+  async cancelAgentRun(runId: string): Promise<{ run: WorkspaceAgentRun }> {
+    return projectWorkspaceAgentRunEnvelope(await this.request(`/api/v1/agent/runs/${encodeURIComponent(runId)}/cancel`, {
       method: 'POST',
-    });
+    }));
   }
 
   // ==========================================
@@ -661,16 +940,16 @@ export class RealApiClient {
 
   // User Preferences
   async getPreferences(): Promise<{ preferences: UserPreferences }> {
-    return this.request<{ preferences: UserPreferences }>('/api/v1/me/preferences', {
+    return projectPreferencesEnvelope(await this.request('/api/v1/me/preferences', {
       method: 'GET',
-    });
+    }));
   }
 
   async updatePreferences(dto: UpdatePreferencesDto): Promise<{ preferences: UserPreferences }> {
-    return this.request<{ preferences: UserPreferences }>('/api/v1/me/preferences', {
+    return projectPreferencesEnvelope(await this.request('/api/v1/me/preferences', {
       method: 'PATCH',
       body: JSON.stringify(dto),
-    });
+    }));
   }
 
   // Skills Catalog & Management
@@ -685,61 +964,61 @@ export class RealApiClient {
     if (options?.cursor) params.set('cursor', options.cursor);
     const qs = params.toString() ? `?${params.toString()}` : '';
 
-    return this.request<{ items: SkillListItem[]; nextCursor: string | null }>(`/api/v1/skills${qs}`, {
+    return projectSkillListEnvelope(await this.request(`/api/v1/skills${qs}`, {
       method: 'GET',
-    });
+    }));
   }
 
   async createSkill(dto: CreateSkillDto): Promise<{ skill: SkillDefinition }> {
-    return this.request<{ skill: SkillDefinition }>('/api/v1/skills', {
+    return projectSkillEnvelope(await this.request('/api/v1/skills', {
       method: 'POST',
       body: JSON.stringify(dto),
-    });
+    }));
   }
 
   async getSkill(
     id: string
   ): Promise<{ skill: SkillDefinition & { versions?: SkillVersion[]; installation?: SkillInstallation } }> {
-    return this.request<{ skill: SkillDefinition & { versions?: SkillVersion[]; installation?: SkillInstallation } }>(
+    return projectSkillDetailEnvelope(await this.request(
       `/api/v1/skills/${encodeURIComponent(id)}`,
       {
         method: 'GET',
       }
-    );
+    ));
   }
 
   async updateSkill(id: string, dto: UpdateSkillDto): Promise<{ skill: SkillDefinition }> {
-    return this.request<{ skill: SkillDefinition }>(`/api/v1/skills/${encodeURIComponent(id)}`, {
+    return projectSkillEnvelope(await this.request(`/api/v1/skills/${encodeURIComponent(id)}`, {
       method: 'PATCH',
       body: JSON.stringify(dto),
-    });
+    }));
   }
 
   async deleteSkill(id: string): Promise<void> {
-    await this.request<void>(`/api/v1/skills/${encodeURIComponent(id)}`, {
+    await this.request(`/api/v1/skills/${encodeURIComponent(id)}`, {
       method: 'DELETE',
     });
   }
 
   async publishSkillVersion(id: string, dto: CreateVersionDto): Promise<{ version: SkillVersion }> {
-    return this.request<{ version: SkillVersion }>(`/api/v1/skills/${encodeURIComponent(id)}/versions`, {
+    return projectSkillVersionEnvelope(await this.request(`/api/v1/skills/${encodeURIComponent(id)}/versions`, {
       method: 'POST',
       body: JSON.stringify(dto),
-    });
+    }));
   }
 
   async installSkill(id: string, dto?: InstallSkillDto): Promise<{ installation: SkillInstallation }> {
-    return this.request<{ installation: SkillInstallation }>(`/api/v1/skills/${encodeURIComponent(id)}/install`, {
+    return projectSkillInstallationEnvelope(await this.request(`/api/v1/skills/${encodeURIComponent(id)}/install`, {
       method: 'POST',
       body: JSON.stringify(dto || {}),
-    });
+    }));
   }
 
   async updateInstallation(id: string, dto: UpdateInstallationDto): Promise<{ installation: SkillInstallation }> {
-    return this.request<{ installation: SkillInstallation }>(`/api/v1/skills/${encodeURIComponent(id)}/installation`, {
+    return projectSkillInstallationEnvelope(await this.request(`/api/v1/skills/${encodeURIComponent(id)}/installation`, {
       method: 'PATCH',
       body: JSON.stringify(dto),
-    });
+    }));
   }
 
   // ==========================================
@@ -747,14 +1026,14 @@ export class RealApiClient {
   // ==========================================
 
   async getProviderCredentials(): Promise<{ items: ProviderCredential[] }> {
-    const response = await this.request<unknown>('/api/v1/me/provider-credentials', {
+    const response = await this.request('/api/v1/me/provider-credentials', {
       method: 'GET',
     });
     return projectCredentialEnvelope(response, 'items');
   }
 
   async saveProviderCredential(dto: SaveCredentialDto): Promise<{ credential: ProviderCredential }> {
-    const response = await this.request<unknown>('/api/v1/me/provider-credentials', {
+    const response = await this.request('/api/v1/me/provider-credentials', {
       method: 'POST',
       body: JSON.stringify(dto),
     });
@@ -762,13 +1041,13 @@ export class RealApiClient {
   }
 
   async deleteProviderCredential(id: string): Promise<void> {
-    await this.request<void>(`/api/v1/me/provider-credentials/${encodeURIComponent(id)}`, {
+    await this.request(`/api/v1/me/provider-credentials/${encodeURIComponent(id)}`, {
       method: 'DELETE',
     });
   }
 
   async validateProviderCredential(id: string): Promise<{ credential: ProviderCredential }> {
-    const response = await this.request<unknown>(
+    const response = await this.request(
       `/api/v1/me/provider-credentials/${encodeURIComponent(id)}/validate`,
       {
         method: 'POST',
@@ -779,16 +1058,16 @@ export class RealApiClient {
   }
 
   async getChatCredentialPreference(): Promise<ChatCredentialPreference> {
-    return this.request<ChatCredentialPreference>('/api/v1/me/chat-credential-preference', {
+    return projectChatCredentialPreference(await this.request('/api/v1/me/chat-credential-preference', {
       method: 'GET',
-    });
+    }));
   }
 
   async setChatCredentialPreference(dto: SetCredentialPreferenceDto): Promise<ChatCredentialPreference> {
-    return this.request<ChatCredentialPreference>('/api/v1/me/chat-credential-preference', {
+    return projectChatCredentialPreference(await this.request('/api/v1/me/chat-credential-preference', {
       method: 'PUT',
       body: JSON.stringify(dto),
-    });
+    }));
   }
 }
 

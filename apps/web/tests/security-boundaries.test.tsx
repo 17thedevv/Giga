@@ -6,6 +6,7 @@ import { DiffViewer } from '../src/features/agent/DiffViewer.js';
 import { RealApiClient, ApiException } from '../src/lib/api/client.js';
 import { SaveCredentialModal } from '../src/features/settings/SaveCredentialModal.js';
 import { safeGitHubPullRequestUrl } from '../src/lib/security/untrusted-content.js';
+import { sanitizeStreamingText } from '../src/lib/security/untrusted-content.js';
 import type { AgentRun, ChangeProposal, Message } from '../src/lib/api/types.js';
 
 afterEach(() => {
@@ -123,6 +124,24 @@ describe('untrusted content and API boundary', () => {
     expect(fetchMock).toHaveBeenCalledWith('/api/v1/conversations/..%2Fother-tenant%2Fprivate', expect.objectContaining({ credentials: 'include' }));
   });
 
+  it('rejects a protected no-content success that settles after session invalidation', async () => {
+    let resolveDelete!: (response: Response) => void;
+    const delayedDelete = new Promise<Response>(resolve => { resolveDelete = resolve; });
+    const client = new RealApiClient();
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      if (String(input).includes('/conversations/late-delete')) return delayedDelete;
+      return Promise.resolve(new Response(JSON.stringify({ error: { code: 'UNAUTHENTICATED', message: 'Session expired' } }), {
+        status: 401, headers: { 'content-type': 'application/json' },
+      }));
+    }));
+
+    const deleteRequest = client.deleteConversation('late-delete');
+    await expect(client.getConversation('invalid-session')).rejects.toMatchObject({ status: 401 });
+    resolveDelete(new Response(null, { status: 204 }));
+
+    await expect(deleteRequest).rejects.toMatchObject({ status: 401, code: 'SESSION_EXPIRED' });
+  });
+
   it('validates and projects conversation DTOs while redacting common credential forms from content', async () => {
     const client = new RealApiClient();
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
@@ -181,5 +200,166 @@ describe('untrusted content and API boundary', () => {
     );
     await expect(client.getGeneration('c1', 'g1')).rejects.toMatchObject({ code: 'INVALID_RESPONSE' });
     await expect(client.getTurnVariants('c1', 'u1')).rejects.toMatchObject({ code: 'INVALID_RESPONSE' });
+  });
+
+  it('projects auth, conversation, model, Agent, preference and Skills responses to public DTO fields', async () => {
+    const client = new RealApiClient();
+    const sentinel = 'AIzaSyntheticApiBoundaryCredential0123456789';
+    const createdAt = '2026-10-01T00:00:00.000Z';
+    const userSkill = {
+      id: 'skill-1', ownerId: null, slug: 'safe-skill', title: 'Safe skill', description: 'Description',
+      visibility: 'built_in', supportedProducts: ['chat'], revision: 2, createdAt,
+    };
+    const version = { id: 'version-1', skillId: 'skill-1', versionNumber: 1, contentHash: 'sha256-hash', instructions: `Use safe text ${sentinel}`, createdAt };
+    const installation = { id: 'installation-1', userId: 'user-1', skillId: 'skill-1', selectedVersionId: 'version-1', enabled: true, installedAt: createdAt };
+    const preferences = { revision: 2, preferredLanguage: 'en', responseLength: 'balanced', responseStyle: 'professional', customInstructions: `Be careful ${sentinel}`, internalPrompt: 'private' };
+    const model = { id: 'giga-chat-default', capabilities: ['text', 'streaming', 'unreviewed_internal_capability'], reasoning: { supported: true, efforts: ['low', 'medium'], providerSettings: { apiKey: sentinel } }, providerApiKey: sentinel };
+    const run = {
+      id: '11111111-1111-4111-8111-111111111111', workspaceId: '22222222-2222-4222-8222-222222222222',
+      task: `Summarize ${sentinel}`, mode: 'execute', runtime: 'cloud', modelId: 'giga-agent-default', status: 'completed',
+      createdAt, updatedAt: createdAt, result: { summary: `Complete ${sentinel}`, artifactIds: [], verifiedChecks: [] },
+      workerLeaseToken: sentinel, rawReasoning: 'private', providerConfig: { apiKey: sentinel },
+      approvalRequest: { id: 'approval-1', apiKey: sentinel },
+    };
+    const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(json({ user: { id: 'user-1', email: 'user@example.test', displayName: 'User', apiKey: sentinel, internalRole: 'admin' }, sessionToken: sentinel }))
+      .mockResolvedValueOnce(json({ conversation: { id: 'conversation-1', title: 'New chat', createdAt, updatedAt: createdAt, ownerId: 'private' }, workerLeaseToken: sentinel }))
+      .mockResolvedValueOnce(json({ items: [{ id: 'conversation-2', title: 'Existing chat', createdAt, updatedAt: createdAt, ownerId: sentinel }], nextCursor: null, rawRows: sentinel }))
+      .mockResolvedValueOnce(json({ models: [model], providerCatalog: [{ apiKey: sentinel }] }))
+      .mockResolvedValueOnce(json({ run, workerQueue: { leaseToken: sentinel } }))
+      .mockResolvedValueOnce(json({ proposal: { id: 'proposal-1', runId: 'run-1', baseCommitSha: 'deadbeef', createdAt, files: [{ path: 'src/file.ts', status: 'modified', unifiedDiff: `+${sentinel}`, additions: 1, deletions: 0, rawWorkerOutput: sentinel }], providerResponse: { reasoning: 'private' } } }))
+      .mockResolvedValueOnce(json({ preferences }))
+      .mockResolvedValueOnce(json({ preferences: { ...preferences, revision: 3, rawPrompt: sentinel } }))
+      .mockResolvedValueOnce(json({ items: [{ ...userSkill, installed: true, enabled: true, selectedVersionId: version.id, databaseUrl: sentinel }], nextCursor: null, workerLeaseToken: sentinel }))
+      .mockResolvedValueOnce(json({ skill: { ...userSkill, instructions: sentinel, internalNotes: sentinel } }))
+      .mockResolvedValueOnce(json({ skill: { ...userSkill, versions: [version], installation: { ...installation, providerApiKey: sentinel }, rawReasoning: sentinel } }))
+      .mockResolvedValueOnce(json({ skill: { ...userSkill, internalNotes: sentinel } }))
+      .mockResolvedValueOnce(json({ version: { ...version, apiKey: sentinel } }))
+      .mockResolvedValueOnce(json({ installation: { ...installation, workerLeaseToken: sentinel } }))
+      .mockResolvedValueOnce(json({ installation: { ...installation, providerConfig: sentinel } }))
+      .mockResolvedValueOnce(json({ items: [{ id: 'credential-1', provider: 'gemini', displayHint: '••••6789', status: 'valid', createdAt, updatedAt: createdAt, lastValidatedAt: null, apiKey: sentinel, internalToken: sentinel }] }))
+      .mockResolvedValueOnce(json({ mode: 'byok', credentialId: 'credential-1', apiKey: sentinel }))
+      .mockResolvedValueOnce(json({ mode: 'platform', credentialId: null, rawProviderKey: sentinel }))
+    );
+
+    const me = await client.getMe();
+    const conversation = await client.createConversation('New chat');
+    const conversations = await client.listConversations();
+    const models = await client.listModels();
+    const agentRun = await client.getAgentRun(run.id);
+    const proposal = await client.getProposal('run-1');
+    const prefs = await client.getPreferences();
+    const updatedPrefs = await client.updatePreferences({ expectedRevision: 2, responseLength: 'balanced' });
+    const skills = await client.listSkills();
+    const createdSkill = await client.createSkill({ slug: 'safe-skill', title: 'Safe skill', description: 'Description' });
+    const skillDetail = await client.getSkill('skill-1');
+    const updatedSkill = await client.updateSkill('skill-1', { title: 'Safe skill', expectedRevision: 2 });
+    const publishedVersion = await client.publishSkillVersion('skill-1', { instructions: 'Keep it safe' });
+    const installed = await client.installSkill('skill-1');
+    const updatedInstallation = await client.updateInstallation('skill-1', { enabled: false });
+    const providerCredentials = await client.getProviderCredentials();
+    const credentialPreference = await client.getChatCredentialPreference();
+    const updatedCredentialPreference = await client.setChatCredentialPreference({ mode: 'platform', credentialId: null });
+
+    expect(me.user).toEqual({ id: 'user-1', email: 'user@example.test', displayName: 'User' });
+    expect(conversation.conversation).not.toHaveProperty('ownerId');
+    expect(conversations.items[0]).not.toHaveProperty('ownerId');
+    expect(conversations.items[0]).not.toHaveProperty('rawRows');
+    expect(models.models[0].capabilities).toEqual(['text', 'streaming']);
+    expect(models.models[0].reasoning).toEqual({ supported: true, efforts: ['low', 'medium'] });
+    expect(agentRun.run).not.toHaveProperty('workerLeaseToken');
+    expect(agentRun.run).not.toHaveProperty('providerConfig');
+    expect(agentRun.run).not.toHaveProperty('approvalRequest');
+    expect(agentRun.run.result?.summary).not.toContain(sentinel);
+    expect(proposal.proposal.files[0]).not.toHaveProperty('rawWorkerOutput');
+    expect(proposal.proposal.files[0].unifiedDiff).not.toContain(sentinel);
+    expect(prefs.preferences).not.toHaveProperty('internalPrompt');
+    expect(updatedPrefs.preferences).not.toHaveProperty('rawPrompt');
+    expect(skills.items[0]).not.toHaveProperty('databaseUrl');
+    expect(createdSkill.skill).not.toHaveProperty('instructions');
+    expect(skillDetail.skill.versions?.[0]).not.toHaveProperty('apiKey');
+    expect(skillDetail.skill.installation).not.toHaveProperty('providerApiKey');
+    expect(updatedSkill.skill).not.toHaveProperty('internalNotes');
+    expect(publishedVersion.version).not.toHaveProperty('apiKey');
+    expect(installed.installation).not.toHaveProperty('workerLeaseToken');
+    expect(updatedInstallation.installation).not.toHaveProperty('providerConfig');
+    expect(providerCredentials.items[0]).not.toHaveProperty('apiKey');
+    expect(providerCredentials.items[0]).not.toHaveProperty('internalToken');
+    expect(credentialPreference).not.toHaveProperty('apiKey');
+    expect(updatedCredentialPreference).not.toHaveProperty('rawProviderKey');
+    expect(JSON.stringify({ me, conversation, conversations, models, agentRun, proposal, prefs, updatedPrefs, skills, createdSkill, skillDetail, updatedSkill, publishedVersion, installed, updatedInstallation, providerCredentials, credentialPreference, updatedCredentialPreference })).not.toContain(sentinel);
+  });
+
+  it('withholds only unresolved credential-shaped stream suffixes, then redacts split credentials at completion', () => {
+    const credential = 'AIzaSyntheticSplitStreamCredential0123456789';
+    const ordinary = 'This ordinary streamed sentence remains visible before the credential: ';
+    let accumulated = '';
+    const visibleSnapshots: string[] = [];
+    for (const chunk of [ordinary, 'AIzaSyntheticSplit', 'StreamCredential0123456789', ' and ordinary text after it.']) {
+      accumulated += chunk;
+      visibleSnapshots.push(sanitizeStreamingText(accumulated));
+      expect(visibleSnapshots.at(-1)).not.toContain(credential);
+      expect(visibleSnapshots.at(-1)).not.toContain('AIzaSynthetic');
+    }
+    expect(visibleSnapshots.at(-1)).toContain(ordinary);
+    const completed = sanitizeStreamingText(accumulated, true);
+    expect(completed).toContain(`${ordinary}[redacted credential] and ordinary text after it.`);
+    expect(completed).not.toContain(credential);
+  });
+
+  it('redacts a sufficiently long credential-shaped stream suffix interrupted before completion', () => {
+    const interrupted = sanitizeStreamingText('Answer prefix AIzaSyntheticPartialKey', true);
+    expect(interrupted).toBe('Answer prefix [redacted credential fragment]');
+  });
+
+  it('redacts long credential assignments immediately without buffering their value', () => {
+    const streamed = sanitizeStreamingText(`Answer prefix api_key=${'a'.repeat(10_000)}`);
+    expect(streamed).toBe('Answer prefix api_key=[redacted]');
+    expect(streamed.length).toBeLessThan(64);
+  });
+
+  it('projects every Agent run response path to the workspace-run contract', async () => {
+    const client = new RealApiClient();
+    const createdAt = '2026-10-01T00:00:00.000Z';
+    const run = {
+      id: '11111111-1111-4111-8111-111111111111', workspaceId: '22222222-2222-4222-8222-222222222222',
+      task: 'A task', mode: 'execute', runtime: 'cloud', modelId: 'giga-agent-default', status: 'running',
+      createdAt, updatedAt: createdAt, workerLeaseToken: 'synthetic-worker-token', rawReasoning: 'private',
+    };
+    const json = () => new Response(JSON.stringify({ run }), { status: 200, headers: { 'content-type': 'application/json' } });
+    const fetchMock = vi.fn().mockResolvedValueOnce(json()).mockResolvedValueOnce(json()).mockResolvedValueOnce(json()).mockResolvedValueOnce(json());
+    vi.stubGlobal('fetch', fetchMock);
+
+    const created = await client.createAgentRun('A task', 'org/repo');
+    const fetched = await client.getAgentRun(run.id);
+    const decided = await client.submitDecision(run.id, 'proposal-id', 'reject');
+    const cancelled = await client.cancelAgentRun(run.id);
+    for (const response of [created, fetched, decided, cancelled]) {
+      expect(response.run).not.toHaveProperty('workerLeaseToken');
+      expect(response.run).not.toHaveProperty('rawReasoning');
+      expect(Object.keys(response.run)).toEqual(expect.arrayContaining(['id', 'workspaceId', 'task', 'mode', 'runtime', 'modelId', 'status', 'createdAt', 'updatedAt']));
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it('rejects malformed auth, chat, model, preference, Skills and Agent response shapes', async () => {
+    const client = new RealApiClient();
+    const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(json({ user: { id: 'user-1', apiKey: 'synthetic' } }))
+      .mockResolvedValueOnce(json({ conversation: { id: 'c1', title: 'Bad dates', createdAt: 'yesterday', updatedAt: 'later' } }))
+      .mockResolvedValueOnce(json({ models: [{ providerApiKey: 'synthetic' }] }))
+      .mockResolvedValueOnce(json({ preferences: { revision: -1, responseLength: 'unknown', responseStyle: 'technical', customInstructions: '' } }))
+      .mockResolvedValueOnce(json({ items: [{ id: 'skill-1', ownerId: null, slug: 'x', title: 'x', description: '', visibility: 'private', supportedProducts: ['chat'], createdAt: '2026-10-01T00:00:00.000Z', installed: false, enabled: false, selectedVersionId: null }] }))
+      .mockResolvedValueOnce(json({ run: { id: 'invalid', workerLeaseToken: 'synthetic' } }))
+    );
+
+    await expect(client.getMe()).rejects.toMatchObject({ code: 'INVALID_RESPONSE' });
+    await expect(client.createConversation()).rejects.toMatchObject({ code: 'INVALID_RESPONSE' });
+    await expect(client.listModels()).rejects.toMatchObject({ code: 'INVALID_RESPONSE' });
+    await expect(client.getPreferences()).rejects.toMatchObject({ code: 'INVALID_RESPONSE' });
+    await expect(client.listSkills()).rejects.toMatchObject({ code: 'INVALID_RESPONSE' });
+    await expect(client.getAgentRun('run-id')).rejects.toMatchObject({ code: 'INVALID_RESPONSE' });
   });
 });

@@ -14,6 +14,7 @@ import {
   normalizeModelMetadata,
   getEffectiveReasoningEffort,
 } from './model-capabilities.js';
+import { sanitizeStreamingText } from '../../lib/security/untrusted-content.js';
 
 const MAX_POLL_ATTEMPTS = 5;
 const POLL_INTERVAL_MS = 150;
@@ -27,10 +28,6 @@ const isTerminalStatus = (status: string): boolean => {
     status === 'interrupted'
   );
 };
-
-if (typeof window !== 'undefined') {
-  (window as any).__mockDataAdapter = mockDataAdapter;
-}
 
 export const ChatView: React.FC = () => {
   const { params, navigate } = useRouter();
@@ -305,7 +302,7 @@ export const ChatView: React.FC = () => {
       if (!current(id, op) || activeGenerationIdRef.current !== generationId) return false;
       if (!isTerminalStatus(generation.status)) {
         setCanStop(true);
-        if (generation.partialContent) setStreamingText(generation.partialContent);
+        if (generation.partialContent) setStreamingText(sanitizeStreamingText(generation.partialContent, true));
         if (attempt < MAX_POLL_ATTEMPTS) {
           await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
           return reconcileAuthoritativeGeneration(id, generationId, fallback, localPartial, attempt + 1, op);
@@ -323,10 +320,10 @@ export const ChatView: React.FC = () => {
       let next = history.messages;
       if (generation.status === 'completed' && !next.some(m => m.id === generation.assistantMessageId)) {
         next = [...next, { id: generation.assistantMessageId || generation.id, conversationId: id,
-          role: 'assistant', content: generation.partialContent, createdAt: generation.finishedAt || generation.createdAt, status: 'completed' }];
+          role: 'assistant', content: sanitizeStreamingText(generation.partialContent, true), createdAt: generation.finishedAt || generation.createdAt, status: 'completed' }];
       }
       if (generation.status !== 'completed' && !(variants?.selectedGenerationId)) {
-        const partial = generation.partialContent || localPartial;
+        const partial = sanitizeStreamingText(generation.partialContent || localPartial || '', true);
         if (partial) next = [...next, {
           id: 'partial_' + generation.id, conversationId: id, role: 'assistant',
           content: partial, createdAt: generation.finishedAt || generation.createdAt,
@@ -519,13 +516,14 @@ export const ChatView: React.FC = () => {
         } else if (event.data.generationId !== activeGenerationIdRef.current) return;
         if (event.event === 'message.delta') {
           accumulatedTextRef.current += event.data.text;
-          setStreamingText(accumulatedTextRef.current);
+          setStreamingText(sanitizeStreamingText(accumulatedTextRef.current));
         } else if (event.event === 'stream.error') {
           // Diagnostic; message.failed is the terminal event.
           setErrorBanner(event.data.error.message);
         } else if (event.event === 'message.completed') {
           terminal = true;
-          const text = accumulatedTextRef.current;
+          const text = sanitizeStreamingText(accumulatedTextRef.current, true);
+          setStreamingText(text);
           if (action && originalUser) {
             setTurn(prev => prev ? {
               ...prev, selectedGenerationId: event.data.generationId,
@@ -559,7 +557,8 @@ export const ChatView: React.FC = () => {
         } else if (event.event === 'message.failed' || event.event === 'message.stopped') {
           terminal = true;
           terminalWork = reconcileAuthoritativeGeneration(target, event.data.generationId,
-            event.event === 'message.failed' ? event.data.error.message : undefined, accumulatedTextRef.current);
+            event.event === 'message.failed' ? event.data.error.message : undefined,
+            sanitizeStreamingText(accumulatedTextRef.current, true));
         }
       };
       if (action && originalUser) {
@@ -570,7 +569,7 @@ export const ChatView: React.FC = () => {
       if (terminalWork) await terminalWork;
       if (!terminal && current(target, op) && actionLockRef.current) {
         if (activeGenerationIdRef.current) {
-          await reconcileAuthoritativeGeneration(target, activeGenerationIdRef.current, 'Stream ended before a terminal event', accumulatedTextRef.current);
+          await reconcileAuthoritativeGeneration(target, activeGenerationIdRef.current, 'Stream ended before a terminal event', sanitizeStreamingText(accumulatedTextRef.current, true));
         } else {
           throw new Error('Stream ended before generation admission was confirmed');
         }
@@ -586,7 +585,7 @@ export const ChatView: React.FC = () => {
         return;
       }
       if (!current(id, op) || controller.signal.aborted && !actionLockRef.current) return;
-      const duplicate = err instanceof ApiException ? err.details?.generation as ChatGeneration | undefined : undefined;
+      const duplicate = err instanceof ApiException ? err.generation : undefined;
       if (duplicate?.conversationId === id) {
         activeGenerationIdRef.current = duplicate.id;
         activeGenerationConversationIdRef.current = id;
@@ -594,7 +593,7 @@ export const ChatView: React.FC = () => {
       }
       if (activeGenerationIdRef.current) {
         await reconcileAuthoritativeGeneration(id, activeGenerationIdRef.current,
-          err instanceof Error ? err.message : 'Stream error', accumulatedTextRef.current);
+          err instanceof Error ? err.message : 'Stream error', sanitizeStreamingText(accumulatedTextRef.current, true));
       } else {
         setErrorBanner(err instanceof Error ? err.message : 'Stream error');
         // Refresh latest-turn variants to discover admission if message.started was lost.
@@ -631,11 +630,13 @@ export const ChatView: React.FC = () => {
       if (!current(owningConvId, op) || activeGenerationIdRef.current !== genId) return;
       if (mode === 'mock') abortControllerRef.current?.abort();
       if (isTerminalStatus(result.generation.status)) {
-        await reconcileAuthoritativeGeneration(owningConvId, genId, undefined, accumulatedTextRef.current, 0, op, result.generation);
+        await reconcileAuthoritativeGeneration(owningConvId, genId, undefined,
+          sanitizeStreamingText(accumulatedTextRef.current, true), 0, op, result.generation);
         if (current(owningConvId, op) && !activeGenerationIdRef.current) abortControllerRef.current?.abort();
       } else {
         stopTimeoutRef.current = setTimeout(() => {
-          void reconcileAuthoritativeGeneration(owningConvId, genId, undefined, accumulatedTextRef.current);
+          void reconcileAuthoritativeGeneration(owningConvId, genId, undefined,
+            sanitizeStreamingText(accumulatedTextRef.current, true));
         }, STOP_FALLBACK_TIMEOUT_MS);
       }
     } catch (err) {

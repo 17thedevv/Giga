@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import type { User } from '../../lib/api/types.js';
 import { realApiClient, ApiException, SESSION_EXPIRED_EVENT } from '../../lib/api/client.js';
 import { mockDataAdapter } from '../../lib/api/mock-adapter.js';
@@ -24,10 +24,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [sessionExpired, setSessionExpired] = useState<boolean>(false);
+  const authRequestVersionRef = useRef(0);
 
   useEffect(() => {
     if (mode !== 'real' || typeof window === 'undefined') return;
     const invalidateSession = () => {
+      authRequestVersionRef.current++;
       setUser(null);
       setIsLoading(false);
       setError(null);
@@ -38,47 +40,51 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, [mode]);
 
   const checkSession = useCallback(async () => {
+    const requestVersion = ++authRequestVersionRef.current;
     setIsLoading(true);
     setError(null);
     try {
       if (mode === 'real') {
         const res = await realApiClient.getMe();
-        setUser(res.user);
+        if (requestVersion === authRequestVersionRef.current) setUser(res.user);
       } else {
         const res = await mockDataAdapter.getMe();
-        setUser(res.user);
+        if (requestVersion === authRequestVersionRef.current) setUser(res.user);
       }
     } catch (err: unknown) {
-      if (err instanceof ApiException && err.status === 401) {
-        setUser(null);
-      } else if (mode === 'real') {
-        // If real backend is offline or unauthenticated
-        setUser(null);
-      } else {
-        setUser(null);
+      if (requestVersion === authRequestVersionRef.current) {
+        if (err instanceof ApiException && err.status === 401) {
+          setUser(null);
+        } else if (mode === 'real') {
+          // If real backend is offline or unauthenticated
+          setUser(null);
+        } else {
+          setUser(null);
+        }
       }
     } finally {
-      setIsLoading(false);
+      if (requestVersion === authRequestVersionRef.current) setIsLoading(false);
     }
   }, [mode]);
 
   useEffect(() => {
     let active = true;
+    const requestVersion = ++authRequestVersionRef.current;
     setIsLoading(true);
     setError(null);
     const run = async () => {
       try {
         if (mode === 'real') {
           const res = await realApiClient.getMe();
-          if (active) setUser(res.user);
+          if (active && requestVersion === authRequestVersionRef.current) setUser(res.user);
         } else {
           const res = await mockDataAdapter.getMe();
-          if (active) setUser(res.user);
+          if (active && requestVersion === authRequestVersionRef.current) setUser(res.user);
         }
       } catch {
-        if (active) setUser(null);
+        if (active && requestVersion === authRequestVersionRef.current) setUser(null);
       } finally {
-        if (active) setIsLoading(false);
+        if (active && requestVersion === authRequestVersionRef.current) setIsLoading(false);
       }
     };
     run();
@@ -88,32 +94,36 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, [mode]);
 
   const login = async (email: string, password: string) => {
+    const requestVersion = ++authRequestVersionRef.current;
     setIsLoading(true);
     setError(null);
     try {
       if (mode === 'real') {
         const res = await realApiClient.login(email, password);
-        setUser(res.user);
+        if (requestVersion === authRequestVersionRef.current) setUser(res.user);
       } else {
         const res = await mockDataAdapter.login(email, password);
-        setUser(res.user);
+        if (requestVersion === authRequestVersionRef.current) setUser(res.user);
       }
-      setSessionExpired(false);
+      if (requestVersion === authRequestVersionRef.current) setSessionExpired(false);
     } catch (err: unknown) {
-      if (err instanceof ApiException) {
-        setError(err.message || 'Authentication failed');
-      } else if (err instanceof Error) {
-        setError(err.message);
-      } else {
-        setError('Unexpected error during login');
+      if (requestVersion === authRequestVersionRef.current) {
+        if (err instanceof ApiException) {
+          setError(err.message || 'Authentication failed');
+        } else if (err instanceof Error) {
+          setError(err.message);
+        } else {
+          setError('Unexpected error during login');
+        }
       }
       throw err;
     } finally {
-      setIsLoading(false);
+      if (requestVersion === authRequestVersionRef.current) setIsLoading(false);
     }
   };
 
   const logout = async () => {
+    const requestVersion = ++authRequestVersionRef.current;
     setIsLoading(true);
     try {
       if (mode === 'real') {
@@ -124,8 +134,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     } catch {
       // Ignore logout errors and clear local state
     } finally {
-      setUser(null);
-      setIsLoading(false);
+      if (requestVersion === authRequestVersionRef.current) {
+        setUser(null);
+        setIsLoading(false);
+      }
     }
   };
 

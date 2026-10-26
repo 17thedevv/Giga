@@ -11,6 +11,10 @@ export interface SseEvent<T = unknown> {
 
 export type SseEventHandler<T = unknown> = (event: SseEvent<T>) => void;
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+}
+
 export class SseValidationError extends Error {
   constructor(
     message: string,
@@ -42,60 +46,62 @@ export function validateChatStreamEvent(event: string, data: unknown): ChatStrea
     return null; // Ignore unknown event safely
   }
 
-  if (!data || typeof data !== 'object') {
+  if (!isRecord(data)) {
     throw new SseValidationError(`Known event '${event}' payload must be a JSON object`, event);
   }
 
-  const d = data as Record<string, unknown>;
-
-  if (typeof d.messageId !== 'string' || typeof d.generationId !== 'string') {
+  const messageId = data.messageId;
+  const generationId = data.generationId;
+  if (typeof messageId !== 'string' || typeof generationId !== 'string') {
     throw new SseValidationError(`Known event '${event}' missing required 'messageId' or 'generationId'`, event);
   }
 
   switch (event) {
     case 'message.started':
-      if (typeof d.conversationId !== 'string') {
+      if (typeof data.conversationId !== 'string') {
         throw new SseValidationError(`'message.started' event missing 'conversationId'`, event);
       }
-      return { event: 'message.started', data: { messageId: d.messageId as string, generationId: d.generationId as string, conversationId: d.conversationId as string } };
+      return { event: 'message.started', data: { messageId, generationId, conversationId: data.conversationId } };
 
     case 'message.delta':
-      if (typeof d.text !== 'string') {
+      if (typeof data.text !== 'string') {
         throw new SseValidationError(`'message.delta' event missing required string 'text'`, event);
       }
-      return { event: 'message.delta', data: { messageId: d.messageId as string, generationId: d.generationId as string, text: sanitizeUntrustedText(d.text as string) } };
+      // Do not redact deltas independently: credentials can cross event boundaries.
+      // ChatView sanitizes the concatenated stream before putting text in UI state.
+      return { event: 'message.delta', data: { messageId, generationId, text: data.text } };
 
     case 'message.completed':
-      if ((d.createdAt !== undefined && typeof d.createdAt !== 'string') || (d.finishReason !== undefined && typeof d.finishReason !== 'string')) {
+      if ((data.createdAt !== undefined && typeof data.createdAt !== 'string') || (data.finishReason !== undefined && typeof data.finishReason !== 'string')) {
         throw new SseValidationError(`'message.completed' event contains invalid optional fields`, event);
       }
       return {
         event: 'message.completed',
         data: {
-          messageId: d.messageId as string,
-          generationId: d.generationId as string,
-          ...(typeof d.createdAt === 'string' ? { createdAt: d.createdAt } : {}),
-          ...(typeof d.finishReason === 'string' ? { finishReason: d.finishReason } : {}),
+          messageId,
+          generationId,
+          ...(typeof data.createdAt === 'string' ? { createdAt: data.createdAt } : {}),
+          ...(typeof data.finishReason === 'string' ? { finishReason: data.finishReason } : {}),
         },
       };
 
     case 'stream.error':
-      if (!d.error || typeof d.error !== 'object') {
+      if (!isRecord(data.error)) {
         throw new SseValidationError(`'stream.error' event missing 'error' object`, event);
       }
-      return { event: 'stream.error', data: { messageId: d.messageId as string, generationId: d.generationId as string, error: safeStreamError(d.error, event) } };
+      return { event: 'stream.error', data: { messageId, generationId, error: safeStreamError(data.error, event) } };
 
     case 'message.failed':
-      if (!d.error || typeof d.error !== 'object') {
+      if (!isRecord(data.error)) {
         throw new SseValidationError(`'message.failed' event missing 'error' object`, event);
       }
-      return { event: 'message.failed', data: { messageId: d.messageId as string, generationId: d.generationId as string, error: safeStreamError(d.error, event) } };
+      return { event: 'message.failed', data: { messageId, generationId, error: safeStreamError(data.error, event) } };
 
     case 'message.stopped':
-      if (d.finishReason !== undefined && typeof d.finishReason !== 'string') {
+      if (data.finishReason !== undefined && typeof data.finishReason !== 'string') {
         throw new SseValidationError(`'message.stopped' event contains invalid finishReason`, event);
       }
-      return { event: 'message.stopped', data: { messageId: d.messageId as string, generationId: d.generationId as string, ...(typeof d.finishReason === 'string' ? { finishReason: d.finishReason } : {}) } };
+      return { event: 'message.stopped', data: { messageId, generationId, ...(typeof data.finishReason === 'string' ? { finishReason: data.finishReason } : {}) } };
 
     default:
       return null;
@@ -103,8 +109,8 @@ export function validateChatStreamEvent(event: string, data: unknown): ChatStrea
 }
 
 function safeStreamError(value: unknown, event: string): { readonly code: string; readonly message: string } {
-  if (!value || typeof value !== 'object') throw new SseValidationError('Stream error payload must be an object', event);
-  const error = value as Record<string, unknown>;
+  if (!isRecord(value)) throw new SseValidationError('Stream error payload must be an object', event);
+  const error = value;
   if (typeof error.code !== 'string' || typeof error.message !== 'string') {
     throw new SseValidationError('Stream error payload has invalid fields', event);
   }

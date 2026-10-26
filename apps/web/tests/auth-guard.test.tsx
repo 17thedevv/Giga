@@ -52,6 +52,50 @@ describe('Auth & Routing Integration', () => {
     vi.unstubAllGlobals();
   });
 
+  it('does not restore authenticated UI when an in-flight getMe succeeds after another request returns 401', async () => {
+    let resolveGetMe!: (response: Response) => void;
+    const delayedGetMe = new Promise<Response>(resolve => { resolveGetMe = resolve; });
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.includes('/auth/me')) return delayedGetMe;
+      return Promise.resolve(new Response(JSON.stringify({ error: { code: 'UNAUTHENTICATED', message: 'Session expired' } }), {
+        status: 401, headers: { 'content-type': 'application/json' },
+      }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(
+      <ApiModeProvider initialMode="real">
+        <AuthProvider>
+          <RouterProvider initialPath="/settings">
+            <AuthGuard><div>protected stale content</div></AuthGuard>
+            <RouteProbe />
+          </RouterProvider>
+        </AuthProvider>
+      </ApiModeProvider>
+    );
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/v1/auth/me', expect.any(Object)));
+    await act(async () => {
+      await expect(realApiClient.getConversation('private-id')).rejects.toMatchObject({ status: 401 });
+    });
+    await waitFor(() => expect(screen.getByTestId('route-probe').textContent).toBe('/login'));
+
+    await act(async () => {
+      resolveGetMe(new Response(JSON.stringify({ user: { id: 'user-1', email: 'late@example.test', displayName: 'Late response' } }), {
+        status: 200, headers: { 'content-type': 'application/json' },
+      }));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('route-probe').textContent).toBe('/login');
+      expect(screen.queryByText('protected stale content')).toBeNull();
+    });
+    expect(screen.queryByText('late@example.test')).toBeNull();
+    vi.unstubAllGlobals();
+  });
+
   it('renders login view with demo accounts notice and form inputs', () => {
     render(
       <ApiModeProvider>
