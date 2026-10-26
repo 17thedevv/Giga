@@ -104,7 +104,7 @@ export class SandboxCleanupReconciler {
   ): Promise<'destroyed' | 'retried' | 'failed' | 'timed_out_allocation' | 'skipped'> {
     const leaseToken = crypto.randomUUID();
     // 1. Claim session with an expiring lease to prevent duplicate concurrent reconcilers and fence stale workers
-    const claimed = await this.repository.claimSandboxSessionForCleanup({
+    let claimed = await this.repository.claimSandboxSessionForCleanup({
       sessionId: session.id,
       workerId: this.workerId,
       leaseToken,
@@ -114,35 +114,77 @@ export class SandboxCleanupReconciler {
       return 'skipped';
     }
 
-    // 2. Case A: Allocation timed out before provider session ID was ever recorded
-    // (Worker crashed during createSandbox or provider timed out)
+    // Fence the exact attempt before cleanup can authorize later allocation or tool work.
+    await this.repository.fenceSandboxAttempt({
+      ownerId: claimed.ownerId, workspaceId: claimed.workspaceId,
+      runId: claimed.runId, attemptNumber: claimed.attemptNumber,
+    }, 'sandbox_cleanup_reconciliation');
+
+    // 2. No provider ID is not evidence of no allocation. Reconcile only when the
+    // durable operation proves the RPC never started or the provider resolves its ID.
     if (!claimed.providerSessionId) {
-      await this.repository.recordSandboxAllocationFailed(
-        claimed.id,
-        'Sandbox allocation timed out before provider session handle was committed',
-        { source: 'cleanup_reconciler', crashSuspected: true }
-      );
-      return 'timed_out_allocation';
+      const lifecycle = await this.repository.getSandboxAttemptLifecycle({
+        ownerId: claimed.ownerId, workspaceId: claimed.workspaceId,
+        runId: claimed.runId, attemptNumber: claimed.attemptNumber,
+      });
+      const allocation = lifecycle.operations.find((operation) => operation.kind === 'allocation');
+      if (allocation?.state === 'settled' && allocation.outcome === 'no_resource') {
+        await this.repository.recordSandboxAllocationFailed(
+          claimed.id,
+          'Provider allocation was proven not to have started or exist',
+          { source: 'cleanup_reconciler', allocationOutcome: 'no_resource', crashSuspected: true }
+        );
+        return 'timed_out_allocation';
+      }
+      if (!allocation || allocation.state === 'not_started') {
+        // Fencing settles a not-started allocation atomically as resource-free.
+        return 'skipped';
+      }
+      if (!this.providerClient.resolveAllocation) {
+        await this.repository.markSandboxAllocationAmbiguous(
+          claimed.id, 'Provider does not expose definitive allocation settlement lookup'
+        ).catch(() => {});
+        return 'skipped';
+      }
+      const resolution = await this.providerClient.resolveAllocation(allocation.id);
+      if (resolution.status === 'pending') return 'skipped';
+      if (resolution.status === 'ambiguous') {
+        await this.repository.markSandboxAllocationAmbiguous(claimed.id, resolution.reason).catch(() => {});
+        return 'skipped';
+      }
+      if (resolution.status === 'not_allocated') {
+        await this.repository.confirmSandboxAllocationAbsent(claimed.id, 'provider_reported_not_allocated');
+        return 'timed_out_allocation';
+      }
+      claimed = await this.repository.commitSandboxSessionAllocated({
+        sessionId: claimed.id,
+        ownerId: claimed.ownerId,
+        runId: claimed.runId,
+        leaseToken: claimed.leaseToken,
+        providerSessionId: resolution.sandboxId,
+      });
     }
 
     // 3. Case B: Provider session ID exists -> issue idempotent destroy to provider
+    const providerSessionId = claimed.providerSessionId;
+    if (!providerSessionId) return 'skipped';
     try {
-      await this.providerClient.destroySandbox(claimed.providerSessionId);
+      await this.providerClient.destroySandbox(providerSessionId);
 
       // Successfully destroyed at provider: record durable tombstone, fenced by leaseToken
-      await this.repository.markSandboxDestroyed(claimed.id, claimed.providerSessionId, leaseToken);
+      await this.repository.markSandboxDestroyed(claimed.id, providerSessionId, leaseToken);
       return 'destroyed';
     } catch (err: unknown) {
       const errorMessage = err instanceof Error ? err.message : String(err);
 
       // Check if provider reports the sandbox is already gone / not found
-      if (
-        errorMessage.includes('404') ||
-        errorMessage.toLowerCase().includes('not found') ||
-        errorMessage.includes('SANDBOX_NOT_FOUND')
-      ) {
+      const providerCode = typeof err === 'object' && err !== null && 'code' in err
+        ? String((err as { code?: unknown }).code) : '';
+      if (providerCode === 'SANDBOX_NOT_FOUND' ||
+          /sandbox [^\n]*(?:not found|404)/i.test(errorMessage) ||
+          errorMessage.includes('SANDBOX_NOT_FOUND')) {
         // Idempotent success: sandbox already does not exist at provider
-        await this.repository.markSandboxDestroyed(claimed.id, claimed.providerSessionId, leaseToken);
+        await this.repository.markSandboxDestroyed(claimed.id, providerSessionId, leaseToken);
         return 'destroyed';
       }
 

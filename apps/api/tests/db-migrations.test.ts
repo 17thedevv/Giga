@@ -39,7 +39,7 @@ describe('Database Migrations and Utilities', () => {
     try {
       // pg-mem cannot model migration 015's PostgreSQL role/privilege contract;
       // its full forward/idempotency coverage runs in the isolated PostgreSQL suite.
-      const memoryMigrations = MIGRATIONS.filter((migration) => migration.version !== 15);
+      const memoryMigrations = MIGRATIONS.filter((migration) => migration.version < 15);
       const firstRun = await runMigrations(pool, memoryMigrations);
       assert.strictEqual(firstRun.length, 14);
       assert.strictEqual(firstRun[0], '001_initial_users_and_sessions');

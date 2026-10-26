@@ -184,6 +184,7 @@ export interface DurableSandboxSession {
   readonly workspaceId: string;
   readonly runId: string;
   readonly attemptNumber: number;
+  readonly attemptGeneration: string;
   readonly mode: AgentMode;
   readonly providerType: string;
   readonly providerSessionId: string | null;
@@ -217,4 +218,26 @@ export interface CreateSandboxAllocationInput {
   readonly leaseToken: string;
   readonly allocationTimeoutMs?: number;
   readonly allocationIntentId?: string;
+}
+
+export type SandboxLifecycleOperationState = 'not_started' | 'in_progress' | 'ambiguous' | 'settled';
+
+export interface SandboxLifecycleOperation {
+  readonly id: string;
+  readonly sessionId: string;
+  readonly ownerId: string;
+  readonly workspaceId: string;
+  readonly runId: string;
+  readonly attemptNumber: number;
+  readonly generation: string;
+  readonly kind: 'allocation' | 'tool' | 'snapshot';
+  readonly state: SandboxLifecycleOperationState;
+  readonly outcome: 'resource' | 'no_resource' | null;
+  readonly providerResourceId: string | null;
+}
+
+export interface SandboxAttemptLifecycleSnapshot {
+  readonly fenced: boolean;
+  readonly session: DurableSandboxSession | null;
+  readonly operations: readonly SandboxLifecycleOperation[];
 }

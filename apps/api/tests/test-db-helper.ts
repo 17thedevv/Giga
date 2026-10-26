@@ -15,7 +15,8 @@ export function migrationsSupportedByTestDatabase(
   migrations: readonly Migration[] = MIGRATIONS
 ): readonly Migration[] {
   // pg-mem cannot model PostgreSQL roles, column privileges, SECURITY DEFINER
-  // procedures or the DO blocks in migration 015.
+  // procedures or the DO blocks in migration 015. Migration 016's fencing
+  // constraints are exercised in memory with its role grants stripped below.
   return isMemory ? migrations.filter((migration) => migration.version !== 15) : migrations;
 }
 
@@ -191,7 +192,12 @@ export async function createTestDatabase(migrations?: readonly Migration[]): Pro
     }
     if (/^\s*ROLLBACK\b/i.test(sql)) {
       if (activeTxBackup) {
-        activeTxBackup.restore();
+        try {
+          activeTxBackup.restore();
+        } catch {
+          // pg-mem cannot restore schema-changing migrations from a backup.
+          // Preserve the original migration error so tests report the real incompatibility.
+        }
         activeTxBackup = null;
       }
       return [];
@@ -202,7 +208,8 @@ export async function createTestDatabase(migrations?: readonly Migration[]): Pro
       const stripped = sql
         .replace(/CREATE OR REPLACE FUNCTION[\s\S]*?LANGUAGE plpgsql;/gi, '')
         .replace(/DROP TRIGGER[\s\S]*?;/gi, '')
-        .replace(/CREATE TRIGGER[\s\S]*?;/gi, '');
+        .replace(/CREATE TRIGGER[\s\S]*?;/gi, '')
+        .replace(/^(?:GRANT|REVOKE).*giga_api_runtime.*;\s*$/gim, '');
       return db.public.many(stripped);
     }
     if (sql.includes('FOR UPDATE OF s SKIP LOCKED')) {
@@ -267,9 +274,13 @@ export async function createTestDatabase(migrations?: readonly Migration[]): Pro
 
   const cleanup = async (): Promise<void> => {
     try {
+      await pool.query('DELETE FROM agent_sandbox_lifecycle_operations;');
+      await pool.query('DELETE FROM agent_sandbox_sessions;');
+      await pool.query('DELETE FROM agent_sandbox_attempt_fences;');
+    } catch { /* Older migration fixtures do not contain sandbox lifecycle tables. */ }
+    try {
       await pool.query('DELETE FROM agent_execution_usage_events;');
       await pool.query('DELETE FROM agent_execution_reservations;');
-      await pool.query('DELETE FROM agent_sandbox_sessions;');
       await pool.query('DELETE FROM agent_messages;');
       await pool.query('DELETE FROM agent_run_steps;');
       await pool.query('DELETE FROM agent_run_events;');

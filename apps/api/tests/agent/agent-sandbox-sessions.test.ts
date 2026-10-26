@@ -4,6 +4,9 @@ import { randomUUID } from 'node:crypto';
 import { createTestDatabase, type TestDbInstance } from '../test-db-helper.js';
 import { AgentRepository } from '../../src/modules/agent/repository.js';
 import { AgentService } from '../../src/modules/agent/service.js';
+import { AgentQuotaError, AgentQuotaService } from '../../src/modules/agent/quota-service.js';
+import { DEFAULT_AGENT_QUOTA_POLICY } from '../../src/modules/agent/quota-policy.js';
+import { SandboxAttemptLifecycleFence } from '../../src/modules/agent/sandbox-lifecycle-fence.js';
 import { SandboxCleanupReconciler } from '../../src/modules/agent/cleanup-reconciler.js';
 import {
   IsolatedCloudSandboxAdapter,
@@ -20,11 +23,19 @@ class MockCloudSandboxProviderClient implements CloudSandboxProviderClient {
   public failDestroyWith?: Error;
   public destroyNotFoundIds: Set<string> = new Set();
   public executeDelayMs = 0;
+  public allocationResults = new Map<string, { status: 'pending' } | { status: 'allocated'; sandboxId: string } | { status: 'not_allocated' }>();
 
-  async createSandbox(_params: CreateSandboxParams): Promise<{ sandboxId: string; endpoint?: string }> {
+  async createSandbox(params: CreateSandboxParams): Promise<{ sandboxId: string; endpoint?: string }> {
     const id = `sbx-mock-${randomUUID().slice(0, 8)}`;
     this.createdSandboxes.push(id);
+    if (params.allocationOperationId) {
+      this.allocationResults.set(params.allocationOperationId, { status: 'allocated', sandboxId: id });
+    }
     return { sandboxId: id, endpoint: `https://${id}.mock.cloud` };
+  }
+
+  async resolveAllocation(operationId: string) {
+    return this.allocationResults.get(operationId) ?? { status: 'pending' as const };
   }
 
   async executeCommand(_sandboxId: string, _params: { command: string }) {
@@ -117,6 +128,59 @@ describe('GigaAgent Durable Sandbox Sessions & Crash-Safe Cleanup (17T-71)', { t
   }
 
   describe('1. Allocation Races & Invariants', () => {
+    it('PostgreSQL serializes attempt fencing ahead of a concurrent allocation intent', {
+      skip: process.env.TEST_DATABASE_URL ? false : 'requires PostgreSQL row-lock semantics',
+    }, async () => {
+      const { run, claim } = await createClaimedRun(ownerId, workspaceId, 'worker-race');
+      const blocker = await db.pool.connect();
+      const waitForLockWaiters = async (minimum: number): Promise<void> => {
+        for (let attempt = 0; attempt < 200; attempt++) {
+          const result = await db.pool.query<{ count: string }>(
+            `SELECT count(*)::text AS count FROM pg_stat_activity
+             WHERE datname = current_database() AND wait_event_type = 'Lock' AND pid <> pg_backend_pid()`
+          );
+          if (Number(result.rows[0]?.count ?? 0) >= minimum) return;
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        throw new Error(`Timed out waiting for ${minimum} PostgreSQL row-lock waiters`);
+      };
+
+      try {
+        await blocker.query('BEGIN');
+        await blocker.query(
+          'SELECT id FROM agent_runs WHERE owner_id = $1 AND workspace_id = $2 AND id = $3 FOR UPDATE',
+          [ownerId, workspaceId, run.id]
+        );
+
+        // Queue reconciliation first, then allocation behind it on the same run row.
+        const fencePromise = repo.fenceSandboxAttempt({
+          ownerId, workspaceId, runId: run.id, attemptNumber: claim.attemptCount,
+        }, 'deterministic_allocation_race');
+        await waitForLockWaiters(1);
+        const allocationPromise = repo.createSandboxAllocationIntent({
+          ownerId, workspaceId, runId: run.id, attemptNumber: claim.attemptCount,
+          mode: 'execute', providerType: 'mock-e2b', workerId: 'worker-race', leaseToken: claim.leaseToken,
+        });
+        await waitForLockWaiters(2);
+        await blocker.query('COMMIT');
+
+        await fencePromise;
+        await assert.rejects(allocationPromise, (error: unknown) =>
+          error instanceof ConflictError &&
+          (error.message.includes('durably fenced') || error.message.includes('Worker fenced')));
+        const state = await repo.getSandboxAttemptLifecycle({
+          ownerId, workspaceId, runId: run.id, attemptNumber: claim.attemptCount,
+        });
+        assert.equal(state.fenced, true);
+        assert.equal(state.session, null);
+      } catch (error) {
+        await blocker.query('ROLLBACK').catch(() => {});
+        throw error;
+      } finally {
+        blocker.release();
+      }
+    });
+
     it('concurrent allocation intents: exactly one survivor, second gets duplicate or conflict', async () => {
       const { run, claim } = await createClaimedRun(ownerId, workspaceId, 'worker-1');
 
@@ -208,6 +272,11 @@ describe('GigaAgent Durable Sandbox Sessions & Crash-Safe Cleanup (17T-71)', { t
       });
       await repo.recordSandboxAllocationFailed(att1.session.id, 'Provider capacity exceeded');
 
+      // Retry advances the durable run attempt and obtains a new lease token.
+      await db.pool.query("UPDATE agent_runs SET lease_expires_at = NOW() - interval '1 second' WHERE id = $1", [run.id]);
+      const claim2 = await repo.claimRun(ownerId, run.id, 'worker-1');
+      assert.ok(claim2);
+
       // Attempt 2 can now allocate successfully
       const att2 = await repo.createSandboxAllocationIntent({
         ownerId,
@@ -217,7 +286,7 @@ describe('GigaAgent Durable Sandbox Sessions & Crash-Safe Cleanup (17T-71)', { t
         mode: 'execute',
         providerType: 'e2b',
         workerId: 'worker-1',
-        leaseToken: claim.leaseToken,
+        leaseToken: claim2.leaseToken,
       });
       assert.equal(att2.duplicate, false);
       assert.equal(att2.session.attemptNumber, 2);
@@ -226,12 +295,12 @@ describe('GigaAgent Durable Sandbox Sessions & Crash-Safe Cleanup (17T-71)', { t
   });
 
   describe('2. Crash Windows & Orphan Prevention', () => {
-    it('worker crashes before provider call: allocating TTL expires -> reconciler sweeps and marks timed out', async () => {
+    it('worker crashes before provider submission: expired intent is fenced and safely settled as resource-free', async () => {
       const { run, claim } = await createClaimedRun(ownerId, workspaceId);
       const provider = new MockCloudSandboxProviderClient();
       const reconciler = new SandboxCleanupReconciler(repo, provider);
 
-      // Create allocating session with past expiration TTL
+      // Create an expired allocation intent whose durable provider operation never started.
       const { session } = await repo.createSandboxAllocationIntent({
         ownerId,
         workspaceId,
@@ -241,7 +310,7 @@ describe('GigaAgent Durable Sandbox Sessions & Crash-Safe Cleanup (17T-71)', { t
         providerType: 'e2b',
         workerId: 'worker-1',
         leaseToken: claim.leaseToken,
-        allocationTimeoutMs: -1000, // Expired in the past!
+        allocationTimeoutMs: -1000,
       });
 
       assert.equal(session.lifecycleState, 'allocating');
@@ -258,7 +327,7 @@ describe('GigaAgent Durable Sandbox Sessions & Crash-Safe Cleanup (17T-71)', { t
       assert.equal(updated.diagnostics['crashSuspected'], true);
     });
 
-    it('worker crashes after provider allocation before DB commit: session tracked and reconciler destroys it', async () => {
+    it('worker crashes after provider allocation before DB commit: provider lookup recovers the late ID and cleanup', async () => {
       const { run, claim } = await createClaimedRun(ownerId, workspaceId);
       const provider = new MockCloudSandboxProviderClient();
       const reconciler = new SandboxCleanupReconciler(repo, provider);
@@ -275,17 +344,14 @@ describe('GigaAgent Durable Sandbox Sessions & Crash-Safe Cleanup (17T-71)', { t
         leaseToken: claim.leaseToken,
       });
 
-      // Provider returns sandboxId 'sbx-orphan-123'
-      const orphanSandboxId = 'sbx-orphan-123';
-
-      // But worker crashes right here, setting session to cleanup_pending with the provider ID
-      await db.pool.query(
-        `UPDATE agent_sandbox_sessions
-         SET provider_session_id = $1, lifecycle_state = 'cleanup_pending', cleanup_state = 'pending',
-             allocation_state = 'allocated'
-         WHERE id = $2`,
-        [orphanSandboxId, session.id]
-      );
+      assert.equal(await repo.beginSandboxAllocationOperation(session.id, session.attemptGeneration), true);
+      const { sandboxId: orphanSandboxId } = await provider.createSandbox({
+        workspaceId, ownerId, timeoutMs: 1000,
+        networkPolicy: { egressEnabled: false, allowlist: [] },
+        allocationOperationId: session.allocationIntentId,
+        attemptGeneration: session.attemptGeneration,
+      });
+      await db.pool.query("UPDATE agent_sandbox_sessions SET allocation_expires_at = NOW() - interval '1 second' WHERE id = $1", [session.id]);
 
       // Reconciler runs
       const result = await reconciler.reconcileBatch();
@@ -312,6 +378,8 @@ describe('GigaAgent Durable Sandbox Sessions & Crash-Safe Cleanup (17T-71)', { t
         workerId: 'worker-1',
         leaseToken: claim.leaseToken,
       });
+
+      await repo.beginSandboxAllocationOperation(session.id, session.attemptGeneration);
 
       const active = await repo.commitSandboxSessionAllocated({
         sessionId: session.id,
@@ -341,7 +409,7 @@ describe('GigaAgent Durable Sandbox Sessions & Crash-Safe Cleanup (17T-71)', { t
   });
 
   describe('3. Late Callbacks & Worker Lease Fencing', () => {
-    it('late callback: commit after lease expired fails and automatically marks session cleanup_pending', async () => {
+    it('late callback after lease expiry is persisted against the original attempt and cannot become active', async () => {
       const { run, claim } = await createClaimedRun(ownerId, workspaceId);
 
       const { session } = await repo.createSandboxAllocationIntent({
@@ -354,6 +422,7 @@ describe('GigaAgent Durable Sandbox Sessions & Crash-Safe Cleanup (17T-71)', { t
         workerId: 'worker-1',
         leaseToken: claim.leaseToken,
       });
+      await repo.beginSandboxAllocationOperation(session.id, session.attemptGeneration);
 
       // Force lease expiration in database
       await db.pool.query(
@@ -362,28 +431,24 @@ describe('GigaAgent Durable Sandbox Sessions & Crash-Safe Cleanup (17T-71)', { t
       );
 
       // Late provider callback arrives
-      await assert.rejects(
-        async () => {
-          await repo.commitSandboxSessionAllocated({
-            sessionId: session.id,
-            ownerId,
-            runId: run.id,
-            leaseToken: claim.leaseToken,
-            providerSessionId: 'sbx-late-callback',
-          });
-        },
-        (err: any) => err instanceof ConflictError && err.message.includes('Worker fenced')
-      );
+      const lateCommit = await repo.commitSandboxSessionAllocated({
+        sessionId: session.id,
+        ownerId,
+        runId: run.id,
+        leaseToken: claim.leaseToken,
+        providerSessionId: 'sbx-late-callback',
+      });
 
       // Check session was automatically transitioned to cleanup_pending
       const fencedSession = await repo.getSandboxSession(ownerId, session.id);
       assert.equal(fencedSession.lifecycleState, 'cleanup_pending');
       assert.equal(fencedSession.cleanupState, 'pending');
       assert.equal(fencedSession.providerSessionId, 'sbx-late-callback');
-      assert.equal(fencedSession.diagnostics['fence_reason'], 'WORKER_FENCED_DURING_ALLOCATION');
+      assert.equal(fencedSession.diagnostics['fence_reason'], 'late_or_stale_allocation_callback');
+      assert.equal(lateCommit.lifecycleState, 'cleanup_pending');
     });
 
-    it('late callback: another worker claimed the run -> first worker fenced out on commit', async () => {
+    it('lease takeover waits for ambiguous allocation, then late result is cleaned before a new attempt', async () => {
       const { run, claim } = await createClaimedRun(ownerId, workspaceId, 'worker-1');
 
       const { session } = await repo.createSandboxAllocationIntent({
@@ -396,33 +461,42 @@ describe('GigaAgent Durable Sandbox Sessions & Crash-Safe Cleanup (17T-71)', { t
         workerId: 'worker-1',
         leaseToken: claim.leaseToken,
       });
+      await repo.beginSandboxAllocationOperation(session.id, session.attemptGeneration);
 
-      // Lease expires, worker-2 claims the run with new leaseToken
+      // Expired lease is fenced, but replacement claim waits while provider outcome
+      // is unresolved. This prevents the old sandbox and a new sandbox overlapping.
       await db.pool.query(
         "UPDATE agent_runs SET lease_expires_at = NOW() - interval '1 second' WHERE id = $1",
         [run.id]
       );
-      const claim2 = await repo.claimRun(ownerId, run.id, 'worker-2');
-      assert.ok(claim2);
-      assert.notEqual(claim2.leaseToken, claim.leaseToken);
+      assert.equal(await repo.claimRun(ownerId, run.id, 'worker-2'), null);
+      const afterFence = await repo.getSandboxAttemptLifecycle({
+        ownerId, workspaceId, runId: run.id, attemptNumber: 1,
+      });
+      assert.equal(afterFence.fenced, true);
 
-      // Worker-1 tries to commit allocation
-      await assert.rejects(
-        async () => {
-          await repo.commitSandboxSessionAllocated({
-            sessionId: session.id,
-            ownerId,
-            runId: run.id,
-            leaseToken: claim.leaseToken, // Old fenced lease token!
-            providerSessionId: 'sbx-stolen-lease',
-          });
-        },
-        ConflictError
-      );
+      // A late result remains associated with attempt 1 and is routed to cleanup.
+      const lateCommit = await repo.commitSandboxSessionAllocated({
+        sessionId: session.id,
+        ownerId,
+        runId: run.id,
+        leaseToken: claim.leaseToken, // Old fenced lease token!
+        providerSessionId: 'sbx-stolen-lease',
+      });
 
       const fenced = await repo.getSandboxSession(ownerId, session.id);
       assert.equal(fenced.lifecycleState, 'cleanup_pending');
       assert.equal(fenced.providerSessionId, 'sbx-stolen-lease');
+      assert.equal(lateCommit.attemptGeneration, session.attemptGeneration);
+
+      const provider = new MockCloudSandboxProviderClient();
+      const reconciler = new SandboxCleanupReconciler(repo, provider);
+      assert.equal(await reconciler.reconcileSession(fenced), 'destroyed');
+      assert.deepEqual(provider.destroyedSandboxes, ['sbx-stolen-lease']);
+
+      const claim2 = await repo.claimRun(ownerId, run.id, 'worker-2');
+      assert.ok(claim2);
+      assert.equal(claim2.attemptCount, 2);
     });
   });
 
@@ -443,6 +517,8 @@ describe('GigaAgent Durable Sandbox Sessions & Crash-Safe Cleanup (17T-71)', { t
         workerId: 'worker-1',
         leaseToken: claim.leaseToken,
       });
+
+      await repo.beginSandboxAllocationOperation(session.id, session.attemptGeneration);
 
       await repo.commitSandboxSessionAllocated({
         sessionId: session.id,
@@ -482,6 +558,8 @@ describe('GigaAgent Durable Sandbox Sessions & Crash-Safe Cleanup (17T-71)', { t
         workerId: 'worker-1',
         leaseToken: claim.leaseToken,
       });
+
+      await repo.beginSandboxAllocationOperation(session.id, session.attemptGeneration);
 
       await repo.commitSandboxSessionAllocated({
         sessionId: session.id,
@@ -555,6 +633,7 @@ describe('GigaAgent Durable Sandbox Sessions & Crash-Safe Cleanup (17T-71)', { t
           workerId: 'worker-1',
           leaseToken: claim.leaseToken,
         });
+        await repo.beginSandboxAllocationOperation(session.id, session.attemptGeneration);
         await repo.commitSandboxSessionAllocated({
           sessionId: session.id,
           ownerId,
@@ -634,6 +713,11 @@ describe('GigaAgent Durable Sandbox Sessions & Crash-Safe Cleanup (17T-71)', { t
         leaseToken: claim.leaseToken,
       });
 
+      await repo.beginSandboxAllocationOperation(session.id, session.attemptGeneration);
+      await repo.commitSandboxSessionAllocated({
+        sessionId: session.id, ownerId, runId: run.id, leaseToken: claim.leaseToken,
+        providerSessionId: 'sbx-tombstone',
+      });
       const destroyed = await repo.markSandboxDestroyed(session.id, 'sbx-tombstone');
       assert.equal(destroyed.lifecycleState, 'destroyed');
 
@@ -851,6 +935,7 @@ describe('GigaAgent Durable Sandbox Sessions & Crash-Safe Cleanup (17T-71)', { t
           workerId: 'worker-1',
           leaseToken: claim.leaseToken,
         });
+        await repo.beginSandboxAllocationOperation(session.id, session.attemptGeneration);
         await repo.commitSandboxSessionAllocated({
           sessionId: session.id,
           ownerId,
@@ -1019,6 +1104,8 @@ describe('GigaAgent Durable Sandbox Sessions & Crash-Safe Cleanup (17T-71)', { t
         leaseToken: claim.leaseToken,
       });
 
+      await repo.beginSandboxAllocationOperation(session.id, session.attemptGeneration);
+
       await repo.commitSandboxSessionAllocated({
         sessionId: session.id,
         ownerId,
@@ -1091,6 +1178,8 @@ describe('GigaAgent Durable Sandbox Sessions & Crash-Safe Cleanup (17T-71)', { t
         leaseToken: claim.leaseToken,
       });
 
+      await repo.beginSandboxAllocationOperation(session.id, session.attemptGeneration);
+
       await repo.commitSandboxSessionAllocated({
         sessionId: session.id,
         ownerId,
@@ -1122,7 +1211,13 @@ describe('GigaAgent Durable Sandbox Sessions & Crash-Safe Cleanup (17T-71)', { t
       // Now cleanup finishes for Session 1
       await repo.markSandboxDestroyed(session.id, 'sbx-overlap-1');
 
-      // Now Attempt 2 CAN allocate cleanly!
+      // Now attempt 2 can allocate after the old resource is destroyed and a new
+      // durable run lease advances the attempt counter.
+      await db.pool.query(
+        "UPDATE agent_runs SET lease_expires_at = NOW() - interval '1 second' WHERE id = $1", [run.id]
+      );
+      const claim2 = await repo.claimRun(ownerId, run.id, 'worker-2');
+      assert.ok(claim2);
       const intent2 = await repo.createSandboxAllocationIntent({
         ownerId,
         workspaceId,
@@ -1131,7 +1226,7 @@ describe('GigaAgent Durable Sandbox Sessions & Crash-Safe Cleanup (17T-71)', { t
         mode: 'execute',
         providerType: 'mock-e2b',
         workerId: 'worker-2',
-        leaseToken: claim.leaseToken,
+        leaseToken: claim2.leaseToken,
       });
       assert.ok(intent2.session);
       assert.equal(intent2.session.attemptNumber, 2);
@@ -1151,6 +1246,11 @@ describe('GigaAgent Durable Sandbox Sessions & Crash-Safe Cleanup (17T-71)', { t
         leaseToken: claim.leaseToken,
       });
 
+      await repo.beginSandboxAllocationOperation(session.id, session.attemptGeneration);
+      await repo.commitSandboxSessionAllocated({
+        sessionId: session.id, ownerId, runId: run.id, leaseToken: claim.leaseToken,
+        providerSessionId: 'sbx-tombstone-1',
+      });
       const destroyed1 = await repo.markSandboxDestroyed(session.id, 'sbx-tombstone-1');
       assert.ok(destroyed1.destroyedAt);
       const originalDestroyedAt = destroyed1.destroyedAt;
@@ -1170,6 +1270,86 @@ describe('GigaAgent Durable Sandbox Sessions & Crash-Safe Cleanup (17T-71)', { t
       }
       const sessionAfterCascade = await repo.getSandboxSessionById(session.id);
       assert.equal(sessionAfterCascade, null);
+    });
+  });
+
+  describe('9. Quota and exact-attempt lifecycle integration', () => {
+    it('keeps PostgreSQL writable capacity held while provider allocation remains ambiguous', {
+      skip: process.env.TEST_DATABASE_URL ? false : 'Quota/lifecycle integration requires isolated PostgreSQL',
+    }, async () => {
+      const { run, claim } = await createClaimedRun(ownerId, workspaceId, 'quota-worker-ambiguous');
+      const reference = { ownerId, workspaceId, runId: run.id, attemptNumber: claim.attemptCount };
+      const provider = new MockCloudSandboxProviderClient();
+      const quotas = new AgentQuotaService(
+        db.pool, DEFAULT_AGENT_QUOTA_POLICY,
+        new SandboxAttemptLifecycleFence(repo, provider, { drainTimeoutMs: 10, pollIntervalMs: 1 })
+      );
+      await quotas.reserveExecutionAttempt(reference, claim.leaseToken);
+      await quotas.markAllocationStarted(reference, claim.leaseToken);
+
+      const { session } = await repo.createSandboxAllocationIntent({
+        ownerId, workspaceId, runId: run.id, attemptNumber: claim.attemptCount,
+        mode: 'execute', providerType: 'mock-e2b', workerId: 'quota-worker-ambiguous',
+        leaseToken: claim.leaseToken,
+      });
+      await repo.beginSandboxAllocationOperation(session.id, session.attemptGeneration);
+      await repo.markSandboxAllocationAmbiguous(session.id, 'simulated lost provider response');
+      await quotas.markOutcomeUnknown(reference, claim.leaseToken, 'quota:allocation-ambiguous');
+
+      await assert.rejects(
+        quotas.reconcileAfterQuiescent(reference, {}, 'quota:must-remain-held'),
+        /could not establish a durable attempt fence/i
+      );
+      const reservation = await quotas.getReservation(reference);
+      assert.equal(reservation.resourceActive, true);
+      assert.equal(reservation.state, 'reconciliation_required');
+
+      const competing = await createClaimedRun(ownerId, workspaceId, 'quota-worker-competing', 'execute');
+      await assert.rejects(
+        quotas.reserveExecutionAttempt({
+          ownerId, workspaceId, runId: competing.run.id, attemptNumber: competing.claim.attemptCount,
+        }, competing.claim.leaseToken),
+        (error: unknown) => error instanceof AgentQuotaError && error.code === 'WORKSPACE_BUSY'
+      );
+    });
+
+    it('releases the PostgreSQL quota slot only after provider lookup, cleanup and lifecycle fencing succeed', {
+      skip: process.env.TEST_DATABASE_URL ? false : 'Quota/lifecycle integration requires isolated PostgreSQL',
+    }, async () => {
+      const { run, claim } = await createClaimedRun(ownerId, workspaceId, 'quota-worker-recovery');
+      const reference = { ownerId, workspaceId, runId: run.id, attemptNumber: claim.attemptCount };
+      const provider = new MockCloudSandboxProviderClient();
+      const quotas = new AgentQuotaService(
+        db.pool, DEFAULT_AGENT_QUOTA_POLICY,
+        new SandboxAttemptLifecycleFence(repo, provider, { drainTimeoutMs: 100, pollIntervalMs: 1 })
+      );
+      await quotas.reserveExecutionAttempt(reference, claim.leaseToken);
+      await quotas.markAllocationStarted(reference, claim.leaseToken);
+
+      const { session } = await repo.createSandboxAllocationIntent({
+        ownerId, workspaceId, runId: run.id, attemptNumber: claim.attemptCount,
+        mode: 'execute', providerType: 'mock-e2b', workerId: 'quota-worker-recovery',
+        leaseToken: claim.leaseToken,
+      });
+      await repo.beginSandboxAllocationOperation(session.id, session.attemptGeneration);
+      await provider.createSandbox({
+        workspaceId, ownerId, timeoutMs: 1000,
+        networkPolicy: { egressEnabled: false, allowlist: [] },
+        allocationOperationId: session.allocationIntentId,
+        attemptGeneration: session.attemptGeneration,
+      });
+      await repo.markSandboxAllocationAmbiguous(session.id, 'simulated process crash before provider ID commit');
+      await quotas.markOutcomeUnknown(reference, claim.leaseToken, 'quota:provider-outcome-unknown');
+
+      const reconciled = await quotas.reconcileAfterQuiescent(reference, {}, 'quota:verified-cleanup');
+      assert.equal(reconciled.state, 'committed');
+      assert.equal(reconciled.resourceActive, false);
+      assert.equal(reconciled.accounted.providerRequests, 0);
+      const lifecycle = await repo.getSandboxAttemptLifecycle(reference);
+      assert.equal(lifecycle.fenced, true);
+      assert.equal(lifecycle.session?.lifecycleState, 'destroyed');
+      assert.equal(lifecycle.operations.find((operation) => operation.kind === 'allocation')?.outcome, 'resource');
+      assert.equal(provider.destroyedSandboxes.length, 1);
     });
   });
 });

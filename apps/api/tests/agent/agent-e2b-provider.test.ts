@@ -1367,6 +1367,60 @@ describe('E2B Cloud Sandbox Provider Client (17T-69)', () => {
       assert.equal(handle.isOpen?.(), false);
     });
 
+    it('recovers allocation IDs by durable metadata but keeps absence unresolved', async () => {
+      let page = 0;
+      let receivedOptions: any;
+      let remoteKill: { sandboxId: string; options?: unknown } | undefined;
+      const transport = createRealE2bTransport({
+        Sandbox: {
+          async kill(sandboxId, options) {
+            remoteKill = { sandboxId, options };
+            return true;
+          },
+          async create() {
+            return {
+              sandboxId: 'unused', commands: { async run() { return { exitCode: 0, stdout: '', stderr: '' }; } },
+              files: { async read() { return ''; }, async write() {}, async list() { return []; }, },
+              async kill() {},
+            };
+          },
+          list(options) {
+            receivedOptions = options;
+            page = 0;
+            return {
+              get hasNext() { return page < 2; },
+              async nextItems() {
+                page++;
+                if (page === 1) return [{ sandboxId: 'other', metadata: { allocationOperationId: 'other-op' } }];
+                if (options?.query?.metadata?.allocationOperationId === 'operation-1') {
+                  return [{ sandboxId: 'recovered-sandbox', metadata: { allocationOperationId: 'operation-1' } }];
+                }
+                return [];
+              },
+            };
+          },
+        },
+      });
+
+      const recovered = await transport.resolveAllocation!('operation-1', {
+        apiKey: 'e2b_test_key', domain: 'https://dedicated.e2b.dev',
+      });
+      assert.deepEqual(recovered, { status: 'allocated', sandboxId: 'recovered-sandbox' });
+      assert.deepEqual(receivedOptions.query.metadata, { allocationOperationId: 'operation-1' });
+      assert.equal(receivedOptions.apiKey, 'e2b_test_key');
+      assert.equal(receivedOptions.domain, 'https://dedicated.e2b.dev');
+      assert.equal(await transport.destroySandbox!('recovered-sandbox', {
+        apiKey: 'e2b_test_key', domain: 'https://dedicated.e2b.dev',
+      }), true);
+      assert.deepEqual(remoteKill, {
+        sandboxId: 'recovered-sandbox',
+        options: { apiKey: 'e2b_test_key', domain: 'https://dedicated.e2b.dev' },
+      });
+
+      const missing = await transport.resolveAllocation!('not-visible-yet');
+      assert.deepEqual(missing, { status: 'pending' });
+    });
+
     it('E2bCloudSandboxProviderClient defaults to createRealE2bTransport when transport is omitted', async () => {
       // Create client with transport omitted
       const client = new E2bCloudSandboxProviderClient({

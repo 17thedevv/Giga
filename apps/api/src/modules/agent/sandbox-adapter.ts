@@ -17,13 +17,24 @@ export interface CreateSandboxParams {
   readonly env?: Record<string, string>;
   readonly networkPolicy: SandboxNetworkPolicy;
   readonly signal?: AbortSignal;
+  readonly allocationOperationId?: string;
+  readonly attemptGeneration?: string;
 }
+
+export type AllocationSettlement =
+  | { readonly status: 'pending' }
+  | { readonly status: 'ambiguous'; readonly reason: string }
+  | { readonly status: 'allocated'; readonly sandboxId: string }
+  | { readonly status: 'not_allocated' };
 
 export interface CloudSandboxProviderClient {
   readonly providerName: string;
   readonly providerType?: string;
 
   createSandbox(params: CreateSandboxParams): Promise<{ readonly sandboxId: string; readonly endpoint?: string }>;
+
+  /** Optional provider-side lookup. `not_allocated` must be definitive for this operation ID. */
+  resolveAllocation?(allocationOperationId: string): Promise<AllocationSettlement>;
 
   executeCommand(sandboxId: string, params: {
     readonly command: string;
@@ -59,6 +70,7 @@ export interface CloudSessionState {
   readonly ownerId: string;
   readonly mode: AgentMode;
   readonly sandboxId: string;
+  readonly attemptGeneration?: string;
   readonly verifiedChecks: Map<string, VerifiedCheck>;
   readonly createdAt: string;
   readonly timeoutMs: number;
@@ -423,6 +435,26 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
       };
     }
 
+    let allocationStarted: boolean;
+    try {
+      allocationStarted = await this.repository!.beginSandboxAllocationOperation(
+        sessionId, durableSession.attemptGeneration
+      );
+    } catch (err) {
+      return {
+        available: false,
+        code: 'RUNTIME_UNAVAILABLE',
+        reason: err instanceof Error ? err.message : 'Sandbox allocation was fenced before provider submission',
+      };
+    }
+    if (!allocationStarted) {
+      return {
+        available: false,
+        code: 'RUNTIME_UNAVAILABLE',
+        reason: 'Provider allocation was already submitted or its outcome is ambiguous',
+      };
+    }
+
     // 3. Allocate sandbox at remote provider
     const safeEnv: Record<string, string> = {
       GIGA_SANDBOX: '1',
@@ -445,11 +477,13 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
         env: safeEnv,
         networkPolicy,
         signal: request.signal,
+        allocationOperationId: durableSession.allocationIntentId,
+        attemptGeneration: durableSession.attemptGeneration,
       });
       sandboxId = res.sandboxId;
     } catch (createErr: unknown) {
       const errMsg = createErr instanceof Error ? createErr.message : String(createErr);
-      await this.repository!.recordSandboxAllocationFailed(sessionId, errMsg).catch(() => {});
+      await this.repository!.markSandboxAllocationAmbiguous(sessionId, errMsg).catch(() => {});
       return {
         available: false,
         code: 'RUNTIME_UNAVAILABLE',
@@ -457,38 +491,39 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
       };
     }
 
-    // 4. Post-Allocation Abort Fencing:
-    if (request.signal?.aborted) {
-      try {
-        await this.providerClient.destroySandbox(sandboxId);
-        await this.repository!.markSandboxDestroyed(sessionId, sandboxId);
-      } catch (destroyErr: unknown) {
-        const rawErr = destroyErr instanceof Error ? destroyErr.message : String(destroyErr);
-        await this.repository!.recordSandboxAllocationCleanupPending(
-          sessionId,
-          sandboxId,
-          `Post-allocation abort destroy failed: ${rawErr}`
-        );
-      }
-      return {
-        available: false,
-        code: 'RUNTIME_UNAVAILABLE',
-        reason: 'Execution was aborted during sandbox allocation',
-      };
-    }
-
-    // 5. Commit allocated provider session ID to PostgreSQL with worker lease check
+    // Persist every returned provider identity before attempting cleanup or activation.
+    // A late callback is associated with its original generation and cannot revive it.
     try {
-      await this.repository!.commitSandboxSessionAllocated({
+      const committed = await this.repository!.commitSandboxSessionAllocated({
         sessionId,
         ownerId: request.ownerId,
         runId: request.runId,
         leaseToken,
         providerSessionId: sandboxId,
       });
+      if (committed.lifecycleState !== 'active' || request.signal?.aborted) {
+        try {
+          await this.providerClient.destroySandbox(sandboxId);
+          await this.repository!.markSandboxDestroyed(sessionId, sandboxId);
+        } catch (destroyErr: unknown) {
+          const rawErr = destroyErr instanceof Error ? destroyErr.message : String(destroyErr);
+          await this.repository!.recordSandboxAllocationCleanupPending(
+            sessionId, sandboxId, `Fenced allocation destroy failed: ${rawErr}`
+          );
+        }
+        return {
+          available: false,
+          code: 'RUNTIME_UNAVAILABLE',
+          reason: request.signal?.aborted ? 'Execution was aborted during sandbox allocation' : 'Attempt was fenced during sandbox allocation',
+        };
+      }
     } catch (commitErr: unknown) {
-      // Fenced! Worker lease expired, stolen, or DB error.
-      // Attempt immediate destroy compensation, but never mark destroyed if provider destroy fails:
+      // Persist the late provider ID before compensation whenever PostgreSQL is available.
+      // If this write fails, retain the unresolved operation so quota reconciliation fails closed.
+      const commitMessage = commitErr instanceof Error ? commitErr.message : String(commitErr);
+      await this.repository!.recordSandboxAllocationCleanupPending(
+        sessionId, sandboxId, `Allocation callback persistence failed: ${commitMessage}`
+      ).catch(() => {});
       try {
         await this.providerClient.destroySandbox(sandboxId);
         await this.repository!.markSandboxDestroyed(sessionId, sandboxId).catch(() => {});
@@ -497,13 +532,13 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
         await this.repository!.recordSandboxAllocationCleanupPending(
           sessionId,
           sandboxId,
-          `Commit failed (${commitErr instanceof Error ? commitErr.message : String(commitErr)}), destroy compensation failed: ${rawErr}`
+          `Commit failed (${commitMessage}), destroy compensation failed: ${rawErr}`
         ).catch(() => {});
       }
       return {
         available: false,
         code: 'RUNTIME_UNAVAILABLE',
-        reason: commitErr instanceof Error ? commitErr.message : String(commitErr),
+        reason: commitMessage,
       };
     }
 
@@ -515,6 +550,7 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
       ownerId: request.ownerId,
       mode: request.mode,
       sandboxId,
+      attemptGeneration: durableSession.attemptGeneration,
       verifiedChecks: new Map(),
       createdAt: durableSession.createdAt,
       timeoutMs,
@@ -589,6 +625,23 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
         errorCode: 'RUNTIME_UNAVAILABLE',
         errorMessage: 'Provider client disconnected',
       };
+    }
+
+    let lifecycleOperationId: string | undefined;
+    if (this.repository && session.attemptGeneration) {
+      try {
+        lifecycleOperationId = await this.repository.beginSandboxRuntimeOperation(
+          sessionId, session.attemptGeneration, 'tool', toolCall.toolName
+        );
+      } catch (err) {
+        return {
+          success: false,
+          output: {},
+          durationMs: Date.now() - start,
+          errorCode: 'SESSION_NOT_FOUND',
+          errorMessage: err instanceof Error ? err.message : 'Sandbox attempt is durably fenced',
+        };
+      }
     }
 
     // 3. Independent Adapter-Level Wall-Clock Timeout & Immediate Cancellation
@@ -897,6 +950,15 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
       }
     })();
 
+    // Promise.race can return on timeout while the provider request is still running.
+    // Settle the durable operation only when the underlying provider promise itself ends.
+    if (lifecycleOperationId && this.repository) {
+      void executionPromise.then(
+        () => this.repository!.settleSandboxRuntimeOperation(lifecycleOperationId!),
+        () => this.repository!.markSandboxRuntimeOperationAmbiguous(lifecycleOperationId!)
+      ).catch(() => { /* unresolved durable state makes the fence fail closed */ });
+    }
+
     try {
       return await Promise.race([executionPromise, timeoutPromise, abortPromise]);
     } catch (err: unknown) {
@@ -964,7 +1026,19 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
       throw new Error('Cloud sandbox provider client is not available');
     }
 
-    const { files: remoteFiles } = await this.providerClient.createSnapshot(session.sandboxId);
+    const lifecycleOperationId = this.repository && session.attemptGeneration
+      ? await this.repository.beginSandboxRuntimeOperation(sessionId, session.attemptGeneration, 'snapshot', 'create_snapshot')
+      : undefined;
+    let remoteFiles: readonly { path: string; size: number; sha256?: string }[];
+    try {
+      ({ files: remoteFiles } = await this.providerClient.createSnapshot(session.sandboxId));
+      if (lifecycleOperationId && this.repository) await this.repository.settleSandboxRuntimeOperation(lifecycleOperationId);
+    } catch (error) {
+      if (lifecycleOperationId && this.repository) {
+        await this.repository.markSandboxRuntimeOperationAmbiguous(lifecycleOperationId).catch(() => {});
+      }
+      throw error;
+    }
 
     let totalBytes = 0;
     const files: SandboxFileEntry[] = remoteFiles.map((f) => {
@@ -991,6 +1065,7 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
   async stop(sessionId: string): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (session) {
+      const wasActive = session.active;
       session.active = false;
 
       if (session.activeControllers) {
@@ -1002,6 +1077,15 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
           }
         }
         session.activeControllers.clear();
+      }
+
+      if (this.repository && (await this.repository.canPersistSandboxSessions())) {
+        try {
+          await this.repository.markSandboxStopping(session.ownerId, sessionId);
+        } catch (error) {
+          session.active = wasActive;
+          throw error;
+        }
       }
 
       if (this.providerClient && session.destroyStatus !== 'destroyed') {
@@ -1030,7 +1114,7 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
     if (this.repository && (await this.repository.canPersistSandboxSessions())) {
       const durable = await this.repository.getSandboxSessionById(sessionId);
       if (durable && durable.lifecycleState !== 'destroyed') {
-        await this.repository.markSandboxStopping(durable.ownerId, sessionId).catch(() => {});
+        await this.repository.markSandboxStopping(durable.ownerId, sessionId);
         if (durable.providerSessionId && this.providerClient) {
           try {
             await this.providerClient.destroySandbox(durable.providerSessionId);
@@ -1040,8 +1124,17 @@ export class IsolatedCloudSandboxAdapter implements ExecutionRuntime {
             await this.repository.markSandboxCleanupPending(sessionId, rawErr);
             throw err;
           }
-        } else {
-          await this.repository.markSandboxDestroyed(sessionId);
+        } else if (!durable.providerSessionId) {
+          const state = await this.repository.getSandboxAttemptLifecycle({
+            ownerId: durable.ownerId, workspaceId: durable.workspaceId,
+            runId: durable.runId, attemptNumber: durable.attemptNumber,
+          });
+          const allocation = state.operations.find((operation) => operation.kind === 'allocation');
+          if (allocation?.state === 'settled' && allocation.outcome === 'no_resource') {
+            await this.repository.recordSandboxAllocationFailed(sessionId, 'Allocation was confirmed not to have started');
+          } else {
+            throw new Error('Sandbox allocation outcome is unresolved; refusing to mark the session destroyed');
+          }
         }
       }
     }
