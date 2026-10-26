@@ -1,0 +1,76 @@
+{
+  "evidenceId": "17T-64-REAL-API-BROWSER-SMOKE-2026-10-26",
+  "browserTestedAtUtc": "2026-10-26T09:52:09.975Z",
+  "httpProbeTestedAtUtc": "2026-10-26T09:52:53.1017383+00:00",
+  "environment": "Render demo only",
+  "frontend": {
+    "origin": "https://giga-web-demo-17t12.onrender.com",
+    "deployedCommit": "45fd5adba18aef58fbe5d47dfe58022689f622e1",
+    "rootNavigationStatus": 200
+  },
+  "api": {
+    "origin": "https://giga-api-demo-17t12.onrender.com",
+    "deployedCommit": "d676288090d3c3b5ecb63516f797cf3928885769",
+    "healthTopLevelNavigationStatus": 200,
+    "anonymousMeHttpStatus": 401
+  },
+  "runner": {
+    "automation": "Playwright",
+    "automationVersion": "1.64.1",
+    "browser": "Google Chrome headless",
+    "browserVersion": "155.0.8059.85",
+    "isolatedBrowserContexts": true,
+    "installedOutsideRepository": true
+  },
+  "secretsAndSession": {
+    "accountCredentialsUsed": false,
+    "testAccountSessionPreloaded": false,
+    "responseBodiesInspectedOrLogged": false,
+    "screenshotsCaptured": false
+  },
+  "checks": [
+    {
+      "name": "Credentialed GET /api/v1/auth/me from deployed Web origin",
+      "result": "FAIL",
+      "browserOutcome": "fetch rejected; Chrome console classified the failure as CORS",
+      "httpOnlyProbeStatusWithoutOrigin": 401,
+      "accessControlAllowOrigin": null,
+      "accessControlAllowCredentials": null
+    },
+    {
+      "name": "Credentialed GET /api/v1/auth/me from disallowed localhost origin",
+      "result": "BLOCKED_BY_CORS",
+      "browserOutcome": "fetch rejected; Chrome console classified the failure as CORS",
+      "accountCredentialsUsed": false
+    },
+    {
+      "name": "HTTP GET /api/v1/auth/me with expected Web Origin header",
+      "result": "HTTP_401_WITHOUT_CORS_HEADERS",
+      "accessControlAllowOrigin": null,
+      "accessControlAllowCredentials": null
+    },
+    {
+      "name": "HTTP OPTIONS /api/v1/auth/me preflight probe with expected Web Origin",
+      "result": "HTTP_404_WITHOUT_CORS_HEADERS",
+      "status": 404,
+      "accessControlAllowOrigin": null,
+      "accessControlAllowCredentials": null
+    },
+    {
+      "name": "HTTP OPTIONS /api/v1/auth/me preflight probe with localhost Origin",
+      "result": "HTTP_404_WITHOUT_CORS_HEADERS",
+      "status": 404,
+      "accessControlAllowOrigin": null,
+      "accessControlAllowCredentials": null
+    }
+  ],
+  "preflightLimitation": "A browser custom-header fetch was attempted, but the Playwright network trace did not expose an OPTIONS event. The raw HTTP OPTIONS probes above are separate; do not treat this as a verified browser preflight sequence.",
+  "notTested": [
+    "Login, invalid login, logout, session expiry, or cookie attributes",
+    "Authenticated authorization or two-account tenant isolation",
+    "CSRF behavior for state-changing requests",
+    "Real chat streaming, Stop, Retry, Regenerate, or interruption",
+    "BYOK save/revoke, error redaction, or browser storage inspection"
+  ],
+  "scope": "Anonymous smoke checks against the deployed demo versions only. This does not validate the 17T-64 frontend implementation, a production deployment, or authenticated Real API security."
+}
