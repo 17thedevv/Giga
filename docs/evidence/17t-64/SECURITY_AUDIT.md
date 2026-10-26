@@ -114,13 +114,21 @@ Required verification checklist for the authorized backend/infrastructure owner:
 
 The frontend sends same-origin relative API requests with `credentials: 'include'`. Backend source reviewed for this audit sets the session cookie `HttpOnly`, `Secure` in production by default, with configurable `SameSite`; mutation routes are guarded by fail-closed Origin/Referer CSRF middleware; production allowed origins must be configured. Conversation routes pass the authenticated owner ID into service queries. These are source observations only; this frontend change does not certify every backend route, actual deployed environment setting, cross-tenant behavior, or production CORS/cookie behavior.
 
-### Render status reported by the environment owner (2026-10-26)
+### Render and demo endpoint verification (read-only, 2026-10-26)
 
-The owner reports that the Render environment contains `giga-api-demo-17t12`, `giga-web-demo-17t12`, and PostgreSQL `giga-demo-17t12-db` (PostgreSQL 16, Singapore); auto-deploy is disabled. The API and Web services are reported Live on commits `d6762880…` and `45fd5adb…` from 2026-10-19. The 17T-64 frontend commit is **not confirmed deployed**. The reported public endpoints are [Giga API Demo](https://giga-api-demo-17t12.onrender.com/) and [Giga Web Demo](https://giga-web-demo-17t12.onrender.com/).
+Using the explicitly confirmed Render workspace `My Workspace`, the read-only service/deploy listing independently verified the demo resources and current deployment metadata. No environment variables, connection strings, secrets, or logs were inspected; no settings or infrastructure were changed, and no deploy was triggered.
 
-The owner reports that attempts to retrieve `/health`, `/login`, and `/api/v1/auth/me` through the available web access did not return usable responses. This is not HTTP or browser PASS evidence. These Render resource names, statuses and deployed SHAs are owner-reported in this update and were not independently confirmed by the Codex Render connector: its session had no selected workspace, and the Render instructions require workspace confirmation before reading resource state. No workspace was selected and no credential values were requested or read.
+| Resource | Verified state |
+|---|---|
+| API `giga-api-demo-17t12` | Auto-deploy disabled; latest listed deploy is `live` on commit `d676288090d3c3b5ecb63516f797cf3928885769`. |
+| Web `giga-web-demo-17t12` | Auto-deploy disabled; latest listed deploy is `live` on commit `45fd5adba18aef58fbe5d47dfe58022689f622e1`. |
+| PostgreSQL `giga-demo-17t12-db` | `available`, PostgreSQL 16, Singapore. |
 
-The current checkout has no Playwright, Puppeteer or Cypress installation and no Chrome/Edge/Chromium executable on PATH. No approved demo test account or authenticated browser session was available in this environment. Therefore no browser smoke test, Real cookie/CSRF/CORS test, deployed API authorization test, or production deployment verification is claimed. Frontend `package.json` has no lint script; repository CI runs install, typecheck, build, the mandatory production bundle scan, and Vitest.
+The deployed API and Web commits are not the 17T-64 branch/head, so no 17T-64 deployment is verified. The public endpoints are [Giga API Demo](https://giga-api-demo-17t12.onrender.com/) and [Giga Web Demo](https://giga-web-demo-17t12.onrender.com/).
+
+Unauthenticated HTTP smoke checks from this environment on 2026-10-26 returned `200` for `GET /health`, `401` for `GET /api/v1/auth/me`, and `200` for the Web root. Response bodies were not read; no cookie or credential was sent. These checks establish endpoint reachability and anonymous `/auth/me` rejection only. They do not verify browser cookie behavior, CSRF, credentialed CORS, tenant authorization, or authenticated chat workflows.
+
+The owner confirms that an approved demo account and browser runner are available through a secure environment. That runner and secure credential injection are not exposed to this Codex session: the repository has no Playwright, Puppeteer or Cypress package installed, no Chrome/Edge/Chromium executable is on PATH, and no browser-control tool is available here. No credentials were provided in chat. Consequently no browser smoke test, Real cookie/CSRF/CORS test, authenticated deployed API test, or production deployment verification is claimed. The owner/Trà must run those checks in the secure runner and attach redacted evidence. Frontend `package.json` has no lint script; repository CI runs install, typecheck, build, the mandatory production bundle scan, and Vitest.
 
 F-01 remains unresolved. The owner reports that the current Render connection does not provide a PostgreSQL password-change action; no credential was rotated, revoked, or changed. A successful database `Available` state is not evidence that the exposed credential has been retired. Rotation, application cutover, testing the old credential's rejection, and retained snapshot handling still require an authorized infrastructure owner.
 
@@ -130,12 +138,12 @@ F-01 remains unresolved. The owner reports that the current Render connection do
 |---|---|---|
 | Previously exposed DB credential has no verified rotation/cutover/retirement | Authorized infrastructure/service owner; Trà to verify | New credential deployed; old one revoked and confirmed unusable; snapshot access/retention addressed. Do not mark security gate pass before this. |
 | Backend owner authorization, public DTO fields, CSRF/CORS and cookie settings | Trà | Review route/service scoping and deployed configuration; test cross-tenant IDs, expired session, worker lease/internal reasoning fields and BYOK DTOs. |
-| Real API browser flow | Trà / environment owner | Approved test account and environment, then verify cookie auth, Origin/CORS, Stop/retry/chat and credential save/revoke with synthetic test credentials. |
+| Real API browser flow | Trà / environment owner | Run in the confirmed secure browser runner (not connected to this Codex session); verify cookie auth, Origin/CORS, Stop/retry/chat and credential save/revoke with synthetic test credentials, then attach redacted evidence. |
 | Legacy Agent admission/proposal/decision/cancel helpers do not match the current v0.2 draft routes and request shape; current Real UI does not call them | Trà / 17T-49 owner | Confirm whether to remove, migrate or formally scope these helpers when the Agent integration is delivered; validate against the backend contract. |
 | Dependency and source changes not yet independently reviewed | Trà | Review this Draft PR and confirm frontend/backend trust boundary. |
 | Markdown rendering, Agent message/artifact flows, and complete account/session expiry work are incomplete dependencies | Owners of 17T-52, 17T-49, 17T-60 | Re-run this audit against the delivered implementations before treating their surfaces as covered. |
 
-**Gate:** BLOCKED. Local frontend checks are clean, but the historical database credential retirement is unverified, Real API browser verification is unavailable, related Linear dependencies remain incomplete, and independent review is pending.
+**Gate:** BLOCKED. Local frontend checks are clean, but the historical database credential retirement is unverified, Real API browser verification is pending in the disconnected secure runner, related Linear dependencies remain incomplete, and independent review is pending.
 
 ## Independent-review follow-up validation
 
@@ -153,5 +161,8 @@ F-01 remains unresolved. The owner reports that the current Render connection do
 | Repository Git workflow validator | Pass on branch `chore/17t-64-frontend-security-audit`, PR title `chore(web): harden frontend security and privacy`, and committed PR range. |
 | GitHub Frontend CI | Pass: run [#48](https://github.com/17thedevv/Giga/actions/runs/40295634793) on implementation commit `7614d1e788663ec581e3e4f1ae021005957bfff6`; typecheck, build, mandatory bundle scan, and all Vitest tests succeeded. |
 | GitHub Validate Git Workflow | Pass: run [#163](https://github.com/17thedevv/Giga/actions/runs/40295634789) on implementation commit `7614d1e788663ec581e3e4f1ae021005957bfff6`. |
+| Render read-only inspection | Pass: service/deploy metadata and PostgreSQL state above verified through the authorized workspace; no secret values read and no infrastructure writes performed. |
+| Unauthenticated demo HTTP smoke | Limited pass: API `/health` 200, anonymous `/api/v1/auth/me` 401, Web `/` 200; bodies not read. Not browser or authenticated-flow evidence. |
+| GitHub CI on documentation head `6f01248e037bf8a60cab35a27b41b2db23028fd9` | Pass: Frontend CI run [40297627188](https://github.com/17thedevv/Giga/actions/runs/40297627188); Git Workflow runs [40297627328](https://github.com/17thedevv/Giga/actions/runs/40297627328) and [40297765396](https://github.com/17thedevv/Giga/actions/runs/40297765396). All completed successfully. |
 
 The final code/test implementation commit for these findings is `7614d1e788663ec581e3e4f1ae021005957bfff6`. This follow-up was tested locally after a clean `npm ci` and verified by both GitHub workflows above. The production bundle script is mandatory in `.github/workflows/web-ci.yml` after `npm run build`; unit tests exercise its scanner using temporary fixtures and do not depend on pre-existing `dist/` output. This does not include browser validation, an approved Real API session, or deployed security verification.
