@@ -2,7 +2,7 @@ import { serve, type ServerType } from '@hono/node-server';
 import type pg from 'pg';
 import { createApp } from './create-app.js';
 import { loadConfig, type AppConfig } from './config.js';
-import { createDatabasePool, redactDatabaseUrl } from '../db/client.js';
+import { closeDatabasePool, createDatabasePool, redactDatabaseUrl } from '../db/client.js';
 import { runMigrations } from '../db/migrate.js';
 import { createChatEngine } from '../modules/llm/chat-bootstrap.js';
 import type { ProviderTransport } from '../modules/llm/providers/gemini/gemini-provider.js';
@@ -38,19 +38,46 @@ export async function startServer(options: StartServerOptions = {}): Promise<{
   let pool = options.pool;
 
   if (!pool && config.databaseUrl) {
-    console.log(`[giga-api] Initializing PostgreSQL connection: ${redactDatabaseUrl(config.databaseUrl)}`);
-    pool = createDatabasePool({ connectionString: config.databaseUrl });
-
     if (!options.skipMigrations) {
+      const migrationUrl = config.migrationDatabaseUrl ?? config.databaseUrl;
+      console.log(`[giga-api] Initializing migration connection: ${redactDatabaseUrl(migrationUrl)}`);
+      const migrationPool = createDatabasePool({ connectionString: migrationUrl });
       try {
-        const applied = await runMigrations(pool);
+        const applied = await runMigrations(migrationPool);
         if (applied.length > 0) {
           console.log(`[giga-api] Database migrations applied: ${applied.join(', ')}`);
         }
       } catch (err) {
         console.error('[giga-api] Database migration error on startup:', err);
-        // Ensure pool connections are properly closed on startup failure
-        await pool.end();
+        throw err;
+      } finally {
+        await closeDatabasePool(migrationPool);
+      }
+    }
+
+    console.log(`[giga-api] Initializing API connection: ${redactDatabaseUrl(config.databaseUrl)}`);
+    pool = createDatabasePool({ connectionString: config.databaseUrl });
+    if (config.nodeEnv === 'production') {
+      try {
+        const roles = await pool.query<{
+          is_superuser: boolean;
+          is_api_runtime: boolean;
+          is_quota_owner: boolean;
+          is_quota_finalizer: boolean;
+        }>(
+          'SELECT role.rolsuper AS is_superuser, ' +
+          "pg_has_role(current_user, 'giga_api_runtime', 'MEMBER') AS is_api_runtime, " +
+          "pg_has_role(current_user, 'giga_agent_quota_owner', 'MEMBER') AS is_quota_owner, " +
+          "pg_has_role(current_user, 'giga_agent_quota_finalizer', 'MEMBER') AS is_quota_finalizer " +
+          'FROM pg_roles AS role WHERE role.rolname = current_user'
+        );
+        if (!roles.rows[0] || roles.rows[0].is_superuser || !roles.rows[0].is_api_runtime ||
+            roles.rows[0].is_quota_owner || roles.rows[0].is_quota_finalizer) {
+          throw new Error('DATABASE_URL must use a non-superuser login granted giga_api_runtime and not a quota owner or finalizer role.');
+        }
+      } catch (err) {
+        await closeDatabasePool(pool);
+        pool = undefined;
         throw err;
       }
     }

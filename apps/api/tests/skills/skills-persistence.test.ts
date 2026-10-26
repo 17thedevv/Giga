@@ -1,6 +1,6 @@
 import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { createTestDatabase, type TestDbInstance } from '../test-db-helper.js';
+import { createTestDatabase, migrationsSupportedByTestDatabase, type TestDbInstance } from '../test-db-helper.js';
 import { UserRepository } from '../../src/db/repositories/user-repository.js';
 import { runMigrations, getAppliedMigrationVersions, MIGRATIONS, type Migration } from '../../src/db/migrate.js';
 import {
@@ -61,7 +61,7 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
     assert.ok(versions.has(3), 'Migration 003 applied');
 
     // Second run must be idempotent (0 pending migrations)
-    const secondRun = await runMigrations(testDb.pool);
+    const secondRun = await runMigrations(testDb.pool, migrationsSupportedByTestDatabase(testDb.isMemory));
     assert.strictEqual(secondRun.length, 0);
   });
 
@@ -970,7 +970,7 @@ describe('Skills PostgreSQL Persistence — Integration Tests', () => {
         // Ignore index drop in real Postgres
       }
       await testDb.pool.query('DELETE FROM schema_migrations WHERE version = 2;');
-      await runMigrations(testDb.pool);
+      await runMigrations(testDb.pool, migrationsSupportedByTestDatabase(testDb.isMemory));
       await testDb.pool.query('SELECT reasoning_effort FROM chat_generations LIMIT 0');
     }
   });

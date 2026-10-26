@@ -4,6 +4,7 @@ const { Pool } = pg;
 
 export interface DatabaseConfig {
   readonly connectionString?: string;
+  readonly options?: string;
   readonly maxConnections?: number;
   readonly idleTimeoutMillis?: number;
   readonly connectionTimeoutMillis?: number;
@@ -31,6 +32,7 @@ export function redactDatabaseUrl(rawUrl?: string): string {
 export function createDatabasePool(config: DatabaseConfig = {}): pg.Pool {
   const poolConfig: pg.PoolConfig = {
     connectionString: config.connectionString,
+    options: config.options,
     max: config.maxConnections ?? 10,
     idleTimeoutMillis: config.idleTimeoutMillis ?? 30000,
     connectionTimeoutMillis: config.connectionTimeoutMillis ?? 5000,

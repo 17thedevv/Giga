@@ -70,6 +70,7 @@ Use the backend environment/secret controls. Never paste keys or DB connection s
 | `NODE_VERSION` | Supported pinned Node 22 release verified for the service |
 | `PORT` | Render supplied; verify listening on public host/port |
 | `DATABASE_URL` | Dedicated demo Postgres connection secret; validate TLS and pool settings |
+| `MIGRATION_DATABASE_URL` | Separate privileged connection to the same database; migrations require role creation/ownership rights. Never reuse this login for the API runtime. |
 | `ALLOWED_ORIGINS` | Exact frontend HTTPS origin(s), no wildcard |
 | `COOKIE_SECURE` | `true` |
 | `COOKIE_SAME_SITE` | Choose for verified topology; same-origin candidate uses `lax` |
@@ -81,7 +82,7 @@ Use the backend environment/secret controls. Never paste keys or DB connection s
 
 A per-generation token cap is not a total-spend or rate cap. Verify account/provider limits and test budget before enabling a public platform credential. Missing BYOK encryption configuration disables BYOK; malformed configuration fails startup.
 
-The API auto-applies pending migrations on startup. At the inspected SHA the migration set is 001–013. Review locking, target database identity and retention before first boot. First run must target a dedicated disposable demo DB, never an unrelated production database. Record applied versions without exposing connection details. Application rollback does not reverse migrations.
+The API auto-applies pending migrations on startup using `MIGRATION_DATABASE_URL`, then opens its request pool using `DATABASE_URL`. Migration 015 creates `giga_agent_quota_owner`, `giga_api_runtime`, and `giga_agent_quota_finalizer`; grant `giga_api_runtime` to the non-superuser login in `DATABASE_URL`, and keep that login out of both quota owner and finalizer roles. The finalizer role receives only permission to call the controlled reconciliation function; a separate login and connection must be provisioned for it only after 17T-71 supplies the durable lifecycle fence and 17T-73 integrates that protocol. Do not reuse migration credentials for runtime finalization. The current API does not wire a production finalizer connection and must fail closed for reconciliation without one. Verify the runtime login is not a quota-table owner before boot. At the inspected baseline the migration set is 001–013; later quota migrations require this role separation. Review locking, target database identity and retention before first boot. First run must target a dedicated disposable demo DB, never an unrelated production database. Record applied versions without exposing connection details. Application rollback does not reverse migrations.
 
 ## 5. Deploy and verify infrastructure
 

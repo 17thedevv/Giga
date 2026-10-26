@@ -189,7 +189,10 @@ export function createApp(dependencies: AppDependencies = {}): Hono {
           message: err.message,
         },
       };
-      return c.json(errorBody, err.statusCode as 400 | 401 | 403 | 404 | 409 | 500);
+      if (err instanceof AppError && 'retryAfterSeconds' in err && typeof err.retryAfterSeconds === 'number') {
+        c.header('Retry-After', String(err.retryAfterSeconds));
+      }
+      return c.json(errorBody, err.statusCode as 400 | 401 | 403 | 404 | 409 | 422 | 429 | 500);
     }
 
     if (err instanceof SkillError) {

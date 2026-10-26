@@ -8,6 +8,7 @@ export interface AppConfig {
   readonly chat?: ChatProviderConfig;
   readonly port: number;
   readonly databaseUrl?: string;
+  readonly migrationDatabaseUrl?: string;
   readonly nodeEnv: 'development' | 'production' | 'test';
   readonly cookieSecure: boolean;
   readonly cookieSameSite: 'lax' | 'strict' | 'none';
@@ -128,6 +129,28 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   if (nodeEnv === 'production' && !databaseUrl) {
     throw new Error('DATABASE_URL environment variable is required in production mode.');
   }
+  const migrationDatabaseUrl = env.MIGRATION_DATABASE_URL?.trim();
+  if (nodeEnv === 'production' && !migrationDatabaseUrl) {
+    throw new Error('MIGRATION_DATABASE_URL is required in production mode to keep migration ownership separate from the API role.');
+  }
+  if (nodeEnv === 'production' && databaseUrl && migrationDatabaseUrl) {
+    let runtimeIdentity: { username: string; database: string };
+    let migrationIdentity: { username: string; database: string };
+    try {
+      const runtimeUrl = new URL(databaseUrl);
+      const migrationUrl = new URL(migrationDatabaseUrl);
+      runtimeIdentity = { username: decodeURIComponent(runtimeUrl.username), database: runtimeUrl.pathname };
+      migrationIdentity = { username: decodeURIComponent(migrationUrl.username), database: migrationUrl.pathname };
+    } catch {
+      throw new Error('DATABASE_URL and MIGRATION_DATABASE_URL must be valid PostgreSQL connection URLs in production mode.');
+    }
+    if (!runtimeIdentity.username || !migrationIdentity.username || runtimeIdentity.username === migrationIdentity.username) {
+      throw new Error('DATABASE_URL and MIGRATION_DATABASE_URL must use distinct database login roles in production mode.');
+    }
+    if (runtimeIdentity.database !== migrationIdentity.database) {
+      throw new Error('DATABASE_URL and MIGRATION_DATABASE_URL must target the same database in production mode.');
+    }
+  }
 
   const cookieSecure = env.COOKIE_SECURE !== undefined
     ? env.COOKIE_SECURE === 'true' || env.COOKIE_SECURE === '1'
@@ -146,6 +169,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     serveWeb: env.SERVE_WEB === 'true',
     port,
     databaseUrl,
+    ...(migrationDatabaseUrl ? { migrationDatabaseUrl } : {}),
     nodeEnv,
     cookieSecure,
     cookieSameSite,

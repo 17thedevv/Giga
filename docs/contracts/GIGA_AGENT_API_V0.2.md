@@ -149,6 +149,20 @@ a string: clients must tolerate unknown additive codes and display safe `message
 reinterpret an unfamiliar code as success or a new public status. This task does not
 wire those workers into public admission or alter existing internal error semantics.
 
+Candidate quota admission errors for a future execution-enabled run path:
+
+| Code | HTTP | Meaning | Retry indication |
+|---|---:|---|---|
+| RATE_LIMITED | 429 | Rolling request or usage budget has no remaining reserved capacity | Retry-After may be returned |
+| LIMIT_EXCEEDED | 422 | Configured upper bound or measured run usage exceeds a hard resource limit | No automatic retry |
+| WORKSPACE_BUSY | 409 | Owner or workspace writable-run capacity is held by an active or unreconciled attempt | Retry-After may be returned |
+
+These are sanitized error codes; reservation records, policy thresholds, lease
+fingerprints, usage from other workspaces and provider diagnostics remain private. The
+current public POST /runs path remains execution-disabled and returns its existing
+RUNTIME_UNAVAILABLE run result. An execution-enabled admission must invoke the durable
+quota reservation before queue dispatch and map these errors through the common error DTO.
+
 Request types:
 
 - `CreateAgentWorkspace`: `{ source: { kind: 'blank' }, name? }`; default `New Workspace`;
