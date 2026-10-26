@@ -1,0 +1,85 @@
+{
+  "evidenceId": "17T-64-REAL-API-SAME-ORIGIN-BROWSER-SMOKE-2026-10-26",
+  "testedAtUtc": "2026-10-26T10:19:38.389Z",
+  "environment": "Render demo only; anonymous fresh browser contexts",
+  "runner": {
+    "automation": "Playwright",
+    "automationVersion": "1.64.1",
+    "browser": "Google Chrome headless",
+    "browserVersion": "155.0.8059.85",
+    "installedOutsideRepository": true,
+    "freshIsolatedContexts": true
+  },
+  "apiDeployment": {
+    "service": "giga-api-demo-17t12",
+    "serviceId": "srv-dbasg08m7kps73a4ecug",
+    "branch": "docs/17t-12-demo-deployment",
+    "commit": "d676288090d3c3b5ecb63516f797cf3928885769",
+    "autoDeploy": false,
+    "origin": "https://giga-api-demo-17t12.onrender.com"
+  },
+  "staticWebDeployment": {
+    "service": "giga-web-demo-17t12",
+    "serviceId": "srv-dbasfsks728c739goud0",
+    "branch": "chore/17t-12-demo-integration",
+    "commit": "45fd5adba18aef58fbe5d47dfe58022689f622e1",
+    "autoDeploy": false,
+    "origin": "https://giga-web-demo-17t12.onrender.com"
+  },
+  "session": {
+    "credentialsUsed": false,
+    "preloadedSession": false,
+    "cookiesPresentAfterAnonymousChecks": false,
+    "responseBodiesInspectedOrLogged": false,
+    "screenshotsCaptured": false
+  },
+  "checks": [
+    {
+      "name": "API-origin navigation and health",
+      "result": "PASS_ANONYMOUS_ROUTING_ONLY",
+      "statuses": {
+        "GET /health": 200,
+        "GET /login": 200,
+        "GET /chat": 200
+      },
+      "contentTypeForUiRoutes": "text/html; charset=utf-8"
+    },
+    {
+      "name": "Credentialed-mode GET /api/v1/auth/me from API same origin",
+      "result": "PASS_ROUTING_ONLY",
+      "fetchResolved": true,
+      "status": 401,
+      "contentType": "application/json"
+    },
+    {
+      "name": "Static Web relative API route through same-origin rewrite",
+      "result": "PASS_ROUTING_ONLY",
+      "statuses": {
+        "GET /health": 200,
+        "GET /login": 200,
+        "GET /chat": 200,
+        "GET /api/v1/auth/me": 401
+      },
+      "apiFetchResolved": true,
+      "contentType": "application/json"
+    },
+    {
+      "name": "Direct credentialed fetch from static Web origin to API origin",
+      "result": "BLOCKED_BY_CORS",
+      "fetchRejectedWith": "TypeError",
+      "sessionCookiePresent": false,
+      "interpretation": "Direct cross-origin access is not supported; the application should use its same-origin hosting/proxy topology instead of adding broad CORS."
+    }
+  ],
+  "knownTopologyLimitation": "The static-site rewrite buffers incremental SSE, as measured in docs/evidence/17T-12-demo-deployment.md. Its same-origin auth path is not sufficient for Chat streaming acceptance; the single Node API service with SERVE_WEB=true is the intended candidate.",
+  "notTested": [
+    "Login/logout with an approved account and Set-Cookie attributes",
+    "CSRF mutation behavior in an authenticated browser session",
+    "Two-account authorization isolation",
+    "Actual SSE delta progression and Stop/Retry/Regenerate",
+    "BYOK save/revoke and secret-handling flows",
+    "Session expiry and refresh",
+    "The PR #43 frontend commit or a controlled staging deployment"
+  ],
+  "scope": "Anonymous routing smoke against existing demo deploys only. It does not prove authenticated session security, SSE acceptance, tenant authorization, or security of the PR #43 frontend."
+}
