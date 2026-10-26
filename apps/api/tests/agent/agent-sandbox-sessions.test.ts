@@ -946,6 +946,22 @@ describe('GigaAgent Durable Sandbox Sessions & Crash-Safe Cleanup (17T-71)', { t
         await repo.markSandboxCleanupPending(session.id, 'concurrency_test', 0);
       }
 
+      // Hold the first provider destruction until the other worker has also
+      // claimed work. This makes the overlap deterministic instead of relying
+      // on scheduler timing between the two batches.
+      const destroyProviderSandbox = provider.destroySandbox.bind(provider);
+      let releaseDestroyBarrier!: () => void;
+      const destroyBarrier = new Promise<void>((resolve) => {
+        releaseDestroyBarrier = resolve;
+      });
+      let destroyRequests = 0;
+      provider.destroySandbox = async (sandboxId) => {
+        destroyRequests++;
+        if (destroyRequests === 2) releaseDestroyBarrier();
+        await destroyBarrier;
+        await destroyProviderSandbox(sandboxId);
+      };
+
       // Run both reconcilers concurrently
       const [resA, resB] = await Promise.all([
         reconcilerA.reconcileBatch(5),
@@ -955,8 +971,10 @@ describe('GigaAgent Durable Sandbox Sessions & Crash-Safe Cleanup (17T-71)', { t
       // Total destroyed across both workers must equal exactly 4
       assert.equal(resA.destroyed + resB.destroyed, 4);
       // No duplicate destroy calls at provider
-      assert.equal(provider.destroyedSandboxes.length, 4);
-      assert.equal(new Set(provider.destroyedSandboxes).size, 4);
+      assert.equal(provider.destroyedSandboxes.length, 4,
+        `Expected four provider destroy calls, got: ${provider.destroyedSandboxes.join(', ')}`);
+      assert.equal(new Set(provider.destroyedSandboxes).size, 4,
+        `Expected distinct provider IDs, got: ${provider.destroyedSandboxes.join(', ')}`);
     });
 
     it('two workers concurrently preparing the same run via IsolatedCloudSandboxAdapter', async () => {

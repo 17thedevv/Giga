@@ -1941,7 +1941,13 @@ export class AgentRepository {
         }
         if (session.provider_session_id && session.lifecycle_state !== 'destroyed') {
           await client.query(
-            `UPDATE agent_sandbox_sessions SET lifecycle_state = 'cleanup_pending', cleanup_state = 'pending',
+            `UPDATE agent_sandbox_sessions
+             SET lifecycle_state = CASE
+                   WHEN cleanup_state = 'in_progress' AND cleanup_lease_expires_at > NOW()
+                     THEN 'destroying' ELSE 'cleanup_pending' END,
+                 cleanup_state = CASE
+                   WHEN cleanup_state = 'in_progress' AND cleanup_lease_expires_at > NOW()
+                     THEN 'in_progress' ELSE 'pending' END,
                diagnostics = $2, updated_at = NOW()
              WHERE id = $1 AND lifecycle_state IN ('allocating', 'active', 'stopping', 'destroying', 'cleanup_pending')`,
             [session.id, JSON.stringify(diagnostics)]
