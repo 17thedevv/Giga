@@ -266,6 +266,7 @@ The connected Render tools expose service/database metadata, but no managed Post
 | Git workflow tests / whitespace | Pass: **6/6** and `git diff --check`. |
 | GitHub CI on PR #43 HEAD `aad27f84edfaa4b9fd4c65bfe17fef3d762ad8fb` | Pass: [Frontend CI #54](https://github.com/17thedevv/Giga/actions/runs/40304199187) and [Validate Git Workflow #178](https://github.com/17thedevv/Giga/actions/runs/40304199297). |
 | GitHub CI on origin/infrastructure evidence HEAD `c066125be900f1977023f535dcab508a1e3f56ef` | Pass: [Frontend CI #55](https://github.com/17thedevv/Giga/actions/runs/40307199867) and [Validate Git Workflow #180](https://github.com/17thedevv/Giga/actions/runs/40307199918). |
+| GitHub CI on final evidence HEAD `937f33a50df842100070053c27c4bd5d104b309c` | Pass: [Frontend CI #56](https://github.com/17thedevv/Giga/actions/runs/40307464362) and [Validate Git Workflow #183](https://github.com/17thedevv/Giga/actions/runs/40307651695). Both passed on this exact commit. |
 | Authenticated Playwright / live PostgreSQL | **BLOCKED / NOT TESTED**: the approved account/runner is not connected; hosted SQL cannot connect with the current empty DB allowlist. |
 
 ### Current gate
