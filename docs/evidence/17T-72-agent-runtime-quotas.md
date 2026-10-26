@@ -1,6 +1,6 @@
 # 17T-72 — Agent execution quotas and workspace concurrency
 
-**Status:** implementation ready for independent review; quota admission is not yet wired to the execution boundary.
+**Status:** quota accounting follow-up implemented; independent review and runtime integration remain outstanding. The production 17T-71 lifecycle fence is still a blocker, so runtime execution stays disabled.
 
 **Linear:** [17T-72](https://linear.app/17thedev/issue/17T-72/enforce-agent-execution-quotas-budgets-and-workspace-concurrency)
 
@@ -141,3 +141,35 @@ Real PostgreSQL regressions cover a committed zero-usage attempt, an ambiguous z
 The first full-suite run was parallel to typecheck/build and hit one unrelated chat persistence ordering assertion when messages shared a millisecond timestamp. Rerunning the full suite by itself completed with 531 passed, 31 expected PostgreSQL-specific skips, and 0 failed.
 
 The GitHub Actions above ran on the implementation commit; the evidence-only follow-up commit is checked separately on the PR. No production database, cloud service, sandbox provider, or runtime was enabled; no merge or deployment was performed.
+
+## Review follow-up — 2026-10-26 (wall-clock and reconciliation finalization)
+
+Implementation commit: `1b3b7368a4ec1a7790859ab234712ac894f347db` on `feat/17t-72-agent-runtime-quotas`.
+
+### Finding 1: wall-clock accounting
+
+PostgreSQL records `started_at` with `clock_timestamp()` at the `reserved -> active` allocation-start transition. The database trigger overwrites any supplied start value with its own clock and makes the timestamp immutable afterward; actual wall-clock usage cannot decrease. A reservation has no execution `deadlineAt` while it is queued. Once started, the deadline is `started_at + max_wall_clock_ms`, so queue time does not consume the execution limit.
+
+Callers can no longer supply wall-clock usage. `recordUsage()`, `commitAttempt()` and `reconcileAfterQuiescent()` derive elapsed milliseconds in PostgreSQL from `clock_timestamp() - started_at`, round up to whole milliseconds, and never reduce previously persisted actual usage. `recordUsage()` preserves the existing `LIMIT_EXCEEDED` failure behavior when an in-flight measurement is already over its cap. Terminal commit and reconciliation persist the final DB-measured wall time and accounting even when it exceeds the limit; the terminal usage event records `limit_exceeded = true`, and the returned reservation exposes `limitExceeded = true`.
+
+Real PostgreSQL regressions cover a started attempt with no usage events that exceeds its wall-clock cap before commit, queue delay before allocation start, and final wall-clock accounting through reconciliation and repeated calls.
+
+### Finding 2: reconciliation finalization
+
+The first successful reconciliation atomically inserts its `reconciled` audit event, commits final actual/accounted usage, releases `resource_active`, and records `reconciliation_event_key`. An exact duplicate key and request returns the finalized snapshot without adding an event or changing totals. A different key or changed measurement is rejected.
+
+Migration 015 enforces the finalization boundary: the marker is only accepted with its matching reconciliation audit event; finalized actual/accounted usage, state, finish time, marker and slot state cannot be rewritten; new usage events cannot be inserted afterward; and committed capacity cannot be released without finalization or reactivated afterward. Tests exercise exact duplicate reconciliation, different-key and changed-measurement rejection, direct SQL accounting mutation, post-finalization event insertion, attempted early slot release and reactivation.
+
+### Validation
+
+| Check | Command / environment | Result |
+|---|---|---|
+| API typecheck | `npm run typecheck --prefix apps/api` | Exit 0 |
+| API production build | `npm run build --prefix apps/api` | Exit 0 |
+| Full API suite | `NODE_ENV=test`, `TEST_DATABASE_URL` unset; `npm test --prefix apps/api` | Exit 0; 565 tests, 531 passed, 34 PostgreSQL-specific skips, 0 failed |
+| Isolated PostgreSQL quota and migration suite | PostgreSQL 18.4, disposable `giga_17t72_followup2_test`; `npx --prefix apps/api tsx --test --test-concurrency=1 apps/api/tests/agent/agent-quotas.test.ts apps/api/tests/agent/agent-migration.test.ts` | Exit 0; 25 passed, 0 skipped, 0 failed. Includes populated upgrade from 013, idempotent rerun, later independent 014 application, wall-clock regressions and finalization guards. |
+| Git Workflow validator | `node --test .agents/scripts/validate-git-workflow.test.mjs` | Exit 0; 6 passed, 0 skipped, 0 failed |
+| Whitespace check | `git diff --check` | Exit 0 |
+| GitHub Actions on implementation commit `1b3b7368a4ec1a7790859ab234712ac894f347db` | [Backend CI run 84](https://github.com/17thedevv/Giga/actions/runs/40281947311); [Validate Git Workflow run 150](https://github.com/17thedevv/Giga/actions/runs/40281947253) | Both completed successfully on this exact SHA. |
+
+The in-memory adapter cannot model PostgreSQL `timestamptz` subtraction. It retains prior wall-clock counters for broad unit runs; elapsed-time correctness and state-transition triggers are verified in the isolated PostgreSQL suite. The 17T-71 production lifecycle fence and 17T-73 runtime integration remain unresolved. There is still no end-to-end provider-allocation/cleanup/quota-release race proof. Keep the PR Draft and runtime disabled; do not mark this work merge-ready.
