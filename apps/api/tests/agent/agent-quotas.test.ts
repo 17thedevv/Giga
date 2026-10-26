@@ -69,6 +69,14 @@ describe('GigaAgent durable quota reservations', () => {
     };
   }
 
+  async function finalizeRun(run: { reference: AgentQuotaReference; leaseToken: string; runId: string }): Promise<void> {
+    await repository.finalizeRun(run.reference.ownerId, run.runId, run.leaseToken, {
+      status: 'completed',
+      summary: 'Quota test completed',
+      verifiedChecks: [],
+    });
+  }
+
   function customPolicy(input: {
     execute?: Partial<AgentQuotaPolicy['execute']>;
     readOnly?: Partial<AgentQuotaPolicy['readOnly']>;
@@ -89,7 +97,11 @@ describe('GigaAgent durable quota reservations', () => {
   }
 
   function verifier(result: boolean): QuotaQuiescenceVerifier {
-    return { isQuiescent: async () => result };
+    return {
+      fenceAttemptAndVerify: async () => {
+        if (!result) throw new Error('The lifecycle layer has not fenced and drained this attempt');
+      },
+    };
   }
 
   async function assertQuotaCode(promise: Promise<unknown>, code: string): Promise<void> {
@@ -230,7 +242,7 @@ describe('GigaAgent durable quota reservations', () => {
     assert.equal(Number(rows.rows[0]!.count), 0);
   });
 
-  it('cancellation before allocation refunds once; cancellation after allocation holds until quiescence', async () => {
+  it('cancellation before allocation refunds once; cancellation after allocation holds until a durable fence', async () => {
     const beforeAllocation = await createClaimedRun();
     const firstReservation = await quotas.reserveExecutionAttempt(beforeAllocation.reference, beforeAllocation.leaseToken);
     const released = await quotas.releaseBeforeAllocation(beforeAllocation.reference, beforeAllocation.leaseToken, 'cancel:before');
@@ -246,11 +258,43 @@ describe('GigaAgent durable quota reservations', () => {
     assert.equal(held.state, 'reconciliation_required');
     assert.equal(held.resourceActive, true);
     const noProof = new AgentQuotaService(db.pool, DEFAULT_AGENT_QUOTA_POLICY, verifier(false));
-    await assert.rejects(noProof.reconcileAfterQuiescent(duringAllocation.reference, {}, 'cleanup:not-done'));
+    await assert.rejects(noProof.reconcileAfterQuiescent(duringAllocation.reference, {}, 'cleanup:not-fenced'));
+    await repository.releaseLease(ownerId, duringAllocation.runId, duringAllocation.leaseToken);
     const reconciled = await new AgentQuotaService(db.pool, DEFAULT_AGENT_QUOTA_POLICY, verifier(true))
       .reconcileAfterQuiescent(duringAllocation.reference, {}, 'cleanup:confirmed');
-    assert.equal(reconciled.state, 'released');
+    assert.equal(reconciled.state, 'committed');
     assert.equal(reconciled.resourceActive, false);
+  });
+
+  it('does not release an active attempt when allocation races with reconciliation', async (t) => {
+    if (db.isMemory) return t.skip('Requires PostgreSQL row-lock arbitration');
+    const run = await createClaimedRun();
+    const second = await createClaimedRun('execute', await makeWorkspace());
+    await quotas.reserveExecutionAttempt(run.reference, run.leaseToken);
+    await quotas.markAllocationStarted(run.reference, run.leaseToken);
+
+    let enteredFence!: () => void;
+    let finishFence!: () => void;
+    const fenceStarted = new Promise<void>((resolve) => { enteredFence = resolve; });
+    const fenceMayComplete = new Promise<void>((resolve) => { finishFence = resolve; });
+    const reconciler = new AgentQuotaService(db.pool, DEFAULT_AGENT_QUOTA_POLICY, {
+      fenceAttemptAndVerify: async () => {
+        enteredFence();
+        await fenceMayComplete;
+      },
+    });
+    const reconciliation = reconciler.reconcileAfterQuiescent(run.reference, {}, 'cleanup:raced');
+    await fenceStarted;
+
+    // This is the allocation admission boundary: it shares the run and reservation locks that
+    // reconciliation must recheck after its external lifecycle operation returns.
+    await quotas.markAllocationStarted(run.reference, run.leaseToken);
+    finishFence();
+    await assert.rejects(reconciliation, /lease is still active/i);
+
+    const held = await quotas.getReservation(run.reference);
+    assert.equal(held.resourceActive, true);
+    await assertQuotaCode(quotas.reserveExecutionAttempt(second.reference, second.leaseToken), 'WORKSPACE_BUSY');
   });
 
   it('partial usage is committed and unused reservation capacity is released', async () => {
@@ -272,6 +316,7 @@ describe('GigaAgent durable quota reservations', () => {
     assert.equal(committed.resourceActive, true);
     assert.equal(committed.accounted.providerRequests, 1);
     assert.equal(committed.accounted.artifactBytes, 512);
+    await finalizeRun(first);
     const quiescent = await new AgentQuotaService(db.pool, DEFAULT_AGENT_QUOTA_POLICY, verifier(true))
       .reconcileAfterQuiescent(first.reference, committed.actual, 'cleanup:1');
     assert.equal(quiescent.resourceActive, false);
@@ -291,6 +336,7 @@ describe('GigaAgent durable quota reservations', () => {
     const first = await quotas.commitAttempt(run.reference, run.leaseToken, 'complete:stable');
     const duplicate = await quotas.commitAttempt(run.reference, run.leaseToken, 'complete:stable');
     assert.equal(duplicate.actual.providerRequests, first.actual.providerRequests);
+    await finalizeRun(run);
     const service = new AgentQuotaService(db.pool, DEFAULT_AGENT_QUOTA_POLICY, verifier(true));
     await service.reconcileAfterQuiescent(run.reference, first.actual, 'cleanup:stable');
     await service.reconcileAfterQuiescent(run.reference, first.actual, 'cleanup:stable');
@@ -298,6 +344,81 @@ describe('GigaAgent durable quota reservations', () => {
     assert.equal(events.filter((event) => event.kind === 'attempt_committed').length, 1);
     assert.equal(events.filter((event) => event.kind === 'reconciled').length, 1);
     assert.equal(events.filter((event) => event.kind === 'provider_request' && event.usage.providerRequests === 1).length, 1);
+  });
+
+  it('commits zero-usage reservations after verified quiescence and never reopens their slot', async (t) => {
+    if (db.isMemory) return t.skip('Requires PostgreSQL trigger and transaction enforcement');
+    const run = await createClaimedRun();
+    await quotas.reserveExecutionAttempt(run.reference, run.leaseToken);
+    await quotas.markAllocationStarted(run.reference, run.leaseToken);
+    const committed = await quotas.commitAttempt(run.reference, run.leaseToken, 'complete:zero-usage');
+    assert.equal(committed.state, 'committed');
+    assert.equal(committed.resourceActive, true);
+    assert.deepEqual(committed.accounted, {
+      sandboxRuntimeMs: 0, wallClockMs: 0, toolCalls: 0, providerRequests: 0,
+      commandOutputBytes: 0, artifactBytes: 0, workspaceDiskBytes: 0, workspaceFileCount: 0,
+    });
+    await finalizeRun(run);
+
+    const service = new AgentQuotaService(db.pool, DEFAULT_AGENT_QUOTA_POLICY, verifier(true));
+    const reconciled = await service.reconcileAfterQuiescent(run.reference, {}, 'cleanup:zero-usage');
+    assert.equal(reconciled.state, 'committed');
+    assert.equal(reconciled.resourceActive, false);
+    assert.deepEqual(reconciled.actual, committed.actual);
+    assert.deepEqual(reconciled.accounted, committed.actual);
+    const repeated = await service.reconcileAfterQuiescent(run.reference, {}, 'cleanup:zero-usage');
+    assert.equal(repeated.state, 'committed');
+    assert.equal(repeated.resourceActive, false);
+    assert.equal((await service.listUsageEvents(run.reference)).filter((event) => event.kind === 'reconciled').length, 1);
+
+    await assert.rejects(
+      db.pool.query("UPDATE agent_execution_reservations SET resource_active = TRUE WHERE run_id = $1", [run.runId]),
+      /cannot be reactivated/i
+    );
+    await assert.rejects(
+      db.pool.query("UPDATE agent_execution_reservations SET state = 'released' WHERE run_id = $1", [run.runId]),
+      /cannot be reopened/i
+    );
+  });
+
+  it('reconciles zero usage after an ambiguous outcome and keeps released reservations terminal', async (t) => {
+    if (db.isMemory) return t.skip('Requires PostgreSQL trigger and transaction enforcement');
+    const run = await createClaimedRun();
+    await quotas.reserveExecutionAttempt(run.reference, run.leaseToken);
+    await quotas.markAllocationStarted(run.reference, run.leaseToken);
+    await quotas.markOutcomeUnknown(run.reference, run.leaseToken, 'provider:ambiguous-zero');
+    await assert.rejects(
+      db.pool.query(
+        "UPDATE agent_execution_reservations SET state = 'released', resource_active = FALSE, finished_at = NOW() WHERE run_id = $1",
+        [run.runId]
+      ),
+      /Invalid Agent quota reservation transition/i
+    );
+    await repository.releaseLease(ownerId, run.runId, run.leaseToken);
+
+    const service = new AgentQuotaService(db.pool, DEFAULT_AGENT_QUOTA_POLICY, verifier(true));
+    const reconciled = await service.reconcileAfterQuiescent(run.reference, {}, 'cleanup:ambiguous-zero');
+    assert.equal(reconciled.state, 'committed');
+    assert.equal(reconciled.resourceActive, false);
+    assert.deepEqual(reconciled.actual, reconciled.accounted);
+    assert.ok(Object.values(reconciled.accounted).every((value) => value === 0));
+    const repeated = await service.reconcileAfterQuiescent(run.reference, {}, 'cleanup:ambiguous-zero');
+    assert.equal(repeated.state, 'committed');
+    assert.equal(repeated.resourceActive, false);
+    await assert.rejects(
+      service.recordUsage(run.reference, run.leaseToken, {
+        eventKey: 'late:after-zero-reconcile', kind: 'provider_request', usage: { providerRequests: 1 },
+      }),
+      /fenced/i
+    );
+
+    const preallocation = await createClaimedRun();
+    await quotas.reserveExecutionAttempt(preallocation.reference, preallocation.leaseToken);
+    await quotas.releaseBeforeAllocation(preallocation.reference, preallocation.leaseToken, 'cancel:released-terminal');
+    await assert.rejects(
+      db.pool.query("UPDATE agent_execution_reservations SET state = 'active', resource_active = TRUE WHERE run_id = $1", [preallocation.runId]),
+      /Released Agent quota reservation is immutable/i
+    );
   });
 
   it('ambiguous timeout survives service restart; stale callbacks are fenced after lease takeover', async () => {
@@ -371,6 +492,7 @@ describe('GigaAgent durable quota reservations', () => {
     await assertQuotaCode(service.recordUsage(run.reference, run.leaseToken, { eventKey: 'disk:overflow', kind: 'measurement', usage: { workspaceDiskBytes: 11 } }), 'LIMIT_EXCEEDED');
     await assertQuotaCode(service.recordUsage(run.reference, run.leaseToken, { eventKey: 'files:overflow', kind: 'measurement', usage: { workspaceFileCount: 2 } }), 'LIMIT_EXCEEDED');
     await service.commitAttempt(run.reference, run.leaseToken, 'complete:resource-caps');
+    await finalizeRun(run);
     await service.reconcileAfterQuiescent(run.reference, {}, 'cleanup:resource-caps');
 
     const deadlineService = new AgentQuotaService(db.pool, customPolicy({ execute: { wallClockMs: 30 } }), verifier(true));
@@ -384,6 +506,8 @@ describe('GigaAgent durable quota reservations', () => {
       }),
       'LIMIT_EXCEEDED'
     );
+    await deadlineService.markOutcomeUnknown(deadlineRun.reference, deadlineRun.leaseToken, 'deadline:unknown');
+    await repository.releaseLease(ownerId, deadlineRun.runId, deadlineRun.leaseToken);
     const final = await deadlineService.reconcileAfterQuiescent(deadlineRun.reference, { wallClockMs: 40 }, 'deadline:reconciled');
     assert.equal(final.resourceActive, false);
     assert.equal((await deadlineService.listUsageEvents(deadlineRun.reference)).some((event) => event.limitExceeded), true);
@@ -414,6 +538,7 @@ describe('GigaAgent durable quota reservations', () => {
     await quotas.markAllocationStarted(first.reference, first.leaseToken);
     await assertQuotaCode(quotas.reserveExecutionAttempt(second.reference, second.leaseToken), 'WORKSPACE_BUSY');
     await quotas.markOutcomeUnknown(first.reference, first.leaseToken, 'cancel:unknown');
+    await repository.releaseLease(ownerId, first.runId, first.leaseToken);
     const reconciler = new AgentQuotaService(db.pool, DEFAULT_AGENT_QUOTA_POLICY, verifier(true));
     await reconciler.reconcileAfterQuiescent(first.reference, {}, 'cancel:confirmed');
     const replacement = await reconciler.reserveExecutionAttempt(second.reference, second.leaseToken);

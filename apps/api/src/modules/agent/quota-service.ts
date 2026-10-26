@@ -48,8 +48,13 @@ export interface AgentResourceUsage {
 export type AgentResourceUsageInput = Partial<AgentResourceUsage>;
 
 export interface QuotaQuiescenceVerifier {
-  /** True only after this exact owner/workspace/run/attempt can no longer consume runtime resources. */
-  isQuiescent(reference: AgentQuotaReference): Promise<boolean>;
+  /**
+   * Establish a durable fence for this exact owner/workspace/run/attempt, then wait until every
+   * allocation and runtime operation has settled and all resulting resources are quiescent.
+   * A momentary absence of a sandbox is not proof. Implementations must coordinate with the
+   * durable run lease and sandbox-session lifecycle; reject if that protocol is unavailable.
+   */
+  fenceAttemptAndVerify(reference: AgentQuotaReference): Promise<void>;
 }
 
 export class AgentQuotaError extends AppError {
@@ -672,8 +677,8 @@ export class AgentQuotaService {
   }
 
   /**
-   * Release a held writable slot only after the 17T-71 lifecycle verifier confirms that
-   * this exact attempt has no live or ambiguously allocated sandbox.
+   * Release a held slot only after the lifecycle adapter establishes a durable exact-attempt
+   * fence and drains all runtime work. The database run-row lock then rejects a still-live lease.
    */
   async reconcileAfterQuiescent(
     reference: AgentQuotaReference,
@@ -684,16 +689,31 @@ export class AgentQuotaService {
     const key = validateEventKey(eventKey);
     const reported = parseUsage(finalUsage);
     if (!this.quiescenceVerifier) throw new ConflictError('Sandbox reconciliation is unavailable');
-    let quiescent = false;
     try {
-      quiescent = await this.quiescenceVerifier.isQuiescent(reference);
+      await this.quiescenceVerifier.fenceAttemptAndVerify(reference);
     } catch {
-      throw new ConflictError('Sandbox reconciliation could not confirm a safe stop');
+      throw new ConflictError('Sandbox reconciliation could not establish a durable attempt fence');
     }
-    if (!quiescent) throw new ConflictError('Sandbox reconciliation could not confirm a safe stop');
 
     return this.transaction(async (client) => {
-      const reservation = await this.getOwnedReservation(client, reference, true);
+      // Allocation admission and quota mutation both lock this run row. Rechecking it after the
+      // lifecycle fence closes the gap between the verifier's external cleanup and this commit.
+      const runResult = await client.query<RunQuotaRow>(
+        'SELECT owner_id, workspace_id, mode, status, attempt_count, lease_token, ' +
+        '(lease_expires_at > NOW()) AS lease_active FROM agent_runs ' +
+        'WHERE owner_id = $1 AND id = $2 FOR UPDATE',
+        [reference.ownerId, reference.runId]
+      );
+      const run = runResult.rows[0];
+      if (!run || run.workspace_id !== reference.workspaceId) throw new NotFoundError();
+      if (run.attempt_count < reference.attemptNumber) {
+        throw new ConflictError('Reservation attempt is not present on the durable run');
+      }
+      if (run.status === 'running' && run.attempt_count === reference.attemptNumber && run.lease_active) {
+        throw new ConflictError('The attempt lease is still active; quota capacity remains held');
+      }
+
+      const reservation = await this.lockOwnedReservation(client, reference);
       const actual = mapMetrics(reservation, 'actual');
       const limits = mapMetrics(reservation, 'max');
       const final = { ...actual } as MetricValues;
@@ -703,17 +723,17 @@ export class AgentQuotaService {
       const exceeded = isOverLimit(final, limits);
       const fingerprint = eventFingerprint('reconciled', reported);
       if (await this.matchingEvent(client, reservation.id, key, fingerprint)) return mapReservation(reservation);
-      if (!['active', 'reconciliation_required', 'committed'].includes(reservation.state)) {
+      if (!['reconciliation_required', 'committed'].includes(reservation.state)) {
         throw new ConflictError('Reservation is not awaiting reconciliation');
       }
       await this.insertEvent(client, reservation, key, 'reconciled', fingerprint, reported, exceeded);
-      const hasUsage = METRICS.some((metric) => final[metric.key] > 0);
       const result = await client.query<ReservationRow>(
-        'UPDATE agent_execution_reservations SET state = $1, resource_active = FALSE, finished_at = NOW(), updated_at = NOW(), ' +
-        METRICS.map((metric) => metric.actual + ' = $' + (METRICS.indexOf(metric) + 2)).join(', ') + ', ' +
-        METRICS.map((metric) => metric.accounted + ' = $' + (METRICS.length + METRICS.indexOf(metric) + 2)).join(', ') +
-        ' WHERE id = $' + (METRICS.length * 2 + 2) + ' RETURNING *',
-        [hasUsage ? 'committed' : 'released', ...dbMetrics(final), ...dbMetrics(final), reservation.id]
+        'UPDATE agent_execution_reservations SET state = \'committed\', resource_active = FALSE, ' +
+        'finished_at = COALESCE(finished_at, NOW()), updated_at = NOW(), ' +
+        METRICS.map((metric) => metric.actual + ' = $' + (METRICS.indexOf(metric) + 1)).join(', ') + ', ' +
+        METRICS.map((metric) => metric.accounted + ' = $' + (METRICS.length + METRICS.indexOf(metric) + 1)).join(', ') +
+        ' WHERE id = $' + (METRICS.length * 2 + 1) + ' RETURNING *',
+        [...dbMetrics(final), ...dbMetrics(final), reservation.id]
       );
       return mapReservation(result.rows[0]!);
     });

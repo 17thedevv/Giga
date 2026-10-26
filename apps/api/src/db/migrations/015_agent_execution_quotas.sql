@@ -75,6 +75,7 @@ CREATE TABLE agent_execution_reservations (
         REFERENCES agent_runs(owner_id, workspace_id, id) ON DELETE CASCADE,
     CHECK ((mode = 'execute') = writable),
     CHECK (NOT resource_active OR writable),
+    CHECK (NOT writable OR state NOT IN ('active', 'reconciliation_required') OR resource_active),
     CHECK ((state IN ('reserved', 'active', 'reconciliation_required')) = (finished_at IS NULL)),
     CHECK (state <> 'released' OR (resource_active = FALSE AND
         accounted_sandbox_runtime_ms = 0 AND accounted_wall_clock_ms = 0 AND accounted_tool_calls = 0 AND
@@ -148,13 +149,16 @@ BEGIN
     IF OLD.state = 'committed' AND NEW.state NOT IN ('committed') THEN
         RAISE EXCEPTION 'Committed Agent quota reservation cannot be reopened';
     END IF;
+    IF OLD.resource_active = FALSE AND NEW.resource_active = TRUE THEN
+        RAISE EXCEPTION 'Released Agent quota capacity cannot be reactivated';
+    END IF;
     IF OLD.state = 'reserved' AND NEW.state NOT IN ('reserved', 'active', 'released', 'reconciliation_required', 'committed') THEN
         RAISE EXCEPTION 'Invalid Agent quota reservation transition';
     END IF;
     IF OLD.state = 'active' AND NEW.state NOT IN ('active', 'reconciliation_required', 'committed') THEN
         RAISE EXCEPTION 'Invalid Agent quota reservation transition';
     END IF;
-    IF OLD.state = 'reconciliation_required' AND NEW.state NOT IN ('reconciliation_required', 'committed', 'released') THEN
+    IF OLD.state = 'reconciliation_required' AND NEW.state NOT IN ('reconciliation_required', 'committed') THEN
         RAISE EXCEPTION 'Invalid Agent quota reservation transition';
     END IF;
     NEW.updated_at = GREATEST(NOW(), OLD.updated_at);
