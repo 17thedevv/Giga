@@ -2041,12 +2041,6 @@ export class AgentRepository {
       if (operation.state === 'in_progress' || operation.state === 'ambiguous' || operation.outcome === 'resource') {
         throw new ConflictError('Provider allocation outcome is not known to be resource-free');
       }
-      if (operation.state === 'not_started') {
-        await client.query(
-          `UPDATE agent_sandbox_lifecycle_operations SET state = 'settled', outcome = 'no_resource', settled_at = NOW()
-           WHERE id = $1`, [identity.allocation_intent_id]
-        );
-      }
       if (!fence) throw new ConflictError('Sandbox attempt generation fence is missing');
       if (!fence.fenced_at) {
         await client.query(
@@ -2054,6 +2048,12 @@ export class AgentRepository {
            WHERE owner_id = $1 AND workspace_id = $2 AND run_id = $3 AND attempt_number = $4
              AND generation = $5 AND fenced_at IS NULL`,
           [identity.owner_id, identity.workspace_id, identity.run_id, identity.attempt_number, identity.attempt_generation]
+        );
+      }
+      if (operation.state === 'not_started') {
+        await client.query(
+          `UPDATE agent_sandbox_lifecycle_operations SET state = 'settled', outcome = 'no_resource', settled_at = NOW()
+           WHERE id = $1`, [identity.allocation_intent_id]
         );
       }
       const existingDiag = session.diagnostics && typeof session.diagnostics === 'object' ? session.diagnostics : {};
