@@ -71,7 +71,7 @@ Before edits, the baseline focused command at `4436fa1560296f7dba20632fb2220bf7b
 
 The local environment has no `TEST_DATABASE_URL`, `psql`, PostgreSQL server binaries or Docker. PostgreSQL-only tests therefore could not be run locally. The repository's API CI workflow provisions PostgreSQL 16 and runs the complete API suite; final CI status for the PR head is pending.
 
-On initial PR head `7130a0aa184a96ca7605d0f8f94677225b70c678`, Git Workflow passed and Backend CI was still running. See the [Git Workflow run](https://github.com/17thedevv/Giga/actions/runs/40681222913/job/122792111848) and [Backend CI run](https://github.com/17thedevv/Giga/actions/runs/40681223190/job/122792112492). Recheck the live PR checks page for the final head.
+On PR head `7130a0aa184a96ca7605d0f8f94677225b70c678`, Git Workflow passed and Backend CI was still running. On the later PR head `1895836341473806d59b36298373cfbb0c2fed49`, both checks passed with the PostgreSQL 16 service: [Git Workflow](https://github.com/17thedevv/Giga/actions/runs/40681869879/job/122794323511) and [Backend CI](https://github.com/17thedevv/Giga/actions/runs/40681843379/job/122794236993). This final evidence-only commit advances the PR head; verify its current result on the [live PR checks page](https://github.com/17thedevv/Giga/pull/45/checks).
 
 ## Contract, database and Cloud impact
 
