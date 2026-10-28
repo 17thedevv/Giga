@@ -65,6 +65,7 @@ describe('GigaAgent Isolated Sandbox Adapter & Cloud Security Gate (17T-47)', ()
       assert.equal(env.get('GIGA_WORKSPACE_ID'), dummyWorkspaceId);
       assert.equal(env.get('GIGA_RUN_ID'), dummyRunId);
       assert.equal(env.has('DATABASE_URL'), false);
+      assert.equal(env.has('AGENT_LIFECYCLE_FINALIZER_DATABASE_URL'), false);
       assert.equal(env.has('JWT_SECRET'), false);
     });
 
@@ -623,6 +624,7 @@ describe('GigaAgent Isolated Sandbox Adapter & Cloud Security Gate (17T-47)', ()
       assert.equal(providerClient.lastReceivedEnv.GIGA_WORKSPACE_ID, dummyWorkspaceId);
       assert.equal(providerClient.lastReceivedEnv.GIGA_RUN_ID, dummyRunId);
       assert.equal(providerClient.lastReceivedEnv.DATABASE_URL, undefined);
+      assert.equal(providerClient.lastReceivedEnv.AGENT_LIFECYCLE_FINALIZER_DATABASE_URL, undefined);
       assert.equal(providerClient.lastReceivedEnv.JWT_SECRET, undefined);
 
       // 2. Write file into remote sandbox

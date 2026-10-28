@@ -46,6 +46,7 @@ describe('Chat credential encryption', () => {
       NODE_ENV: 'production',
       DATABASE_URL: 'postgres://api_user@localhost/config_test',
       MIGRATION_DATABASE_URL: 'postgres://migration_user@localhost/config_test',
+      AGENT_LIFECYCLE_FINALIZER_DATABASE_URL: 'postgres://lifecycle_user@localhost/config_test',
       ALLOWED_ORIGINS: 'https://example.com',
       CHAT_ENABLED: 'false',
     };

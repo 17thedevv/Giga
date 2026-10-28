@@ -588,9 +588,9 @@ describe('17T-71 Review Fix: Database-Level Sandbox Lifecycle Integrity', {
     assert.equal(await checkPrivilege("SELECT has_table_privilege('giga_api_runtime', 'agent_sandbox_sessions', 'DELETE') AS has_priv"), false);
     assert.equal(await checkPrivilege("SELECT has_table_privilege('giga_api_runtime', 'agent_sandbox_sessions', 'TRUNCATE') AS has_priv"), false);
 
-    // Column privileges on agent_sandbox_sessions: lifecycle_state can be updated, destroyed_at and identity columns CANNOT
+    // Column privileges on agent_sandbox_sessions: provider resource identity, destroyed_at and identity columns CANNOT be updated
     assert.equal(await checkPrivilege("SELECT has_column_privilege('giga_api_runtime', 'agent_sandbox_sessions', 'lifecycle_state', 'UPDATE') AS has_priv"), true);
-    assert.equal(await checkPrivilege("SELECT has_column_privilege('giga_api_runtime', 'agent_sandbox_sessions', 'provider_session_id', 'UPDATE') AS has_priv"), true);
+    assert.equal(await checkPrivilege("SELECT has_column_privilege('giga_api_runtime', 'agent_sandbox_sessions', 'provider_session_id', 'UPDATE') AS has_priv"), false);
     assert.equal(await checkPrivilege("SELECT has_column_privilege('giga_api_runtime', 'agent_sandbox_sessions', 'destroyed_at', 'UPDATE') AS has_priv"), false);
     assert.equal(await checkPrivilege("SELECT has_column_privilege('giga_api_runtime', 'agent_sandbox_sessions', 'owner_id', 'UPDATE') AS has_priv"), false);
     assert.equal(await checkPrivilege("SELECT has_column_privilege('giga_api_runtime', 'agent_sandbox_sessions', 'run_id', 'UPDATE') AS has_priv"), false);
@@ -616,16 +616,19 @@ describe('17T-71 Review Fix: Database-Level Sandbox Lifecycle Integrity', {
       assert.equal(row.tableowner, 'giga_agent_lifecycle_owner');
     }
 
-    // Routines executable by giga_api_runtime
-    const checkRoutinePrivilege = async (routine: string): Promise<boolean> => {
+    // Provider-authoritative routines are not executable by giga_api_runtime.
+    const checkRoutinePrivilege = async (routine: string, role = 'giga_api_runtime'): Promise<boolean> => {
       const res = await db.pool.query<{ has_priv: boolean }>(
-        `SELECT has_function_privilege('giga_api_runtime', '${routine}', 'EXECUTE') AS has_priv`
+        `SELECT has_function_privilege('${role}', '${routine}', 'EXECUTE') AS has_priv`
       );
       return Boolean(res.rows[0]?.has_priv);
     };
-    assert.equal(await checkRoutinePrivilege('settle_agent_sandbox_allocation(uuid, uuid, uuid, integer, uuid, varchar, varchar)'), true);
-    assert.equal(await checkRoutinePrivilege('claim_agent_sandbox_cleanup(uuid, varchar, varchar, integer)'), true);
-    assert.equal(await checkRoutinePrivilege('finalize_agent_sandbox_destruction(uuid, varchar, varchar)'), true);
+    assert.equal(await checkRoutinePrivilege('settle_agent_sandbox_allocation(uuid, uuid, uuid, integer, uuid, varchar, varchar, varchar)'), false);
+    assert.equal(await checkRoutinePrivilege('claim_agent_sandbox_cleanup(uuid, varchar, varchar, integer)'), false);
+    assert.equal(await checkRoutinePrivilege('finalize_agent_sandbox_destruction(uuid, varchar, varchar)'), false);
+    assert.equal(await checkRoutinePrivilege('settle_agent_sandbox_allocation(uuid, uuid, uuid, integer, uuid, varchar, varchar, varchar)', 'giga_agent_lifecycle_finalizer'), true);
+    assert.equal(await checkRoutinePrivilege('claim_agent_sandbox_cleanup(uuid, varchar, varchar, integer)', 'giga_agent_lifecycle_finalizer'), true);
+    assert.equal(await checkRoutinePrivilege('finalize_agent_sandbox_destruction(uuid, varchar, varchar)', 'giga_agent_lifecycle_finalizer'), true);
 
     // agent_sandbox_attempt_fences: SELECT, INSERT, column UPDATE granted; DELETE revoked
     assert.equal(await checkPrivilege("SELECT has_table_privilege('giga_api_runtime', 'agent_sandbox_attempt_fences', 'SELECT') AS has_priv"), true);

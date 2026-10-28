@@ -97,23 +97,61 @@ describe('PORT configuration and fail-fast validation', () => {
     assert.throws(
       () => loadConfig({
         NODE_ENV: 'production',
+        DATABASE_URL: 'postgres://api_user:pass@localhost:5432/db',
+        MIGRATION_DATABASE_URL: 'postgres://migration_user:pass@localhost:5432/db',
+        ALLOWED_ORIGINS: 'https://giga.local',
+        CHAT_ENABLED: 'false',
+      }),
+      /AGENT_LIFECYCLE_FINALIZER_DATABASE_URL is required in production mode/
+    );
+    assert.throws(
+      () => loadConfig({
+        NODE_ENV: 'production',
         DATABASE_URL: 'postgres://same_user:pass@localhost:5432/db',
         MIGRATION_DATABASE_URL: 'postgres://same_user:other@localhost:5432/db',
+        AGENT_LIFECYCLE_FINALIZER_DATABASE_URL: 'postgres://lifecycle_user:pass@localhost:5432/db',
         ALLOWED_ORIGINS: 'https://giga.local',
         CHAT_ENABLED: 'false',
       }),
       /must use distinct database login roles/
     );
 
+    assert.throws(
+      () => loadConfig({
+        NODE_ENV: 'production',
+        DATABASE_URL: 'postgres://api_user:pass@localhost:5432/db',
+        MIGRATION_DATABASE_URL: 'postgres://migration_user:pass@localhost:5432/db',
+        AGENT_LIFECYCLE_FINALIZER_DATABASE_URL: 'postgres://api_user:other@localhost:5432/db',
+        ALLOWED_ORIGINS: 'https://giga.local',
+        CHAT_ENABLED: 'false',
+      }),
+      /must use distinct database login roles/
+    );
+
+    assert.throws(
+      () => loadConfig({
+        NODE_ENV: 'production',
+        DATABASE_URL: 'postgres://api_user:pass@localhost:5432/db',
+        MIGRATION_DATABASE_URL: 'postgres://migration_user:pass@localhost:5432/db',
+        AGENT_LIFECYCLE_FINALIZER_DATABASE_URL: 'postgres://lifecycle_user:pass@localhost:5432/other',
+        ALLOWED_ORIGINS: 'https://giga.local',
+        CHAT_ENABLED: 'false',
+      }),
+      /must target the same database/
+    );
+
     const prodConfig = loadConfig({
       NODE_ENV: 'production',
       DATABASE_URL: 'postgres://api_user:pass@localhost:5432/db',
       MIGRATION_DATABASE_URL: 'postgres://migration_user:pass@localhost:5432/db',
+      AGENT_LIFECYCLE_FINALIZER_DATABASE_URL: 'postgres://lifecycle_user:pass@localhost:5432/db',
       ALLOWED_ORIGINS: 'https://giga.local',
       CHAT_ENABLED: 'false',
     });
     assert.strictEqual(prodConfig.nodeEnv, 'production');
     assert.strictEqual(prodConfig.migrationDatabaseUrl, 'postgres://migration_user:pass@localhost:5432/db');
+    assert.strictEqual(prodConfig.agentLifecycleFinalizerDatabaseUrl,
+      'postgres://lifecycle_user:pass@localhost:5432/db');
     assert.strictEqual(prodConfig.cookieSecure, true);
     assert.deepStrictEqual(prodConfig.allowedOrigins, ['https://giga.local']);
   });

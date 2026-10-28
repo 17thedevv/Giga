@@ -15,6 +15,22 @@ BEGIN
     ELSIF (SELECT rolcanlogin FROM pg_roles WHERE rolname = 'giga_api_runtime') THEN
         RAISE EXCEPTION 'giga_api_runtime must be a NOLOGIN role';
     END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'giga_agent_lifecycle_finalizer') THEN
+        EXECUTE 'CREATE ROLE giga_agent_lifecycle_finalizer NOLOGIN NOINHERIT';
+    ELSIF (SELECT rolcanlogin FROM pg_roles WHERE rolname = 'giga_agent_lifecycle_finalizer') THEN
+        RAISE EXCEPTION 'giga_agent_lifecycle_finalizer must be a NOLOGIN role';
+    END IF;
+    -- Runtime credentials must never acquire the provider-authoritative boundary.
+    EXECUTE 'REVOKE giga_agent_lifecycle_owner FROM giga_api_runtime';
+    EXECUTE 'REVOKE giga_agent_lifecycle_finalizer FROM giga_api_runtime';
+    EXECUTE 'REVOKE giga_agent_lifecycle_owner FROM giga_agent_lifecycle_finalizer';
+    IF pg_has_role('giga_api_runtime', 'giga_agent_lifecycle_owner', 'MEMBER') OR
+       pg_has_role('giga_api_runtime', 'giga_agent_lifecycle_finalizer', 'MEMBER') THEN
+        RAISE EXCEPTION 'giga_api_runtime must not inherit lifecycle owner or finalizer membership';
+    END IF;
+    IF pg_has_role('giga_agent_lifecycle_finalizer', 'giga_agent_lifecycle_owner', 'MEMBER') THEN
+        RAISE EXCEPTION 'giga_agent_lifecycle_finalizer must not inherit lifecycle owner membership';
+    END IF;
     EXECUTE format('GRANT giga_agent_lifecycle_owner TO %I', migration_login);
 END;
 $$;
@@ -271,7 +287,25 @@ BEGIN
                             NEW.settled_at = NOW();
                         END IF;
                     ELSIF NEW.outcome = 'no_resource' THEN
-                        RAISE EXCEPTION 'In-progress allocation cannot be settled as no_resource';
+                        SELECT * INTO fence_row FROM agent_sandbox_attempt_fences
+                         WHERE owner_id = NEW.owner_id AND workspace_id = NEW.workspace_id AND run_id = NEW.run_id
+                           AND attempt_number = NEW.attempt_number AND generation = NEW.generation;
+                        IF NOT FOUND OR fence_row.fenced_at IS NULL THEN
+                            RAISE EXCEPTION 'Cannot settle allocation as no_resource before attempt is durably fenced';
+                        END IF;
+                        IF NEW.provider_resource_id IS NOT NULL THEN
+                            RAISE EXCEPTION 'Allocation with no_resource outcome cannot specify provider resource id';
+                        END IF;
+                        PERFORM 1 FROM agent_sandbox_sessions
+                         WHERE owner_id = NEW.owner_id AND workspace_id = NEW.workspace_id AND run_id = NEW.run_id
+                           AND attempt_number = NEW.attempt_number AND attempt_generation = NEW.generation
+                           AND provider_session_id IS NULL;
+                        IF NOT FOUND THEN
+                            RAISE EXCEPTION 'Provider absence conflicts with the recorded sandbox resource';
+                        END IF;
+                        IF NEW.settled_at IS NULL THEN
+                            NEW.settled_at = NOW();
+                        END IF;
                     ELSE
                         RAISE EXCEPTION 'Settled allocation requires valid outcome';
                     END IF;
@@ -289,7 +323,25 @@ BEGIN
                             NEW.settled_at = NOW();
                         END IF;
                     ELSIF NEW.outcome = 'no_resource' THEN
-                        RAISE EXCEPTION 'Ambiguous allocation cannot be settled as no_resource';
+                        SELECT * INTO fence_row FROM agent_sandbox_attempt_fences
+                         WHERE owner_id = NEW.owner_id AND workspace_id = NEW.workspace_id AND run_id = NEW.run_id
+                           AND attempt_number = NEW.attempt_number AND generation = NEW.generation;
+                        IF NOT FOUND OR fence_row.fenced_at IS NULL THEN
+                            RAISE EXCEPTION 'Cannot settle allocation as no_resource before attempt is durably fenced';
+                        END IF;
+                        IF NEW.provider_resource_id IS NOT NULL THEN
+                            RAISE EXCEPTION 'Allocation with no_resource outcome cannot specify provider resource id';
+                        END IF;
+                        PERFORM 1 FROM agent_sandbox_sessions
+                         WHERE owner_id = NEW.owner_id AND workspace_id = NEW.workspace_id AND run_id = NEW.run_id
+                           AND attempt_number = NEW.attempt_number AND attempt_generation = NEW.generation
+                           AND provider_session_id IS NULL;
+                        IF NOT FOUND THEN
+                            RAISE EXCEPTION 'Provider absence conflicts with the recorded sandbox resource';
+                        END IF;
+                        IF NEW.settled_at IS NULL THEN
+                            NEW.settled_at = NOW();
+                        END IF;
                     ELSE
                         RAISE EXCEPTION 'Settled allocation requires valid outcome';
                     END IF;
@@ -454,7 +506,8 @@ BEGIN
             p_attempt_number INTEGER,
             p_attempt_generation UUID,
             p_outcome VARCHAR,
-            p_provider_resource_id VARCHAR DEFAULT NULL
+            p_provider_resource_id VARCHAR DEFAULT NULL,
+            p_worker_lease_token VARCHAR DEFAULT NULL
         ) RETURNS agent_sandbox_sessions
         LANGUAGE plpgsql
         SECURITY DEFINER
@@ -472,7 +525,7 @@ BEGIN
                 RAISE EXCEPTION 'Invalid allocation outcome %%', p_outcome;
             END IF;
 
-            IF p_outcome = 'resource' AND (p_provider_resource_id IS NULL OR char_length(p_provider_resource_id) < 1) THEN
+            IF p_outcome = 'resource' AND (p_provider_resource_id IS NULL OR char_length(p_provider_resource_id) < 1 OR char_length(p_provider_resource_id) > 128) THEN
                 RAISE EXCEPTION 'Settled allocation with resource outcome requires provider resource id';
             END IF;
 
@@ -529,15 +582,19 @@ BEGIN
 
             IF p_outcome = 'no_resource' THEN
                 IF fence_row.fenced_at IS NULL THEN
-                    RAISE EXCEPTION 'Cannot settle never-started allocation as no_resource before attempt is durably fenced';
+                    RAISE EXCEPTION 'Cannot settle allocation as no_resource before attempt is durably fenced';
                 END IF;
-                IF op_row.state <> 'not_started' THEN
+                IF session_row.provider_session_id IS NOT NULL THEN
+                    RAISE EXCEPTION 'Provider absence conflicts with the recorded sandbox resource';
+                END IF;
+                IF op_row.state NOT IN ('not_started', 'in_progress', 'ambiguous') THEN
                     RAISE EXCEPTION 'Cannot settle %% allocation as no_resource', op_row.state;
                 END IF;
 
                 UPDATE agent_sandbox_lifecycle_operations SET
                     state = 'settled',
                     outcome = 'no_resource',
+                    provider_resource_id = NULL,
                     settled_at = clock_timestamp()
                 WHERE id = op_row.id;
 
@@ -556,8 +613,30 @@ BEGIN
                 RAISE EXCEPTION 'Provider allocation callback arrived before the durable operation started';
             END IF;
 
-            IF fence_row.fenced_at IS NOT NULL THEN
-                v_fenced := TRUE;
+            v_fenced := fence_row.fenced_at IS NOT NULL OR
+                run_row.status <> 'running' OR
+                run_row.attempt_count <> p_attempt_number OR
+                run_row.lease_token IS DISTINCT FROM session_row.lease_token OR
+                run_row.lease_expires_at IS NULL OR
+                run_row.lease_expires_at <= clock_timestamp() OR
+                (p_worker_lease_token IS NOT NULL AND p_worker_lease_token <> session_row.lease_token);
+
+            IF v_fenced AND fence_row.fenced_at IS NULL THEN
+                UPDATE agent_sandbox_attempt_fences SET
+                    fenced_at = clock_timestamp(),
+                    fence_reason = 'stale_allocation_callback'
+                WHERE owner_id = p_owner_id AND workspace_id = run_row.workspace_id
+                  AND run_id = p_run_id AND attempt_number = p_attempt_number
+                  AND generation = p_attempt_generation;
+            END IF;
+            IF v_fenced AND run_row.status = 'running' AND
+               run_row.attempt_count = p_attempt_number AND
+               run_row.lease_token = session_row.lease_token THEN
+                UPDATE agent_runs SET lease_token = NULL, lease_expires_at = clock_timestamp(),
+                    updated_at = clock_timestamp()
+                WHERE owner_id = p_owner_id AND workspace_id = run_row.workspace_id
+                  AND id = p_run_id AND attempt_count = p_attempt_number
+                  AND lease_token = session_row.lease_token;
             END IF;
 
             UPDATE agent_sandbox_lifecycle_operations SET
@@ -746,31 +825,33 @@ DECLARE
 BEGIN
     EXECUTE format('GRANT USAGE ON SCHEMA %I TO giga_agent_lifecycle_owner', lifecycle_schema);
     EXECUTE format('GRANT USAGE ON SCHEMA %I TO giga_api_runtime', lifecycle_schema);
+    EXECUTE format('GRANT USAGE ON SCHEMA %I TO giga_agent_lifecycle_finalizer', lifecycle_schema);
+    -- A late provider callback may clear only its matching expired run lease.
     EXECUTE format('GRANT SELECT ON %I.agent_runs TO giga_agent_lifecycle_owner', lifecycle_schema);
-    EXECUTE format('GRANT UPDATE (updated_at) ON %I.agent_runs TO giga_agent_lifecycle_owner', lifecycle_schema);
+    EXECUTE format('GRANT UPDATE (lease_token, lease_expires_at, updated_at) ON %I.agent_runs TO giga_agent_lifecycle_owner', lifecycle_schema);
 
     EXECUTE format('ALTER TABLE %I.agent_sandbox_sessions OWNER TO giga_agent_lifecycle_owner', lifecycle_schema);
     EXECUTE format('ALTER TABLE %I.agent_sandbox_lifecycle_operations OWNER TO giga_agent_lifecycle_owner', lifecycle_schema);
     EXECUTE format('ALTER TABLE %I.agent_sandbox_attempt_fences OWNER TO giga_agent_lifecycle_owner', lifecycle_schema);
 
-    EXECUTE format('ALTER FUNCTION %I.settle_agent_sandbox_allocation(uuid, uuid, uuid, integer, uuid, character varying, character varying) OWNER TO giga_agent_lifecycle_owner', lifecycle_schema);
+    EXECUTE format('ALTER FUNCTION %I.settle_agent_sandbox_allocation(uuid, uuid, uuid, integer, uuid, character varying, character varying, character varying) OWNER TO giga_agent_lifecycle_owner', lifecycle_schema);
     EXECUTE format('ALTER FUNCTION %I.claim_agent_sandbox_cleanup(uuid, character varying, character varying, integer) OWNER TO giga_agent_lifecycle_owner', lifecycle_schema);
     EXECUTE format('ALTER FUNCTION %I.finalize_agent_sandbox_destruction(uuid, character varying, character varying) OWNER TO giga_agent_lifecycle_owner', lifecycle_schema);
 
-    EXECUTE format('REVOKE ALL ON FUNCTION %I.settle_agent_sandbox_allocation(uuid, uuid, uuid, integer, uuid, character varying, character varying) FROM PUBLIC', lifecycle_schema);
-    EXECUTE format('REVOKE ALL ON FUNCTION %I.claim_agent_sandbox_cleanup(uuid, character varying, character varying, integer) FROM PUBLIC', lifecycle_schema);
-    EXECUTE format('REVOKE ALL ON FUNCTION %I.finalize_agent_sandbox_destruction(uuid, character varying, character varying) FROM PUBLIC', lifecycle_schema);
+    EXECUTE format('REVOKE ALL ON FUNCTION %I.settle_agent_sandbox_allocation(uuid, uuid, uuid, integer, uuid, character varying, character varying, character varying) FROM PUBLIC, giga_api_runtime, giga_agent_lifecycle_finalizer', lifecycle_schema);
+    EXECUTE format('REVOKE ALL ON FUNCTION %I.claim_agent_sandbox_cleanup(uuid, character varying, character varying, integer) FROM PUBLIC, giga_api_runtime, giga_agent_lifecycle_finalizer', lifecycle_schema);
+    EXECUTE format('REVOKE ALL ON FUNCTION %I.finalize_agent_sandbox_destruction(uuid, character varying, character varying) FROM PUBLIC, giga_api_runtime, giga_agent_lifecycle_finalizer', lifecycle_schema);
 
-    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.settle_agent_sandbox_allocation(uuid, uuid, uuid, integer, uuid, character varying, character varying) TO giga_api_runtime', lifecycle_schema);
-    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.claim_agent_sandbox_cleanup(uuid, character varying, character varying, integer) TO giga_api_runtime', lifecycle_schema);
-    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.finalize_agent_sandbox_destruction(uuid, character varying, character varying) TO giga_api_runtime', lifecycle_schema);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.settle_agent_sandbox_allocation(uuid, uuid, uuid, integer, uuid, character varying, character varying, character varying) TO giga_agent_lifecycle_finalizer', lifecycle_schema);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.claim_agent_sandbox_cleanup(uuid, character varying, character varying, integer) TO giga_agent_lifecycle_finalizer', lifecycle_schema);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.finalize_agent_sandbox_destruction(uuid, character varying, character varying) TO giga_agent_lifecycle_finalizer', lifecycle_schema);
 
-    -- Least-privilege column grants for giga_api_runtime:
-    -- Cannot update destroyed_at on sessions; cannot update outcome or provider_resource_id on operations.
+    -- The runtime may update retry/request state only. Provider resource identity is set only by
+    -- the lifecycle finalizer routines; destroyed_at and operation outcome are not runtime-writable.
     EXECUTE format('REVOKE ALL PRIVILEGES ON %I.agent_sandbox_sessions FROM giga_api_runtime', lifecycle_schema);
     EXECUTE format('GRANT SELECT, INSERT ON %I.agent_sandbox_sessions TO giga_api_runtime', lifecycle_schema);
     EXECUTE format('GRANT UPDATE (
-        provider_session_id, lifecycle_state, allocation_state, cleanup_state,
+        lifecycle_state, allocation_state, cleanup_state,
         worker_id, lease_token, cleanup_attempts, next_cleanup_retry_at,
         cleanup_lease_token, cleanup_lease_expires_at, cleanup_worker_id,
         allocation_expires_at, updated_at, diagnostics, verified_checks

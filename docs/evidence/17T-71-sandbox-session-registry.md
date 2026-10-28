@@ -11,10 +11,39 @@
 - Closed Bypass 1 (`stopping -> destroyed`): removed `stopping` from permissible predecessor states so only `destroying` under an active cleanup lease can finalize as `destroyed`.
 - Closed Bypass 2 (fabricated cleanup lease): transitioned `destroying` and `destroyed` to require execution under `giga_agent_lifecycle_owner` via controlled `SECURITY DEFINER` routines (`claim_agent_sandbox_cleanup`, `finalize_agent_sandbox_destruction`). Ordinary `giga_api_runtime` cannot forge cleanup leases or mark sessions destroyed.
 - Closed Bypass 3 (forged `settled/resource`): allocation settlement into `settled` requires `giga_agent_lifecycle_owner` via controlled routine `settle_agent_sandbox_allocation`. Raw `UPDATE` on `outcome` and `provider_resource_id` revoked from `giga_api_runtime`.
-- Database role & table ownership: `giga_agent_lifecycle_owner` owns tables (`agent_sandbox_sessions`, `agent_sandbox_lifecycle_operations`, `agent_sandbox_attempt_fences`) and routines; `giga_api_runtime` receives only execution privileges on the controlled routines and least-privilege column updates.
+- Database role & table ownership: `giga_agent_lifecycle_owner` owns the lifecycle tables and routines; `giga_api_runtime` has no execute privilege on them. The separate `giga_agent_lifecycle_finalizer` role receives execute only and is not a member of the owner role.
 **Draft PR:** [#44](https://github.com/17thedevv/Giga/pull/44)
 **GitHub Actions CI:** Both `Validate Git Workflow` ([Run 40643004261](https://github.com/17thedevv/Giga/actions/runs/40643004261)) and `Backend CI` ([Run 40643004271](https://github.com/17thedevv/Giga/actions/runs/40643004271)) completed with `conclusion: success` on HEAD commit `b1ba972`.
 **Decision:** NO-GO for 17T-73 runtime integration until independent review and provider settlement limits below are closed.
+
+## 17T-71 final review fix — provider-authoritative lifecycle principal
+
+Migration 016 now keeps provider settlement authority outside the ordinary API runtime credential. Production configuration requires `AGENT_LIFECYCLE_FINALIZER_DATABASE_URL`; startup checks that its login is distinct from the runtime and migration logins, is non-superuser, belongs to `giga_agent_lifecycle_finalizer`, and does not inherit lifecycle-owner or quota roles. The dedicated pool is not passed into the public request dependency container. The finalizer role has execute access to the three lifecycle `SECURITY DEFINER` routines; runtime and `PUBLIC` do not.
+
+`giga_api_runtime` cannot write `provider_session_id`, `provider_resource_id`, or allocation `outcome`, and cannot call settlement, cleanup-claim, or destruction-finalization functions. The lifecycle owner has only the additional `agent_runs` privileges needed to inspect a run and clear its lease columns when fencing a stale provider callback. Sandbox session writes by runtime remain column-limited.
+
+The controlled allocation routine accepts `no_resource` only after the exact attempt generation is durably fenced, provider absence is confirmed, and the session has no provider session ID. It may settle a fenced `not_started`, `in_progress`, or `ambiguous` allocation. Direct runtime SQL still cannot settle these operations or fabricate provider absence. Provider resource settlement and cleanup continue to require the dedicated finalizer principal.
+
+Final role matrix verified on PostgreSQL:
+
+| Principal | Lifecycle routine EXECUTE | Direct provider evidence writes | Other lifecycle access |
+|---|---|---|---|
+| `PUBLIC` | None | None | No lifecycle finalization access |
+| `giga_api_runtime` | None | Cannot update `provider_session_id`, `provider_resource_id`, or allocation `outcome` | Scoped reads and non-authoritative request/retry state only; not a member of either lifecycle role |
+| `giga_agent_lifecycle_finalizer` | `settle_agent_sandbox_allocation`, `claim_agent_sandbox_cleanup`, `finalize_agent_sandbox_destruction` | No direct table UPDATE | NOLOGIN/NOINHERIT group for the separate non-superuser callback/cleanup login; not a member of lifecycle owner |
+| `giga_agent_lifecycle_owner` | Owns lifecycle routines | Authoritative writes only through those routines | Owns lifecycle tables; on `agent_runs` has SELECT and UPDATE only on `lease_token`, `lease_expires_at`, and `updated_at` for stale callback fencing |
+
+The new `agent-sandbox-lifecycle-finalizer.test.ts` PostgreSQL suite exercises runtime and public privilege attacks, effective role ownership, dedicated-role settlement and destruction, stale-generation and wrong-lease rejection, provider-confirmed absence, ambiguous allocation quota holds, and destruction failure/retry. The test repository fallback now recognizes only an actually missing lifecycle routine; it no longer treats unrelated PostgreSQL `42883` errors as permission to use the raw-SQL compatibility path.
+
+Focused verification on local PostgreSQL 18.4 (`127.0.0.1:55471`, isolated test database `giga_test_17t71_v5`, `NODE_ENV=test`):
+
+- Lifecycle finalizer and integrity suites: **15 passed, 0 failed**.
+- Lifecycle finalizer, integrity, sandbox-session, quota, and migration suites together: **69 passed, 0 failed**.
+- API `typecheck` and `build`: passed.
+- Agent Skills validator: passed for all 8 skills.
+- Git Workflow validator tests: **6 passed, 0 failed**.
+
+The final full API run completed **610 passed, 0 failed, 0 skipped** in 140.1s. It used `synchronous_commit=off` only on this disposable local test database to keep the Windows PostgreSQL run within the repository's existing 30-second suite timeouts; role, trigger, transaction, migration and application behavior were exercised on real PostgreSQL. This does not test crash durability. E2B adapter tests ran with the injected SDK seam and no provider network calls.
 
 This document supersedes earlier 17T-71 evidence. In particular, allocation TTL, a missing in-process sandbox handle, or a lost provider response is not proof of quiescence. No pull request was merged; no live E2B call, cloud resource, deployment, or runtime enablement was used for this work.
 
@@ -23,11 +52,11 @@ This document supersedes earlier 17T-71 evidence. In particular, allocation TTL,
 - **Durable Attempt Fence & Operation Ledger (Migration 016):** Adds a durable attempt fence keyed by owner, workspace, run, attempt and generation, plus an immutable lifecycle-operation ledger for allocation, tool and snapshot work.
 - **Finding 1 — Explicit Operation-State Transition Matrix (`agent_sandbox_lifecycle_operations`):**
   - Settled operations are terminal and immutable; outcome, provider resource identity, and settled timestamp cannot be altered.
-  - An `in_progress` or `ambiguous` allocation can NEVER transition directly to `settled/no_resource` via direct SQL. A provider response timeout, process crash, empty E2B listing or missing provider ID is never converted into absence based on elapsed time.
-  - A `not_started` allocation can settle as `settled/no_resource` ONLY when the exact attempt is durably fenced (`fenced_at IS NOT NULL`).
+  - `giga_api_runtime` cannot call the settlement routine or directly write allocation outcome/resource identity. The dedicated finalizer may record `settled/no_resource` for a `not_started`, `in_progress` or `ambiguous` operation only after the exact attempt is durably fenced and provider absence is confirmed while the session has no provider ID.
+  - A provider response timeout, process crash, empty E2B listing or missing provider ID is never converted into absence based on elapsed time.
   - Late provider callbacks arriving after fencing transition `in_progress` or `ambiguous` allocations to `settled/resource` with verified `provider_resource_id` against the original generation.
   - Runtime tool and snapshot operations enforce valid transitions (`in_progress -> ambiguous | settled`, `ambiguous -> settled`).
-  - Blank table privileges on `agent_sandbox_lifecycle_operations` are revoked from `giga_api_runtime`. Least-privilege column grants allow UPDATE ONLY on `(state, outcome, provider_resource_id, operation_name, settled_at)`. Identity columns are immutable and ungranted.
+  - Blank table privileges on `agent_sandbox_lifecycle_operations` are revoked from `giga_api_runtime`. Runtime UPDATE is limited to `(state, operation_name, settled_at)`; outcome and provider resource identity are finalizer-only. Identity columns are immutable and ungranted.
 - **Finding 2 — Prevent Fabricated Sandbox Destruction (`agent_sandbox_sessions`):**
   - Direct transitions to `destroyed` from `active`, `cleanup_pending`, `allocating`, or `failed` are strictly forbidden and rejected with a PL/pgSQL exception.
   - A transition into `destroying` requires an active cleanup lease (`cleanup_state = 'in_progress'` and `cleanup_lease_expires_at > NOW()`).
@@ -63,7 +92,9 @@ All PostgreSQL checks below ran against an isolated local PostgreSQL 18.4 test d
 | Quota suite on PostgreSQL | `npx --prefix apps/api tsx --test apps/api/tests/agent/agent-quotas.test.ts` | **21 passed, 0 failed, 0 skipped**. Confirms ambiguous allocation holds quota, verified cleanup permits controlled release, and migrations through 016 upgrade populated schemas and rerun idempotently. |
 | API typecheck | `npm run typecheck --prefix apps/api` | Passed, exit 0. |
 | API production build | `npm run build --prefix apps/api` | Passed, exit 0. |
-| Full API test suite (Real PostgreSQL) | `npm test --prefix apps/api` | **606 passed, 0 failed, 0 skipped**; duration 120.7s. |
+| Provider-authoritative finalizer boundary (Real PostgreSQL) | `npx tsx --test --test-concurrency=1 tests/agent/agent-sandbox-lifecycle-finalizer.test.ts` | **4 passed, 0 failed**. Runtime cannot call privileged functions or forge provider outcomes; dedicated finalizer records valid resource/absence/destruction; stale generations, wrong IDs/tokens, ambiguous outcomes and failed destruction are fenced; quota remains held until successful finalization. |
+| Combined lifecycle, sandbox, quota and migration suites (Real PostgreSQL) | `npx tsx --test --test-concurrency=1 tests/agent/agent-sandbox-lifecycle-finalizer.test.ts tests/agent/agent-sandbox-lifecycle-integrity.test.ts tests/agent/agent-sandbox-sessions.test.ts tests/agent/agent-quotas.test.ts tests/agent/agent-migration.test.ts` | **69 passed, 0 failed, 0 skipped**. |
+| Full API test suite (Real PostgreSQL) | `npm test` from `apps/api` | **610 passed, 0 failed, 0 skipped**; duration 140.1s. Used `synchronous_commit=off` only for the disposable local Windows test database. |
 | GitHub Actions Workflow Validation | `validate-git-workflow.mjs` | **Passed** ([Run 40643004261](https://github.com/17thedevv/Giga/actions/runs/40643004261)). |
 | GitHub Actions Backend CI | GitHub Actions runner (Real PostgreSQL) | **Passed** ([Run 40643004271](https://github.com/17thedevv/Giga/actions/runs/40643004271)), all steps successful. |
 | Agent Skills validator | `node .agents/scripts/validate-skills.mjs` | Passed, all 8 skills valid. |
@@ -73,9 +104,9 @@ All PostgreSQL checks below ran against an isolated local PostgreSQL 18.4 test d
 ## Changed-file intent
 
 The implementation updates:
-- `apps/api/src/db/migrations/016_agent_attempt_lifecycle_fence.sql`: Enforces explicit operation-state transition matrix in `guard_agent_sandbox_operation()`, replaces `guard_agent_sandbox_session_update()` to prevent fabricated sandbox destruction, adds `ON DELETE CASCADE` to foreign key on `agent_sandbox_attempt_fences`, and applies least-privilege column grants for role `giga_api_runtime`.
+- `apps/api/src/db/migrations/016_agent_attempt_lifecycle_fence.sql`: Enforces explicit operation-state transition matrix in `guard_agent_sandbox_operation()`, replaces `guard_agent_sandbox_session_update()` to prevent fabricated sandbox destruction, adds `ON DELETE CASCADE` to foreign key on `agent_sandbox_attempt_fences`, and separates runtime and provider-finalizer privileges.
 - `apps/api/src/db/migrate.ts`: Updates embedded migration 16 definition to match SQL byte-for-byte.
-- `apps/api/src/modules/agent/repository.ts`: Transitions sessions through `destroying` with an active cleanup lease before committing `destroyed` in `markSandboxDestroyed()`, and enforces that only never-started operations can be confirmed absent in `confirmSandboxAllocationAbsent()`.
+- `apps/api/src/modules/agent/repository.ts`: Transitions sessions through `destroying` with an active cleanup lease before committing `destroyed` in `markSandboxDestroyed()`, routes provider-authoritative lifecycle updates through the dedicated finalizer pool, and narrows compatibility fallback to missing PostgreSQL functions.
 - `apps/api/tests/test-db-helper.ts`: Updates regex to strip multiline role grants in pg-mem.
 - `apps/api/tests/agent/agent-sandbox-sessions.test.ts`: Marks PostgreSQL row-lock concurrency test as skipped in pg-mem when `TEST_DATABASE_URL` is absent.
 - `apps/api/tests/agent/agent-sandbox-lifecycle-integrity.test.ts`: Implements real PostgreSQL regression suite under effective role `giga_api_runtime` covering all 11 required scenarios.

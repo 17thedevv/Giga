@@ -114,6 +114,14 @@ interface StepRow {
 
 const iso = (value: Date): string => new Date(value).toISOString();
 
+function isMissingLifecycleFunction(error: unknown, functionName: string): boolean {
+  if (typeof error !== 'object' || error === null || !('code' in error) || error.code !== '42883' || !('message' in error)) {
+    return false;
+  }
+  const message = String(error.message).toLowerCase();
+  return message.includes('function ') && message.includes(functionName.toLowerCase()) && message.includes('does not exist');
+}
+
 const workspace = (row: WorkspaceRow): AgentWorkspace => ({
   id: row.id,
   name: row.name,
@@ -275,8 +283,11 @@ export type RunFinalizeInput =
 /** All entry points require authenticated owner scope, including internal event reads/writes. */
 export class AgentRepository {
   private static readonly runLocks = new Map<string, Promise<void>>();
+  private readonly lifecycleFinalizationPool: pg.Pool;
 
-  constructor(private readonly pool: pg.Pool) {}
+  constructor(private readonly pool: pg.Pool, lifecycleFinalizationPool?: pg.Pool) {
+    this.lifecycleFinalizationPool = lifecycleFinalizationPool ?? pool;
+  }
 
   static getActiveLockCount(): number {
     return AgentRepository.runLocks.size;
@@ -567,7 +578,7 @@ export class AgentRepository {
     workerId: string,
     leaseDurationMs = 30000
   ): Promise<ClaimedRun | null> {
-    return this.transaction(async (client) => {
+    const result = await this.transaction<ClaimedRun | null | { finalizeSessionId: string }>(async (client) => {
       const res = await client.query<RunRow>(
         'SELECT * FROM agent_runs WHERE owner_id = $1 AND id = $2 FOR UPDATE',
         [ownerId, runId]
@@ -618,8 +629,12 @@ export class AgentRepository {
         // worker must not overlap an allocation, sandbox, or runtime operation whose
         // provider outcome is still unknown. The fence and the replacement claim share
         // this run-row transaction/lock, so admission cannot slip between them.
-        const previousAttemptSettled = await this.fenceExpiredAttemptBeforeTakeover(client, row);
-        if (!previousAttemptSettled) return null;
+        const previousAttempt = await this.fenceExpiredAttemptBeforeTakeover(client, row);
+        if (!previousAttempt.settled) {
+          return previousAttempt.finalizeSessionId
+            ? { finalizeSessionId: previousAttempt.finalizeSessionId }
+            : null;
+        }
 
         // Stale lease takeover: bump attempt count and allocate new lease token
         const updated = await client.query<RunRow>(
@@ -643,14 +658,19 @@ export class AgentRepository {
 
       return null;
     });
+    if (result && 'finalizeSessionId' in result) {
+      await this.confirmSandboxAllocationAbsent(result.finalizeSessionId, 'expired_run_lease_takeover');
+      return this.claimRun(ownerId, runId, workerId, leaseDurationMs);
+    }
+    return result;
   }
 
   private async fenceExpiredAttemptBeforeTakeover(
     client: pg.PoolClient,
     runRow: RunRow
-  ): Promise<boolean> {
+  ): Promise<{ settled: boolean; finalizeSessionId?: string }> {
     const attemptNumber = runRow.attempt_count;
-    if (attemptNumber <= 0) return true;
+    if (attemptNumber <= 0) return { settled: true };
     let fence = (await client.query<{ generation: string; fenced_at: Date | null }>(
       `SELECT generation, fenced_at FROM agent_sandbox_attempt_fences
        WHERE owner_id = $1 AND workspace_id = $2 AND run_id = $3 AND attempt_number = $4 FOR UPDATE`,
@@ -679,7 +699,7 @@ export class AgentRepository {
        AND attempt_generation = $5 FOR UPDATE`,
       [runRow.owner_id, runRow.workspace_id, runRow.id, attemptNumber, fence.generation]
     )).rows[0];
-    if (!session) return true;
+    if (!session) return { settled: true };
 
     const operations = (await client.query<{
       id: string; operation_kind: 'allocation' | 'tool' | 'snapshot';
@@ -692,40 +712,29 @@ export class AgentRepository {
       [session.id, fence.generation]
     )).rows;
     const allocation = operations.find((operation) => operation.operation_kind === 'allocation');
-    if (!allocation) return false;
+    if (!allocation) return { settled: false };
 
     // An operation that never crossed the provider boundary is durably resource-free.
     if (allocation.state === 'not_started') {
-      await client.query(
-        `UPDATE agent_sandbox_lifecycle_operations SET state = 'settled', outcome = 'no_resource', settled_at = NOW()
-         WHERE id = $1 AND state = 'not_started'`, [allocation.id]
-      );
-      await client.query(
-        `UPDATE agent_sandbox_sessions SET lifecycle_state = 'failed', allocation_state = 'failed',
-           diagnostics = $2, updated_at = NOW() WHERE id = $1 AND lifecycle_state = 'allocating'`,
-        [session.id, JSON.stringify({ ...(session.diagnostics ?? {}), allocation_outcome: 'no_resource',
-          fence_reason: 'expired_run_lease_takeover' })]
-      );
-      allocation.state = 'settled';
-      allocation.outcome = 'no_resource';
+      return { settled: false, finalizeSessionId: session.id };
     }
 
-    if (operations.some((operation) => operation.state !== 'settled')) return false;
+    if (operations.some((operation) => operation.state !== 'settled')) return { settled: false };
     if (allocation.outcome === 'no_resource') {
-      if (session.provider_session_id !== null) return false;
+      if (session.provider_session_id !== null) return { settled: false };
       if (session.lifecycle_state === 'allocating') {
         await client.query(
           `UPDATE agent_sandbox_sessions SET lifecycle_state = 'failed', allocation_state = 'failed',
              updated_at = NOW() WHERE id = $1 AND lifecycle_state = 'allocating'`, [session.id]
         );
       }
-      return true;
+      return { settled: true };
     }
     if (allocation.outcome !== 'resource' || !allocation.provider_resource_id ||
         session.provider_session_id !== allocation.provider_resource_id || session.lifecycle_state !== 'destroyed') {
-      return false;
+      return { settled: false };
     }
-    return true;
+    return { settled: true };
   }
 
   private assertActiveLease(row: RunRow | undefined, leaseToken: string): void {
@@ -1596,6 +1605,42 @@ export class AgentRepository {
     leaseToken: string;
     providerSessionId: string;
   }): Promise<DurableSandboxSession> {
+    try {
+      const identity = await this.pool.query<{
+        owner_id: string; run_id: string; attempt_number: number; attempt_generation: string;
+      }>(
+        'SELECT owner_id, run_id, attempt_number, attempt_generation FROM agent_sandbox_sessions WHERE id = $1',
+        [params.sessionId]
+      );
+      const rowIdentity = identity.rows[0];
+      if (!rowIdentity || rowIdentity.owner_id !== params.ownerId || rowIdentity.run_id !== params.runId) {
+        throw new NotFoundError();
+      }
+      const result = await this.lifecycleFinalizationPool.query<SandboxSessionRow>(
+        'SELECT * FROM settle_agent_sandbox_allocation($1::uuid, $2::uuid, $3::uuid, $4::integer, $5::uuid, $6::varchar, $7::varchar, $8::varchar)',
+        [params.sessionId, params.ownerId, params.runId, rowIdentity.attempt_number,
+          rowIdentity.attempt_generation, 'resource', params.providerSessionId, params.leaseToken]
+      );
+      if (!result.rows[0]) throw new NotFoundError();
+      const settled = result.rows[0];
+      if (settled.lifecycle_state === 'cleanup_pending') {
+        await this.pool.query(
+          `UPDATE agent_sandbox_sessions SET diagnostics = $1, updated_at = NOW() WHERE id = $2`,
+          [JSON.stringify({ ...(settled.diagnostics ?? {}), fence_reason: 'late_or_stale_allocation_callback' }), params.sessionId]
+        );
+        settled.diagnostics = { ...(settled.diagnostics ?? {}), fence_reason: 'late_or_stale_allocation_callback' };
+      }
+      return sandboxSession(settled);
+    } catch (err: any) {
+      if (!isMissingLifecycleFunction(err, 'settle_agent_sandbox_allocation')) {
+        if (err instanceof NotFoundError) throw err;
+        if (err?.message?.includes('conflicts')) throw new ConflictError(err.message);
+        if (err?.message?.includes('not found')) throw new NotFoundError();
+        throw err;
+      }
+      // In-memory test adapters do not implement PostgreSQL SECURITY DEFINER functions.
+      // Their fallback remains fail-closed against a real runtime role by table privileges.
+    }
     return this.transaction(async (client) => {
       // All admission, callback, tool-start and fence paths lock run -> fence -> session.
       const runRes = await client.query<RunRow>(
@@ -1673,7 +1718,7 @@ export class AgentRepository {
           return sandboxSession({ ...row, diagnostics: fenced ? { ...(session.diagnostics ?? {}), fence_reason: 'late_or_stale_allocation_callback' } : session.diagnostics });
         }
       } catch (err: any) {
-        if (err?.code !== '42883' && !err?.message?.includes('does not exist')) {
+        if (!isMissingLifecycleFunction(err, 'settle_agent_sandbox_allocation')) {
           if (err?.message?.includes('conflicts')) throw new ConflictError(err.message);
           if (err?.message?.includes('not found')) throw new NotFoundError();
           throw err;
@@ -1845,6 +1890,34 @@ export class AgentRepository {
 
   /** Provider-confirmed absence of the exact allocation operation, never a TTL inference. */
   async confirmSandboxAllocationAbsent(sessionId: string, evidence: string): Promise<void> {
+    const identity = (await this.pool.query<{
+      owner_id: string; run_id: string; attempt_number: number;
+      attempt_generation: string; allocation_intent_id: string;
+    }>(
+      'SELECT owner_id, run_id, attempt_number, attempt_generation, allocation_intent_id ' +
+      'FROM agent_sandbox_sessions WHERE id = $1', [sessionId]
+    )).rows[0];
+    if (!identity) throw new NotFoundError();
+    try {
+      const result = await this.lifecycleFinalizationPool.query<SandboxSessionRow>(
+        'SELECT * FROM settle_agent_sandbox_allocation($1::uuid, $2::uuid, $3::uuid, $4::integer, $5::uuid, $6::varchar, NULL::varchar, NULL::varchar)',
+        [sessionId, identity.owner_id, identity.run_id, identity.attempt_number, identity.attempt_generation, 'no_resource']
+      );
+      if (!result.rows[0]) throw new NotFoundError();
+      await this.pool.query(
+        'UPDATE agent_sandbox_lifecycle_operations SET operation_name = $1 WHERE id = $2 AND operation_kind = \'allocation\'',
+        [`provider_absence:${evidence}`.slice(0, 128), identity.allocation_intent_id]
+      );
+      return;
+    } catch (err: any) {
+      if (!isMissingLifecycleFunction(err, 'settle_agent_sandbox_allocation')) {
+        if (err instanceof NotFoundError) throw err;
+        if (err?.message?.includes('conflicts')) throw new ConflictError(err.message);
+        if (err?.message?.includes('not found')) throw new NotFoundError();
+        throw err;
+      }
+      // In-memory test adapters do not implement PostgreSQL SECURITY DEFINER functions.
+    }
     await this.transaction(async (client) => {
       const identity = (await client.query<{
         owner_id: string; workspace_id: string; run_id: string; attempt_number: number;
@@ -1878,7 +1951,7 @@ export class AgentRepository {
             [sessionId, identity.owner_id, identity.run_id, identity.attempt_number, identity.attempt_generation, 'no_resource']
           );
         } catch (err: any) {
-          if (err?.code !== '42883' && !err?.message?.includes('does not exist')) {
+          if (!isMissingLifecycleFunction(err, 'settle_agent_sandbox_allocation')) {
             throw err;
           }
           await client.query(
@@ -1913,6 +1986,7 @@ export class AgentRepository {
   async fenceSandboxAttempt(reference: {
     ownerId: string; workspaceId: string; runId: string; attemptNumber: number;
   }, reason = 'quota_reconciliation'): Promise<void> {
+    let neverStartedSessionId: string | undefined;
     await this.transaction(async (client) => {
       const runRow = (await client.query<RunRow>(
         'SELECT * FROM agent_runs WHERE owner_id = $1 AND workspace_id = $2 AND id = $3 FOR UPDATE',
@@ -1961,20 +2035,7 @@ export class AgentRepository {
           [session.allocation_intent_id, session.id]
         )).rows[0];
         if (allocOp?.state === 'not_started') {
-          try {
-            await client.query(
-              'SELECT * FROM settle_agent_sandbox_allocation($1::uuid, $2::uuid, $3::uuid, $4::integer, $5::uuid, $6::varchar, NULL::varchar)',
-              [session.id, reference.ownerId, reference.runId, reference.attemptNumber, fence.generation, 'no_resource']
-            );
-          } catch (err: any) {
-            if (err?.code !== '42883' && !err?.message?.includes('does not exist')) {
-              throw err;
-            }
-            await client.query(
-              `UPDATE agent_sandbox_lifecycle_operations SET state = 'settled', outcome = 'no_resource', settled_at = NOW()
-               WHERE session_id = $1 AND operation_kind = 'allocation' AND state = 'not_started'`, [session.id]
-            );
-          }
+          neverStartedSessionId = session.id;
         }
         const allocation = (await client.query<{ state: string; outcome: string | null }>(
           `SELECT state, outcome FROM agent_sandbox_lifecycle_operations
@@ -2011,6 +2072,9 @@ export class AgentRepository {
         }
       }
     });
+    if (neverStartedSessionId) {
+      await this.confirmSandboxAllocationAbsent(neverStartedSessionId, 'attempt_fenced_before_provider_submit');
+    }
   }
 
   async getSandboxAttemptLifecycle(reference: {
@@ -2061,7 +2125,8 @@ export class AgentRepository {
     const cleanDiag = diagnostics
       ? (AgentRepository.redactJsonValue(diagnostics) as Record<string, unknown>)
       : {};
-    return this.transaction(async (client) => {
+    let needsNoResourceSettlement = false;
+    const result = await this.transaction(async (client) => {
       const identity = (await client.query<{
         owner_id: string; workspace_id: string; run_id: string; attempt_number: number;
         attempt_generation: string; allocation_intent_id: string;
@@ -2098,20 +2163,7 @@ export class AgentRepository {
         );
       }
       if (operation.state === 'not_started') {
-        try {
-          await client.query(
-            'SELECT * FROM settle_agent_sandbox_allocation($1::uuid, $2::uuid, $3::uuid, $4::integer, $5::uuid, $6::varchar, NULL::varchar)',
-            [sessionId, identity.owner_id, identity.run_id, identity.attempt_number, identity.attempt_generation, 'no_resource']
-          );
-        } catch (err: any) {
-          if (err?.code !== '42883' && !err?.message?.includes('does not exist')) {
-            throw err;
-          }
-          await client.query(
-            `UPDATE agent_sandbox_lifecycle_operations SET state = 'settled', outcome = 'no_resource', settled_at = NOW()
-             WHERE id = $1`, [identity.allocation_intent_id]
-          );
-        }
+        needsNoResourceSettlement = true;
       }
       const existingDiag = session.diagnostics && typeof session.diagnostics === 'object' ? session.diagnostics : {};
       const mergedDiag = JSON.stringify({ ...existingDiag, reason: cleanReason, ...cleanDiag,
@@ -2122,6 +2174,11 @@ export class AgentRepository {
       );
       return sandboxSession(updated.rows[0]!);
     });
+    if (needsNoResourceSettlement) {
+      await this.confirmSandboxAllocationAbsent(sessionId, 'attempt_fenced_before_provider_submit');
+      return this.getSandboxSession(result.ownerId, sessionId);
+    }
+    return result;
   }
 
   /**
@@ -2211,7 +2268,7 @@ export class AgentRepository {
   ): Promise<DurableSandboxSession> {
     if (!providerSessionId) throw new ConflictError('Provider destruction requires the exact resource identity');
     try {
-      const result = await this.pool.query<SandboxSessionRow>(
+      const result = await this.lifecycleFinalizationPool.query<SandboxSessionRow>(
         'SELECT * FROM finalize_agent_sandbox_destruction($1::uuid, $2::varchar, $3::varchar)',
         [sessionId, providerSessionId, leaseToken ?? null]
       );
@@ -2219,7 +2276,7 @@ export class AgentRepository {
       if (!row || !row.id) throw new NotFoundError();
       return sandboxSession(row);
     } catch (err: any) {
-      if (err?.code !== '42883' && !err?.message?.includes('does not exist')) {
+      if (!isMissingLifecycleFunction(err, 'finalize_agent_sandbox_destruction')) {
         if (err?.message?.includes('not found') || err?.message?.includes('Sandbox session not found')) throw new NotFoundError();
         if (
           err?.message?.includes('fenced') || err?.message?.includes('conflicts') ||
@@ -2308,6 +2365,15 @@ export class AgentRepository {
   ): Promise<DurableSandboxSession> {
     const cleanError = redactSensitiveContent(errorReason);
     const retryAt = new Date(Date.now() + retryDelayMs);
+    const session = await this.getSandboxSessionById(sessionId);
+    if (!session) throw new NotFoundError();
+    await this.commitSandboxSessionAllocated({
+      sessionId,
+      ownerId: session.ownerId,
+      runId: session.runId,
+      leaseToken: session.leaseToken,
+      providerSessionId,
+    });
     return this.transaction(async (client) => {
       const row = (await client.query<SandboxSessionRow>(
         'SELECT * FROM agent_sandbox_sessions WHERE id = $1 FOR UPDATE', [sessionId]
@@ -2318,36 +2384,18 @@ export class AgentRepository {
          WHERE id = $1 AND session_id = $2 AND operation_kind = 'allocation' FOR UPDATE`,
         [row.allocation_intent_id, sessionId]
       )).rows[0];
-      if (!operation || (operation.state === 'settled' &&
-          (operation.outcome !== 'resource' || operation.provider_resource_id !== providerSessionId))) {
+      if (!operation || operation.state !== 'settled' || operation.outcome !== 'resource' ||
+          operation.provider_resource_id !== providerSessionId) {
         throw new ConflictError('Provider cleanup identity conflicts with the durable allocation outcome');
-      }
-      try {
-        await client.query(
-          'SELECT * FROM settle_agent_sandbox_allocation($1::uuid, $2::uuid, $3::uuid, $4::integer, $5::uuid, $6::varchar, $7::varchar)',
-          [sessionId, row.owner_id, row.run_id, row.attempt_number, row.attempt_generation, 'resource', providerSessionId]
-        );
-      } catch (err: any) {
-        if (err?.code !== '42883' && !err?.message?.includes('does not exist')) {
-          if (err?.message?.includes('conflicts')) throw new ConflictError(err.message);
-          throw err;
-        }
-        if (operation.state !== 'settled') {
-          await client.query(
-            `UPDATE agent_sandbox_lifecycle_operations SET state = 'settled', outcome = 'resource',
-               provider_resource_id = $1, settled_at = NOW()
-             WHERE id = $2 AND session_id = $3`, [providerSessionId, row.allocation_intent_id, sessionId]
-          );
-        }
       }
       const existingDiag = row.diagnostics && typeof row.diagnostics === 'object' ? row.diagnostics : {};
       const mergedDiag = JSON.stringify({ ...existingDiag, allocation_cleanup_error: cleanError });
       const result = await client.query<SandboxSessionRow>(
-        `UPDATE agent_sandbox_sessions SET provider_session_id = COALESCE(provider_session_id, $2),
-           lifecycle_state = 'cleanup_pending', cleanup_state = 'retry_scheduled', allocation_state = 'allocated',
-           next_cleanup_retry_at = $3, diagnostics = $4, updated_at = NOW()
+        `UPDATE agent_sandbox_sessions SET lifecycle_state = 'cleanup_pending',
+           cleanup_state = 'retry_scheduled', allocation_state = 'allocated',
+           next_cleanup_retry_at = $2, diagnostics = $3, updated_at = NOW()
          WHERE id = $1 RETURNING *`,
-        [sessionId, providerSessionId, retryAt.toISOString(), mergedDiag]
+        [sessionId, retryAt.toISOString(), mergedDiag]
       );
       return sandboxSession(result.rows[0]!);
     });
@@ -2496,14 +2544,14 @@ export class AgentRepository {
   }): Promise<DurableSandboxSession | null> {
     const durationMs = params.leaseDurationMs ?? 30_000;
     try {
-      const result = await this.pool.query<SandboxSessionRow>(
+      const result = await this.lifecycleFinalizationPool.query<SandboxSessionRow>(
         'SELECT * FROM claim_agent_sandbox_cleanup($1::uuid, $2::varchar, $3::varchar, $4::integer)',
         [params.sessionId, params.workerId, params.leaseToken, durationMs]
       );
       const row = result.rows[0];
       return row && row.id ? sandboxSession(row) : null;
     } catch (err: any) {
-      if (err?.code !== '42883' && !err?.message?.includes('does not exist')) {
+      if (!isMissingLifecycleFunction(err, 'claim_agent_sandbox_cleanup')) {
         throw err;
       }
       const expiresAt = new Date(Date.now() + durationMs);
