@@ -5,9 +5,10 @@
 **Branch:** `feat/17t-71-agent-sandbox-sessions`
 **Merged dependency:** PR #42, merge commit `207d78327fd58962dd9acdb4f2cf3048234df0d9`
 **Baseline 17T-71 commit:** `c98eb1d4d1f673aea8a92729592c71e2aff6ad73`
-**Lifecycle commits:** `b59b44f` (`fix(agent): fence sandbox allocation lifecycle per attempt`), `eb0d3e02b1a3913911a9c126abc31f96b263eada` (preserve active cleanup lease)
+**Lifecycle commits:** `b59b44f` (`fix(agent): fence sandbox allocation lifecycle per attempt`), `eb0d3e02b1a3913911a9c126abc31f96b263eada` (preserve active cleanup lease), `ceab433` (`fix(agent): enforce database sandbox lifecycle integrity`), `b1ba972` (`fix(agent): fence attempt before settling allocation failure`)
 **Review Fix (Database Lifecycle Integrity):** Resolved Finding 1 (explicit operation-state transition matrix) and Finding 2 (prevent fabricated sandbox destruction & enforce least-privilege column grants).
 **Draft PR:** [#44](https://github.com/17thedevv/Giga/pull/44)
+**GitHub Actions CI:** Both `Validate Git Workflow` ([Run 40643004261](https://github.com/17thedevv/Giga/actions/runs/40643004261)) and `Backend CI` ([Run 40643004271](https://github.com/17thedevv/Giga/actions/runs/40643004271)) completed with `conclusion: success` on HEAD commit `b1ba972`.
 **Decision:** NO-GO for 17T-73 runtime integration until independent review and provider settlement limits below are closed.
 
 This document supersedes earlier 17T-71 evidence. In particular, allocation TTL, a missing in-process sandbox handle, or a lost provider response is not proof of quiescence. No pull request was merged; no live E2B call, cloud resource, deployment, or runtime enablement was used for this work.
@@ -57,7 +58,9 @@ All PostgreSQL checks below ran against an isolated local PostgreSQL 18.4 test d
 | Quota suite on PostgreSQL | `npx --prefix apps/api tsx --test apps/api/tests/agent/agent-quotas.test.ts` | **21 passed, 0 failed, 0 skipped**. Confirms ambiguous allocation holds quota, verified cleanup permits controlled release, and migrations through 016 upgrade populated schemas and rerun idempotently. |
 | API typecheck | `npm run typecheck --prefix apps/api` | Passed, exit 0. |
 | API production build | `npm run build --prefix apps/api` | Passed, exit 0. |
-| Full API test suite | `npm test --prefix apps/api` | **543 passed, 0 failed, 31 skipped**; duration 47.1s. |
+| Full API test suite (Real PostgreSQL) | `npm test --prefix apps/api` | **606 passed, 0 failed, 0 skipped**; duration 120.7s. |
+| GitHub Actions Workflow Validation | `validate-git-workflow.mjs` | **Passed** ([Run 40643004261](https://github.com/17thedevv/Giga/actions/runs/40643004261)). |
+| GitHub Actions Backend CI | GitHub Actions runner (Real PostgreSQL) | **Passed** ([Run 40643004271](https://github.com/17thedevv/Giga/actions/runs/40643004271)), all steps successful. |
 | Agent Skills validator | `node .agents/scripts/validate-skills.mjs` | Passed, all 8 skills valid. |
 | Git Workflow validator | `node --test .agents/scripts/validate-git-workflow.test.mjs` | 6 passed, 0 failed, 0 skipped. |
 | Whitespace & diff check | `git diff --check` | Passed, 0 whitespace errors. |
