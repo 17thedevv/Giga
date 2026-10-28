@@ -977,7 +977,9 @@ describe('GigaAgent Durable Sandbox Sessions & Crash-Safe Cleanup (17T-71)', { t
         `Expected distinct provider IDs, got: ${provider.destroyedSandboxes.join(', ')}`);
     });
 
-    it('two workers concurrently preparing the same run via IsolatedCloudSandboxAdapter', async () => {
+    it('two workers concurrently preparing the same run via IsolatedCloudSandboxAdapter', {
+      skip: process.env.TEST_DATABASE_URL ? false : 'requires PostgreSQL row-lock semantics',
+    }, async () => {
       const { run, claim } = await createClaimedRun(ownerId, workspaceId);
       const provider = new MockCloudSandboxProviderClient();
       const adapter = new IsolatedCloudSandboxAdapter({

@@ -1848,6 +1848,9 @@ export class AgentRepository {
         throw new ConflictError('Provider absence conflicts with an already settled allocation resource');
       }
       if (operation.state !== 'settled') {
+        if (operation.state !== 'not_started') {
+          throw new ConflictError('Cannot confirm allocation absence for an operation that was already submitted to provider');
+        }
         await client.query(
           `UPDATE agent_sandbox_lifecycle_operations SET state = 'settled', outcome = 'no_resource',
              provider_resource_id = NULL, operation_name = $2, settled_at = NOW() WHERE id = $1`,
@@ -2167,6 +2170,14 @@ export class AgentRepository {
       if (leaseToken && session.cleanup_lease_token !== leaseToken) {
         throw new ConflictError('Cleanup lease was fenced before destruction could be recorded');
       }
+      if (
+        session.lifecycle_state === 'destroying' &&
+        session.cleanup_state === 'in_progress' &&
+        session.cleanup_lease_expires_at &&
+        new Date(session.cleanup_lease_expires_at).getTime() <= Date.now()
+      ) {
+        throw new ConflictError('Cleanup lease expired before destruction could be committed');
+      }
       const allocation = (await client.query<{
         state: string; outcome: string | null; provider_resource_id: string | null;
       }>(
@@ -2177,6 +2188,23 @@ export class AgentRepository {
           allocation.provider_resource_id !== providerSessionId) {
         throw new ConflictError('Provider destruction cannot settle an unverified allocation identity');
       }
+
+      if (session.lifecycle_state !== 'destroying') {
+        const leaseTokenToUse = leaseToken ?? randomUUID();
+        const leaseExpiresAt = new Date(Date.now() + 30_000);
+        await client.query(
+          `UPDATE agent_sandbox_sessions
+           SET lifecycle_state = 'destroying',
+               cleanup_state = 'in_progress',
+               cleanup_lease_token = $2,
+               cleanup_lease_expires_at = $3,
+               cleanup_worker_id = COALESCE(cleanup_worker_id, 'direct_destroy'),
+               updated_at = NOW()
+           WHERE id = $1`,
+          [sessionId, leaseTokenToUse, leaseExpiresAt.toISOString()]
+        );
+      }
+
       const updated = await client.query<SandboxSessionRow>(
         `UPDATE agent_sandbox_sessions SET lifecycle_state = 'destroyed', cleanup_state = 'completed',
            cleanup_lease_token = NULL, cleanup_lease_expires_at = NULL,

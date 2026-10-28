@@ -209,7 +209,7 @@ export async function createTestDatabase(migrations?: readonly Migration[]): Pro
         .replace(/CREATE OR REPLACE FUNCTION[\s\S]*?LANGUAGE plpgsql;/gi, '')
         .replace(/DROP TRIGGER[\s\S]*?;/gi, '')
         .replace(/CREATE TRIGGER[\s\S]*?;/gi, '')
-        .replace(/^(?:GRANT|REVOKE).*giga_api_runtime.*;\s*$/gim, '');
+        .replace(/(?:GRANT|REVOKE)[\s\S]*?(?:TO|FROM)\s+giga_api_runtime\s*;/gi, '');
       return db.public.many(stripped);
     }
     if (sql.includes('FOR UPDATE OF s SKIP LOCKED')) {
