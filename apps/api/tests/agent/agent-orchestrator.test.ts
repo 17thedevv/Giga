@@ -344,9 +344,63 @@ describe('GigaAgent Durable Orchestrator & Deterministic Fake Runtime', () => {
 
     const outcome = await orchestrator.executeRun(owner, run.id, controller.signal);
     assert.equal(outcome.status, 'cancelled');
+    assert.equal((await repository.listSteps(owner, run.id)).length, 0, 'cancellation before dispatch must not persist a tool step');
     if (outcome.status === 'cancelled') {
       assert.equal(outcome.run.status, 'cancelled');
       assert.ok(outcome.run.finishedAt);
+    }
+  });
+
+  it('fails repeated equivalent tool calls before dispatching beyond the server repeat budget', async () => {
+    const run = await enqueue('execute', 'Do not repeat the same inspection indefinitely');
+    const runtime = new DeterministicFakeExecutionRuntime();
+    const originalInvoke = runtime.invoke.bind(runtime);
+    let invokeCount = 0;
+    runtime.invoke = async (...args) => {
+      invokeCount++;
+      return originalInvoke(...args);
+    };
+    let decisionCount = 0;
+    const decisionProvider = new DeterministicDecisionProvider({
+      custom: () => ({
+        kind: 'tool_call',
+        toolCall: { toolCallId: `repeat-${++decisionCount}`, toolName: 'list_files', arguments: {} },
+      }),
+    });
+    const orchestrator = new AgentOrchestrator(repository, createDefaultToolRegistry(), decisionProvider, runtime, {
+      maxIdenticalToolCalls: 2,
+    });
+
+    const outcome = await orchestrator.executeRun(owner, run.id);
+    assert.equal(outcome.status, 'failed');
+    assert.equal(invokeCount, 2);
+    assert.equal(decisionCount, 3);
+    if (outcome.status === 'failed') {
+      assert.equal(outcome.run.error?.code, 'POLICY_VIOLATION');
+      assert.match(outcome.run.error?.message ?? '', /Repeated equivalent/);
+    }
+  });
+
+  it('bounds plan-only decision loops even when no tool steps are produced', async () => {
+    const run = await enqueue('plan', 'Return a plan and stop');
+    const runtime = new DeterministicFakeExecutionRuntime();
+    let decisionCount = 0;
+    const decisionProvider = new DeterministicDecisionProvider({
+      custom: () => ({
+        kind: 'plan',
+        plan: { version: ++decisionCount, steps: ['Inspect the authorized context'] },
+      }),
+    });
+    const orchestrator = new AgentOrchestrator(repository, createDefaultToolRegistry(), decisionProvider, runtime, {
+      maxDecisions: 2,
+    });
+
+    const outcome = await orchestrator.executeRun(owner, run.id);
+    assert.equal(outcome.status, 'failed');
+    assert.equal(decisionCount, 2);
+    if (outcome.status === 'failed') {
+      assert.equal(outcome.run.error?.code, 'STEP_LIMIT_EXCEEDED');
+      assert.match(outcome.run.error?.message ?? '', /decision limit/i);
     }
   });
 

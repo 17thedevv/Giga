@@ -10,7 +10,8 @@ export function isSensitiveKey(key: string): boolean {
   const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, '');
   return /^(?:x)?(?:api)?key$|^(?:x)?(?:auth|access|refresh|lease|worker|session|id|bearer|security|csrf)?token$|^(?:client|shared)?secret(?:key)?$|^(?:pass|passwd|password)$|^(?:privatekey|privkey)$|^(?:authorization|proxyauthorization)$|^(?:credential|credentials)$|^(?:cookie|setcookie)$/i.test(
     normalized
-  );
+  ) || ['apikey', 'token', 'secret', 'password', 'passwd', 'credential', 'credentials', 'privatekey', 'databaseurl', 'connectionstring'].some((suffix) => normalized.endsWith(suffix)) ||
+    normalized.includes('credentialencryptionkey');
 }
 
 export function redactJsonValue(value: unknown): unknown {
@@ -74,6 +75,13 @@ export function redactStringPatterns(content: string): string {
   sanitized = sanitized.replace(quotedUnquotedValRegex, '$1$2$1$3"[REDACTED]"');
 
   // 8. Unquoted key assignments (CLI output, env lines, key=value, key: value)
+  // Environment variable prefixes (GEMINI_API_KEY, DATABASE_URL,
+  // AGENT_LIFECYCLE_FINALIZER_DATABASE_URL, WORKER_LEASE_TOKEN) must not
+  // defeat the suffix-based credential policy below.
+  sanitized = sanitized.replace(
+    /\b((?:[A-Za-z][A-Za-z0-9_-]*[_-])?(?:api[_-]?key|token|secret|password|passwd|database[_-]?url|connection[_-]?string|credentials?(?:[_-]?encryption)?[_-]?key|private[_-]?key))(\s*[:=]\s*)(?!(?:\[REDACTED(?:_KEY)?\]|"\[REDACTED\]"|[A-Za-z0-9_-]+[:=]))(?:"([^"\r\n]*)"|'([^'\r\n]*)'|([^\s"',;}\]]+))/gi,
+    '$1$2[REDACTED]'
+  );
   const unquotedRegex = new RegExp(
     '\\b(' + SENSITIVE_KEY_NAMES + ')(\\s*[:=]\\s*)(?!(?:\\[REDACTED(?:_KEY)?\\]|"\\[REDACTED\\]"|[a-zA-Z0-9_\\-]+[:=]|(?:Bearer|Basic|Token)\\s+\\[REDACTED\\]))(?:["\']([^"\'\\r\\n]+)["\']|([^\\s"\',;}\\]]+))',
     'gi'
