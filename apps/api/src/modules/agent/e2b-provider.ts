@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import { Sandbox as SdkSandbox } from 'e2b';
-import type { CloudSandboxProviderClient, CreateSandboxParams } from './sandbox-adapter.js';
+import type { AllocationSettlement, CloudSandboxProviderClient, CreateSandboxParams } from './sandbox-adapter.js';
 import { isSafeRelativePath } from './tool-registry.js';
 import { sanitizeSandboxOutput } from './sandbox-adapter.js';
 import { redactSensitiveContent } from './redaction.js';
@@ -70,6 +70,10 @@ export interface E2bCreateOptions {
  */
 export interface E2bTransport {
   createSandbox(options: E2bCreateOptions): Promise<E2bSandboxHandle>;
+  /** Provider-side kill by durable ID. Missing support must remain an unknown cleanup outcome. */
+  destroySandbox?(sandboxId: string, options?: { readonly apiKey?: string; readonly domain?: string }): Promise<boolean>;
+  /** Finds running/paused sandboxes by durable metadata; absence remains pending, never proof of no allocation. */
+  resolveAllocation?(allocationOperationId: string, options?: { readonly apiKey?: string; readonly domain?: string }): Promise<AllocationSettlement>;
 }
 
 /**
@@ -160,7 +164,16 @@ export interface E2bSdkSeam {
         readonly metadata?: Record<string, string>;
       }
     ): Promise<E2bSdkSandboxInstance>;
-    kill?(sandboxId: string): Promise<boolean>;
+    kill?(sandboxId: string, opts?: { readonly apiKey?: string; readonly domain?: string }): Promise<boolean>;
+    list?(opts?: {
+      readonly apiKey?: string;
+      readonly domain?: string;
+      readonly query?: { readonly metadata?: Record<string, string> };
+      readonly limit?: number;
+    }): {
+      readonly hasNext: boolean;
+      nextItems(): Promise<readonly { readonly sandboxId: string; readonly metadata: Record<string, string> }[]>;
+    };
   };
 }
 
@@ -527,6 +540,50 @@ export function createRealE2bTransport(sdkSeam?: E2bSdkSeam): E2bTransport {
         },
       };
     },
+    async destroySandbox(
+      sandboxId: string,
+      options: { readonly apiKey?: string; readonly domain?: string } = {}
+    ): Promise<boolean> {
+      const killById = sdkSeam?.Sandbox.kill;
+      if (sdkSeam && typeof killById !== 'function') {
+        throw new Error('E2B SDK does not expose provider-side kill by sandbox ID');
+      }
+      return sdkSeam
+        ? await killById!(sandboxId, options)
+        : await SdkSandbox.kill(sandboxId, options);
+    },
+    async resolveAllocation(
+      allocationOperationId: string,
+      options: { readonly apiKey?: string; readonly domain?: string } = {}
+    ): Promise<AllocationSettlement> {
+      const listOptions = {
+        apiKey: options.apiKey,
+        domain: options.domain,
+        query: { metadata: { allocationOperationId } },
+        limit: 100,
+      };
+      if (sdkSeam && !sdkSeam.Sandbox.list) return { status: 'pending' };
+      const paginator = sdkSeam
+        ? sdkSeam.Sandbox.list!(listOptions)
+        : SdkSandbox.list(listOptions);
+      const matches: string[] = [];
+      while (paginator.hasNext) {
+        const page = await paginator.nextItems();
+        for (const sandbox of page) {
+          if (sandbox.metadata?.allocationOperationId === allocationOperationId) {
+            matches.push(sandbox.sandboxId);
+          }
+        }
+      }
+      const ids = [...new Set(matches)];
+      if (ids.length === 1) return { status: 'allocated', sandboxId: ids[0]! };
+      if (ids.length > 1) {
+        return { status: 'ambiguous', reason: 'Provider returned multiple sandboxes for one allocation operation' };
+      }
+      // E2B lists running/paused sandboxes only. A missing result cannot prove that
+      // an in-flight create request will not return later, so remain fail-closed.
+      return { status: 'pending' };
+    },
   };
 }
 
@@ -598,6 +655,7 @@ export type E2bProviderErrorCode =
   | 'NETWORK_ISOLATION_UNSUPPORTED'
   | 'SECURITY_VIOLATION'
   | 'SANDBOX_NOT_FOUND'
+  | 'SANDBOX_STATE_UNKNOWN'
   | 'EXECUTION_TIMEOUT'
   | 'EXECUTION_ABORTED'
   | 'PROVIDER_ERROR';
@@ -615,6 +673,7 @@ export class E2bProviderError extends Error {
 const FORBIDDEN_ENV_KEYS = new Set([
   'DATABASE_URL',
   'TEST_DATABASE_URL',
+  'AGENT_LIFECYCLE_FINALIZER_DATABASE_URL',
   'JWT_SECRET',
   'SESSION_SECRET',
   'CREDENTIAL_ENCRYPTION_KEY',
@@ -884,6 +943,10 @@ export class E2bCloudSandboxProviderClient implements CloudSandboxProviderClient
     return this.config.enabled === true;
   }
 
+  get isRealCloudProvider(): boolean {
+    return !this.config.transport;
+  }
+
   get isConfigured(): boolean {
     return this.config.enabled === true && Boolean(this.config.apiKey?.trim());
   }
@@ -899,6 +962,15 @@ export class E2bCloudSandboxProviderClient implements CloudSandboxProviderClient
     if (sbx.destroyed) return 'destroyed';
     if (sbx.handle.isOpen && !sbx.handle.isOpen()) return 'destroyed';
     return 'active';
+  }
+
+  async resolveAllocation(allocationOperationId: string): Promise<AllocationSettlement> {
+    const transport = this.config.transport ?? createRealE2bTransport();
+    if (!transport.resolveAllocation) return { status: 'pending' };
+    return transport.resolveAllocation(allocationOperationId, {
+      apiKey: this.config.apiKey,
+      domain: this.config.domain,
+    });
   }
 
   async createSandbox(
@@ -964,6 +1036,8 @@ export class E2bCloudSandboxProviderClient implements CloudSandboxProviderClient
         metadata: {
           workspaceId: params.workspaceId,
           ownerId: params.ownerId,
+          ...(params.allocationOperationId ? { allocationOperationId: params.allocationOperationId } : {}),
+          ...(params.attemptGeneration ? { attemptGeneration: params.attemptGeneration } : {}),
         },
         signal: params.signal,
       });
@@ -1197,9 +1271,27 @@ export class E2bCloudSandboxProviderClient implements CloudSandboxProviderClient
 
   async destroySandbox(sandboxId: string): Promise<void> {
     const sbx = this.activeSandboxes.get(sandboxId);
-    // Duplicate destroy idempotency: if not found or already destroyed, safely return without throwing
     if (!sbx) {
-      return;
+      if (this.recentlyDestroyed.has(sandboxId)) return;
+      const transport = this.config.transport ?? createRealE2bTransport();
+      if (!transport.destroySandbox) {
+        throw new E2bProviderError('SANDBOX_STATE_UNKNOWN', 'E2B sandbox is not in this process and provider-side destruction is unavailable');
+      }
+      try {
+        const destroyed = await transport.destroySandbox(sandboxId, {
+          apiKey: this.config.apiKey,
+          domain: this.config.domain,
+        });
+        if (destroyed !== true) {
+          throw new E2bProviderError('SANDBOX_STATE_UNKNOWN', 'E2B did not confirm destruction of the sandbox ID');
+        }
+        this.recentlyDestroyed.add(sandboxId);
+        return;
+      } catch (err) {
+        if (err instanceof E2bProviderError) throw err;
+        const raw = err instanceof Error ? err.message : String(err);
+        throw new E2bProviderError('PROVIDER_ERROR', `Failed to confirm E2B sandbox destruction: ${sanitizeSandboxOutput(raw, 1024)}`);
+      }
     }
 
     sbx.destroyAttempts = (sbx.destroyAttempts ?? 0) + 1;

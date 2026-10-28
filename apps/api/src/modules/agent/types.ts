@@ -153,3 +153,91 @@ export interface MessageInput {
 }
 
 export interface ListOptions { readonly limit: number; readonly cursor?: AgentCursor; readonly workspaceId?: string }
+
+export type SandboxLifecycleState =
+  | 'allocating'
+  | 'active'
+  | 'stopping'
+  | 'destroying'
+  | 'destroyed'
+  | 'cleanup_pending'
+  | 'failed';
+
+export type SandboxAllocationState =
+  | 'pending'
+  | 'allocated'
+  | 'failed'
+  | 'timed_out'
+  | 'aborted';
+
+export type SandboxCleanupState =
+  | 'none'
+  | 'pending'
+  | 'retry_scheduled'
+  | 'in_progress'
+  | 'completed'
+  | 'failed';
+
+export interface DurableSandboxSession {
+  readonly id: string;
+  readonly ownerId: string;
+  readonly workspaceId: string;
+  readonly runId: string;
+  readonly attemptNumber: number;
+  readonly attemptGeneration: string;
+  readonly mode: AgentMode;
+  readonly providerType: string;
+  readonly providerSessionId: string | null;
+  readonly lifecycleState: SandboxLifecycleState;
+  readonly allocationState: SandboxAllocationState;
+  readonly cleanupState: SandboxCleanupState;
+  readonly workerId: string;
+  readonly leaseToken: string;
+  readonly allocationIntentId: string;
+  readonly cleanupAttempts: number;
+  readonly nextCleanupRetryAt: string | null;
+  readonly cleanupLeaseToken?: string | null;
+  readonly cleanupLeaseExpiresAt?: string | null;
+  readonly cleanupWorkerId?: string | null;
+  readonly allocationExpiresAt: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly destroyedAt: string | null;
+  readonly diagnostics: Record<string, unknown>;
+  readonly verifiedChecks: readonly VerifiedCheck[];
+}
+
+export interface CreateSandboxAllocationInput {
+  readonly ownerId: string;
+  readonly workspaceId: string;
+  readonly runId: string;
+  readonly attemptNumber: number;
+  readonly mode: AgentMode;
+  readonly providerType: string;
+  readonly workerId: string;
+  readonly leaseToken: string;
+  readonly allocationTimeoutMs?: number;
+  readonly allocationIntentId?: string;
+}
+
+export type SandboxLifecycleOperationState = 'not_started' | 'in_progress' | 'ambiguous' | 'settled';
+
+export interface SandboxLifecycleOperation {
+  readonly id: string;
+  readonly sessionId: string;
+  readonly ownerId: string;
+  readonly workspaceId: string;
+  readonly runId: string;
+  readonly attemptNumber: number;
+  readonly generation: string;
+  readonly kind: 'allocation' | 'tool' | 'snapshot';
+  readonly state: SandboxLifecycleOperationState;
+  readonly outcome: 'resource' | 'no_resource' | null;
+  readonly providerResourceId: string | null;
+}
+
+export interface SandboxAttemptLifecycleSnapshot {
+  readonly fenced: boolean;
+  readonly session: DurableSandboxSession | null;
+  readonly operations: readonly SandboxLifecycleOperation[];
+}

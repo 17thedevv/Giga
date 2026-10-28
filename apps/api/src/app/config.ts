@@ -9,6 +9,7 @@ export interface AppConfig {
   readonly port: number;
   readonly databaseUrl?: string;
   readonly migrationDatabaseUrl?: string;
+  readonly agentLifecycleFinalizerDatabaseUrl?: string;
   readonly nodeEnv: 'development' | 'production' | 'test';
   readonly cookieSecure: boolean;
   readonly cookieSameSite: 'lax' | 'strict' | 'none';
@@ -133,22 +134,41 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   if (nodeEnv === 'production' && !migrationDatabaseUrl) {
     throw new Error('MIGRATION_DATABASE_URL is required in production mode to keep migration ownership separate from the API role.');
   }
-  if (nodeEnv === 'production' && databaseUrl && migrationDatabaseUrl) {
-    let runtimeIdentity: { username: string; database: string };
-    let migrationIdentity: { username: string; database: string };
-    try {
-      const runtimeUrl = new URL(databaseUrl);
-      const migrationUrl = new URL(migrationDatabaseUrl);
-      runtimeIdentity = { username: decodeURIComponent(runtimeUrl.username), database: runtimeUrl.pathname };
-      migrationIdentity = { username: decodeURIComponent(migrationUrl.username), database: migrationUrl.pathname };
-    } catch {
-      throw new Error('DATABASE_URL and MIGRATION_DATABASE_URL must be valid PostgreSQL connection URLs in production mode.');
+  const agentLifecycleFinalizerDatabaseUrl = env.AGENT_LIFECYCLE_FINALIZER_DATABASE_URL?.trim();
+  if (nodeEnv === 'production' && !agentLifecycleFinalizerDatabaseUrl) {
+    throw new Error('AGENT_LIFECYCLE_FINALIZER_DATABASE_URL is required in production mode for provider-authoritative sandbox lifecycle operations.');
+  }
+  const configuredDatabaseUrls = [
+    ['DATABASE_URL', databaseUrl],
+    ['MIGRATION_DATABASE_URL', migrationDatabaseUrl],
+    ['AGENT_LIFECYCLE_FINALIZER_DATABASE_URL', agentLifecycleFinalizerDatabaseUrl],
+  ] as const;
+  if (nodeEnv === 'production' || agentLifecycleFinalizerDatabaseUrl) {
+    const identities: Array<{ label: string; username: string; database: string }> = [];
+    for (const [label, value] of configuredDatabaseUrls) {
+      if (!value) continue;
+      let identity: { username: string; database: string };
+      try {
+        const url = new URL(value);
+        identity = { username: decodeURIComponent(url.username), database: url.pathname };
+      } catch {
+        throw new Error('DATABASE_URL, MIGRATION_DATABASE_URL and AGENT_LIFECYCLE_FINALIZER_DATABASE_URL must be valid PostgreSQL connection URLs.');
+      }
+      if (!identity.username) {
+        throw new Error(`${label} must identify a distinct PostgreSQL login role.`);
+      }
+      identities.push({ label, ...identity });
     }
-    if (!runtimeIdentity.username || !migrationIdentity.username || runtimeIdentity.username === migrationIdentity.username) {
-      throw new Error('DATABASE_URL and MIGRATION_DATABASE_URL must use distinct database login roles in production mode.');
-    }
-    if (runtimeIdentity.database !== migrationIdentity.database) {
-      throw new Error('DATABASE_URL and MIGRATION_DATABASE_URL must target the same database in production mode.');
+    for (let index = 0; index < identities.length; index++) {
+      const identity = identities[index]!;
+      for (const other of identities.slice(index + 1)) {
+        if (identity.username === other.username) {
+          throw new Error('DATABASE_URL, MIGRATION_DATABASE_URL and AGENT_LIFECYCLE_FINALIZER_DATABASE_URL must use distinct database login roles.');
+        }
+        if (identity.database !== other.database) {
+          throw new Error('DATABASE_URL, MIGRATION_DATABASE_URL and AGENT_LIFECYCLE_FINALIZER_DATABASE_URL must target the same database.');
+        }
+      }
     }
   }
 
@@ -170,6 +190,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     port,
     databaseUrl,
     ...(migrationDatabaseUrl ? { migrationDatabaseUrl } : {}),
+    ...(agentLifecycleFinalizerDatabaseUrl ? { agentLifecycleFinalizerDatabaseUrl } : {}),
     nodeEnv,
     cookieSecure,
     cookieSameSite,

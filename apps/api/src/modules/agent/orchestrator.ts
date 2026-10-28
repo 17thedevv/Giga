@@ -165,6 +165,9 @@ export class AgentOrchestrator {
         task: currentRun.task,
         modelId: currentRun.modelId,
         signal: runAbortController.signal,
+        workerId: this.workerId,
+        leaseToken,
+        attemptNumber: attemptCount,
       });
 
       if (!prep.available) {

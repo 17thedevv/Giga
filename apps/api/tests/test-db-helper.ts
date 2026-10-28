@@ -15,7 +15,8 @@ export function migrationsSupportedByTestDatabase(
   migrations: readonly Migration[] = MIGRATIONS
 ): readonly Migration[] {
   // pg-mem cannot model PostgreSQL roles, column privileges, SECURITY DEFINER
-  // procedures or the DO blocks in migration 015.
+  // procedures or the DO blocks in migration 015. Migration 016's fencing
+  // constraints are exercised in memory with its role grants stripped below.
   return isMemory ? migrations.filter((migration) => migration.version !== 15) : migrations;
 }
 
@@ -191,19 +192,39 @@ export async function createTestDatabase(migrations?: readonly Migration[]): Pro
     }
     if (/^\s*ROLLBACK\b/i.test(sql)) {
       if (activeTxBackup) {
-        activeTxBackup.restore();
+        try {
+          activeTxBackup.restore();
+        } catch {
+          // pg-mem cannot restore schema-changing migrations from a backup.
+          // Preserve the original migration error so tests report the real incompatibility.
+        }
         activeTxBackup = null;
       }
       return [];
     }
 
     // Intercept and strip PostgreSQL triggers/plpgsql DDL that pg-mem does not support
-    if (sql.includes('prevent_skill_versions_update') || sql.includes('CREATE TRIGGER')) {
+    if (
+      sql.includes('prevent_skill_versions_update') ||
+      sql.includes('CREATE TRIGGER') ||
+      sql.includes('CREATE OR REPLACE FUNCTION') ||
+      sql.includes('DO $$') ||
+      sql.includes('DO $lifecycle_')
+    ) {
       const stripped = sql
+        .replace(/DO \$(?:lifecycle_functions|lifecycle_privileges|[^$]*)\$[\s\S]*?\$(?:lifecycle_functions|lifecycle_privileges|[^$]*)\$;/gi, '')
+        .replace(/DO \$\$[\s\S]*?\$\$;/gi, '')
         .replace(/CREATE OR REPLACE FUNCTION[\s\S]*?LANGUAGE plpgsql;/gi, '')
+        .replace(/ALTER (?:TABLE|FUNCTION)[\s\S]*?OWNER TO [^;]+;/gi, '')
         .replace(/DROP TRIGGER[\s\S]*?;/gi, '')
-        .replace(/CREATE TRIGGER[\s\S]*?;/gi, '');
+        .replace(/CREATE TRIGGER[\s\S]*?;/gi, '')
+        .replace(/(?:GRANT|REVOKE)[\s\S]*?;/gi, '');
+      if (!stripped.trim()) return [];
       return db.public.many(stripped);
+    }
+    if (sql.includes('FOR UPDATE OF s SKIP LOCKED')) {
+      const rewritten = sql.replace(/FOR UPDATE OF s SKIP LOCKED/gi, 'FOR UPDATE SKIP LOCKED');
+      return db.public.many(rewritten);
     }
     // Intercept to_char with AT TIME ZONE in pg-mem which does not implement the AT TIME ZONE operator
     if (sql.includes('to_char(d.created_at')) {
@@ -262,6 +283,11 @@ export async function createTestDatabase(migrations?: readonly Migration[]): Pro
   await runMigrations(pool, memoryMigrations);
 
   const cleanup = async (): Promise<void> => {
+    try {
+      await pool.query('DELETE FROM agent_sandbox_lifecycle_operations;');
+      await pool.query('DELETE FROM agent_sandbox_sessions;');
+      await pool.query('DELETE FROM agent_sandbox_attempt_fences;');
+    } catch { /* Older migration fixtures do not contain sandbox lifecycle tables. */ }
     try {
       await pool.query('DELETE FROM agent_execution_usage_events;');
       await pool.query('DELETE FROM agent_execution_reservations;');

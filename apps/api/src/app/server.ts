@@ -12,6 +12,7 @@ import { createWebUi } from './web-ui.js';
 export interface StartServerOptions {
   readonly port?: number;
   readonly pool?: pg.Pool;
+  readonly lifecycleFinalizationPool?: pg.Pool;
   readonly config?: AppConfig;
   readonly skipMigrations?: boolean;
   readonly llmEngine?: LLMEngine;
@@ -21,6 +22,7 @@ export interface StartServerOptions {
 export async function startServer(options: StartServerOptions = {}): Promise<{
   server: ServerType;
   pool?: pg.Pool;
+  lifecycleFinalizationPool?: pg.Pool;
   port: number;
 }> {
   const config = options.config ?? loadConfig();
@@ -36,6 +38,8 @@ export async function startServer(options: StartServerOptions = {}): Promise<{
   const webUi = config.serveWeb ? createWebUi() : undefined;
 
   let pool = options.pool;
+  let lifecycleFinalizationPool = options.lifecycleFinalizationPool;
+  let ownsLifecycleFinalizationPool = false;
 
   if (!pool && config.databaseUrl) {
     if (!options.skipMigrations) {
@@ -57,32 +61,72 @@ export async function startServer(options: StartServerOptions = {}): Promise<{
 
     console.log(`[giga-api] Initializing API connection: ${redactDatabaseUrl(config.databaseUrl)}`);
     pool = createDatabasePool({ connectionString: config.databaseUrl });
-    if (config.nodeEnv === 'production') {
-      try {
-        const roles = await pool.query<{
-          is_superuser: boolean;
-          is_api_runtime: boolean;
-          is_quota_owner: boolean;
-          is_quota_finalizer: boolean;
-        }>(
-          'SELECT role.rolsuper AS is_superuser, ' +
-          "pg_has_role(current_user, 'giga_api_runtime', 'MEMBER') AS is_api_runtime, " +
-          "pg_has_role(current_user, 'giga_agent_quota_owner', 'MEMBER') AS is_quota_owner, " +
-          "pg_has_role(current_user, 'giga_agent_quota_finalizer', 'MEMBER') AS is_quota_finalizer " +
-          'FROM pg_roles AS role WHERE role.rolname = current_user'
-        );
-        if (!roles.rows[0] || roles.rows[0].is_superuser || !roles.rows[0].is_api_runtime ||
-            roles.rows[0].is_quota_owner || roles.rows[0].is_quota_finalizer) {
-          throw new Error('DATABASE_URL must use a non-superuser login granted giga_api_runtime and not a quota owner or finalizer role.');
-        }
-      } catch (err) {
-        await closeDatabasePool(pool);
-        pool = undefined;
-        throw err;
+  }
+
+  if (!lifecycleFinalizationPool && pool && config.agentLifecycleFinalizerDatabaseUrl) {
+    console.log(`[giga-api] Initializing provider-authoritative lifecycle connection: ${redactDatabaseUrl(config.agentLifecycleFinalizerDatabaseUrl)}`);
+    lifecycleFinalizationPool = createDatabasePool({ connectionString: config.agentLifecycleFinalizerDatabaseUrl });
+    ownsLifecycleFinalizationPool = true;
+  }
+  if (pool && config.nodeEnv === 'production') {
+    if (!lifecycleFinalizationPool) {
+      throw new Error('A dedicated provider-authoritative lifecycle finalization connection is required in production.');
+    }
+    try {
+      const roles = await pool.query<{
+        is_superuser: boolean;
+        is_api_runtime: boolean;
+        is_quota_owner: boolean;
+        is_quota_finalizer: boolean;
+        is_lifecycle_owner: boolean;
+        is_lifecycle_finalizer: boolean;
+      }>(
+        'SELECT role.rolsuper AS is_superuser, ' +
+        "pg_has_role(current_user, 'giga_api_runtime', 'MEMBER') AS is_api_runtime, " +
+        "pg_has_role(current_user, 'giga_agent_quota_owner', 'MEMBER') AS is_quota_owner, " +
+        "pg_has_role(current_user, 'giga_agent_quota_finalizer', 'MEMBER') AS is_quota_finalizer, " +
+        "pg_has_role(current_user, 'giga_agent_lifecycle_owner', 'MEMBER') AS is_lifecycle_owner, " +
+        "pg_has_role(current_user, 'giga_agent_lifecycle_finalizer', 'MEMBER') AS is_lifecycle_finalizer " +
+        'FROM pg_roles AS role WHERE role.rolname = current_user'
+      );
+      const runtimeRole = roles.rows[0];
+      if (!runtimeRole || runtimeRole.is_superuser || !runtimeRole.is_api_runtime ||
+          runtimeRole.is_quota_owner || runtimeRole.is_quota_finalizer ||
+          runtimeRole.is_lifecycle_owner || runtimeRole.is_lifecycle_finalizer) {
+        throw new Error('DATABASE_URL must use a non-superuser giga_api_runtime login without quota or lifecycle owner/finalizer membership.');
       }
+
+      const lifecycleRoles = await lifecycleFinalizationPool.query<{
+        is_superuser: boolean;
+        is_lifecycle_finalizer: boolean;
+        is_lifecycle_owner: boolean;
+        is_api_runtime: boolean;
+        is_quota_owner: boolean;
+        is_quota_finalizer: boolean;
+      }>(
+        'SELECT role.rolsuper AS is_superuser, ' +
+        "pg_has_role(current_user, 'giga_agent_lifecycle_finalizer', 'MEMBER') AS is_lifecycle_finalizer, " +
+        "pg_has_role(current_user, 'giga_agent_lifecycle_owner', 'MEMBER') AS is_lifecycle_owner, " +
+        "pg_has_role(current_user, 'giga_api_runtime', 'MEMBER') AS is_api_runtime, " +
+        "pg_has_role(current_user, 'giga_agent_quota_owner', 'MEMBER') AS is_quota_owner, " +
+        "pg_has_role(current_user, 'giga_agent_quota_finalizer', 'MEMBER') AS is_quota_finalizer " +
+        'FROM pg_roles AS role WHERE role.rolname = current_user'
+      );
+      const lifecycleRole = lifecycleRoles.rows[0];
+      if (!lifecycleRole || lifecycleRole.is_superuser || !lifecycleRole.is_lifecycle_finalizer ||
+          lifecycleRole.is_lifecycle_owner || lifecycleRole.is_api_runtime ||
+          lifecycleRole.is_quota_owner || lifecycleRole.is_quota_finalizer) {
+        throw new Error('AGENT_LIFECYCLE_FINALIZER_DATABASE_URL must use a non-superuser login granted only the dedicated lifecycle finalizer role.');
+      }
+    } catch (err) {
+      if (ownsLifecycleFinalizationPool) await closeDatabasePool(lifecycleFinalizationPool);
+      if (!options.pool && pool) await closeDatabasePool(pool);
+      throw err;
     }
   }
 
+  // Keep the provider-authoritative pool out of the public API route container.
+  // Trusted provider callbacks and cleanup workers must receive it explicitly.
   const app = createApp({
     pool,
     config,
@@ -101,5 +145,5 @@ export async function startServer(options: StartServerOptions = {}): Promise<{
     }
   );
 
-  return { server, pool, port };
+  return { server, pool, lifecycleFinalizationPool, port };
 }
