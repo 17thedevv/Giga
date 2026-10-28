@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { performance } from 'node:perf_hooks';
 import test from 'node:test';
 import { LLMEngine } from '../../src/modules/llm/engine.js';
 import { ProviderUnavailableError } from '../../src/modules/llm/errors.js';
@@ -195,6 +196,108 @@ test('context is bounded, secret-redacted, run-scoped and separated from server 
   assert.ok(!payload[1]!.content.includes(secret));
   assert.ok(!payload[1]!.content.includes(additionalSecret));
   assert.ok(Buffer.byteLength(payload[1]!.content, 'utf8') <= 32 * 1024);
+});
+
+test('secret values are absent from captured model payloads for every context source', async (t) => {
+  const credentials = [
+    ['AWS_SECRET_ACCESS_KEY', 'payload-secret-aws-9f08c7136a'],
+    ['STRIPE_SECRET_KEY', 'payload-secret-stripe-570ea24c19'],
+    ['SECRET_KEY', 'payload-secret-generic-2d39bc6214'],
+    ['GEMINI_API_KEY', 'payload-secret-gemini-e7014f5c32'],
+    ['AGENT_LIFECYCLE_FINALIZER_DATABASE_URL', 'payload-secret-lifecycle-361c0b09f7'],
+    ['AGENT_QUOTA_FINALIZER_DATABASE_URL', 'payload-secret-quota-8eb4a96d02'],
+    ['E2B_API_KEY', 'payload-secret-e2b-f2c6a73210'],
+    ['GITHUB_TOKEN', 'payload-secret-github-4d0e836b91'],
+    ['WORKER_LEASE_TOKEN', 'payload-secret-lease-913a4fbc52'],
+  ] as const;
+  const assignmentText = credentials.map(([name, value]) => `${name}=${value}`).join('\n');
+  const structuredCredentials = Object.fromEntries(credentials);
+  const sources: Array<{ readonly name: string; readonly overrides: Partial<AgentDecisionContext> }> = [
+    { name: 'run task', overrides: { task: assignmentText } },
+    {
+      name: 'conversation history',
+      overrides: {
+        conversationContext: {
+          messages: [{ runId: 'run-current-123', sequence: 1, role: 'user', content: assignmentText }],
+          totalBytes: Buffer.byteLength(assignmentText, 'utf8'),
+          isTruncated: false,
+        },
+      },
+    },
+    {
+      name: 'completed-step result and structured JSON/object keys',
+      overrides: {
+        completedSteps: [{
+          id: 'step-secrets', runId: 'run-current-123', stepNumber: 1, status: 'completed',
+          toolName: 'read_file', toolCallId: 'call-secrets', toolRisk: 'read', arguments: { path: 'secrets.txt' },
+          result: { environment: structuredCredentials, stdout: JSON.stringify(structuredCredentials) },
+          createdAt: new Date(0).toISOString(),
+        }],
+      },
+    },
+    {
+      name: 'lastStepResult latest observation',
+      overrides: {
+        lastStepResult: {
+          stepNumber: 1, toolName: 'read_file', toolCallId: 'call-secrets', success: true,
+          output: { environment: structuredCredentials, stdout: assignmentText },
+        },
+      },
+    },
+  ];
+
+  for (const source of sources) {
+    await t.test(source.name, async () => {
+      const fake = makeEngine([modelResult('{"kind":"complete","summary":"Safe answer"}')]);
+      const agent = new LLMBackedAgentDecisionProvider(fake.engine, createDefaultToolRegistry());
+      assert.equal((await agent.decide(context('execute', source.overrides))).kind, 'complete');
+
+      const messages = fake.provider.requests[0]!.messages;
+      const payload = JSON.stringify(messages);
+      const userContext = messages.find((message) => message.role === 'user')!.content;
+      for (const [name, value] of credentials) {
+        assert.equal(payload.includes(value), false, `${name} value reached the model request`);
+      }
+      assert.ok(userContext.includes('[REDACTED]'));
+      assert.ok(Buffer.byteLength(userContext, 'utf8') <= 32 * 1024);
+    });
+  }
+});
+
+test('oversized PEM private keys are redacted before truncation reaches the model payload', async () => {
+  const privateKeyBody = 'PRIVATE_KEY_BODY_MUST_NOT_REACH_MODEL_' + 'A'.repeat(20 * 1024);
+  const oversizedPem = `-----BEGIN PRIVATE KEY-----\n${privateKeyBody}\n-----END PRIVATE KEY-----`;
+  assert.ok(Buffer.byteLength(oversizedPem, 'utf8') > 16 * 1024);
+
+  const fake = makeEngine([modelResult('{"kind":"complete","summary":"Safe answer"}')]);
+  const agent = new LLMBackedAgentDecisionProvider(fake.engine, createDefaultToolRegistry());
+  assert.equal((await agent.decide(context('execute', { task: `Inspect this PEM: ${oversizedPem}` }))).kind, 'complete');
+
+  const messages = fake.provider.requests[0]!.messages;
+  const payload = JSON.stringify(messages);
+  const userContext = messages.find((message) => message.role === 'user')!.content;
+  assert.equal(payload.includes('-----BEGIN PRIVATE KEY-----'), false);
+  assert.equal(payload.includes('PRIVATE_KEY_BODY_MUST_NOT_REACH_MODEL'), false);
+  assert.ok(userContext.includes('[REDACTED_PRIVATE_KEY]'));
+  assert.ok(userContext.includes('[TRUNCATED]'));
+  assert.ok(Buffer.byteLength(userContext, 'utf8') <= 32 * 1024);
+});
+
+test('large attacker-controlled strings are bounded before shared redaction work', async () => {
+  const attackerControlled = '"AWS_SECRET_ACCESS_KEY":"attacker-controlled",'.repeat(250_000);
+  const fake = makeEngine([modelResult('{"kind":"complete","summary":"Safe answer"}')]);
+  const agent = new LLMBackedAgentDecisionProvider(fake.engine, createDefaultToolRegistry());
+
+  const startedAt = performance.now();
+  assert.equal((await agent.decide(context('execute', { task: attackerControlled }))).kind, 'complete');
+  const elapsedMs = performance.now() - startedAt;
+
+  const messages = fake.provider.requests[0]!.messages;
+  const payload = JSON.stringify(messages);
+  const userContext = messages.find((message) => message.role === 'user')!.content;
+  assert.ok(elapsedMs < 2000, `bounded sanitization took ${Math.round(elapsedMs)}ms`);
+  assert.equal(payload.includes('attacker-controlled'), false);
+  assert.ok(Buffer.byteLength(userContext, 'utf8') <= 32 * 1024);
 });
 
 test('oversized context is deterministically pruned and bounded before model invocation', async () => {

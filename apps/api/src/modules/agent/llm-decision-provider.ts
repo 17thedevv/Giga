@@ -4,7 +4,7 @@ import { LLMCancelledError, ProviderRateLimitError, ProviderUnavailableError } f
 import type { LLMRequest, ModelMessage, ModelMetadata, ModelResult, ReasoningEffort } from '../llm/types.js';
 import { AGENT_MODEL_ALIAS, type AgentMode } from './types.js';
 import type { AgentDecision, AgentDecisionContext, AgentDecisionProvider, AgentPlan } from './decision-provider.js';
-import { boundUtf8, isSensitiveKey } from './redaction.js';
+import { isSensitiveKey, sanitizeBoundedModelContext } from './redaction.js';
 import type { ToolRegistry } from './tool-registry.js';
 
 const MAX_CONTEXT_BYTES = 32 * 1024;
@@ -18,12 +18,6 @@ const MAX_HISTORY_MESSAGES = 12;
 const MAX_HISTORY_MESSAGE_BYTES = 4096;
 const MAX_STEP_OBSERVATIONS = 6;
 const MAX_OBSERVATION_BYTES = 4096;
-const SECRET_NAME = String.raw`(?:[A-Za-z][A-Za-z0-9_-]*[_-])?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|passwd|database[_-]?url|connection[_-]?string|credentials?(?:[_-]?encryption)?[_-]?key|private[_-]?key|authorization|cookie)`;
-const SECRET_ASSIGNMENT = new RegExp(
-  `(["']?)(${SECRET_NAME})\\1(\\s*[:=]\\s*)(?![A-Za-z0-9_-]+[:=])(?:(["'])([^"'\\r\\n]*)\\4|([^\\s"',;}\\]]+))`,
-  'gi',
-);
-
 export interface AgentLLMDecisionProviderOptions {
   readonly timeoutMs?: number;
   readonly maxOutputTokens?: number;
@@ -113,17 +107,7 @@ function plainRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function redactModelText(value: string, limit: number): string {
-  let text = boundUtf8(value, limit);
-  text = text
-    .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, '[REDACTED_PRIVATE_KEY]')
-    .replace(/([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)([^:\s/@]+):([^@\s/]+)@/gi, '$1$2:[REDACTED]@')
-    .replace(/([?&](?:api[_-]?key|key|token|auth|secret|password)=)[^&\s#]+/gi, '$1[REDACTED]')
-    .replace(SECRET_ASSIGNMENT, (_match, quote: string, name: string, separator: string, valueQuote: string | undefined) =>
-      quote + name + quote + separator + (valueQuote ?? '') + '[REDACTED]' + (valueQuote ?? ''))
-    .replace(/\b(?:Authorization\s*:\s*)?(?:Bearer|Basic|Token)\s+(?!\[REDACTED\])[A-Za-z0-9._~+/=-]{12,}/gi, 'Bearer [REDACTED]')
-    .replace(/\b(?:e2b|sk|ghp|gho|ghu|ghs|ghr|pat|xoxb|xoxp|xapp|glpat|npm|live|test)[-_][A-Za-z0-9_-]{8,}\b/gi, '[REDACTED_KEY]')
-    .replace(/\bAIza[0-9A-Za-z_-]{20,}\b/g, '[REDACTED_KEY]');
-  return boundUtf8(text, limit);
+  return sanitizeBoundedModelContext(value, limit);
 }
 
 function safeJsonValue(value: unknown, depth = 0, stringLimit = MAX_OBSERVATION_BYTES): unknown {
@@ -137,18 +121,26 @@ function safeJsonValue(value: unknown, depth = 0, stringLimit = MAX_OBSERVATION_
     return items;
   }
   if (!plainRecord(value)) return '[OMITTED_NON_JSON_VALUE]';
-  const entries = Object.entries(value).slice(0, 48);
   const output: Record<string, unknown> = {};
-  for (const [key, item] of entries) {
+  let entryCount = 0;
+  let truncated = false;
+  for (const key in value) {
+    if (!Object.hasOwn(value, key)) continue;
+    if (entryCount >= 48) {
+      truncated = true;
+      break;
+    }
+    entryCount++;
+    const item = value[key];
     output[key] = isSensitiveKey(key) ? '[REDACTED]' : safeJsonValue(item, depth + 1, stringLimit);
   }
-  if (Object.keys(value).length > entries.length) output.truncated = true;
+  if (truncated) output.truncated = true;
   return output;
 }
 
 function safeText(value: string, limit: number): string {
-  // Bound before running credential patterns so attacker-controlled output cannot
-  // force expensive regular-expression work on arbitrarily large strings.
+  // Shared sanitization bounds before pattern matching and bounds again after
+  // redaction, so arbitrary tool output cannot trigger unbounded regex work.
   return redactModelText(value, limit);
 }
 
