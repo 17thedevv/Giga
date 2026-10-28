@@ -6,6 +6,7 @@
 **Merged dependency:** PR #42, merge commit `207d78327fd58962dd9acdb4f2cf3048234df0d9`
 **Baseline 17T-71 commit:** `c98eb1d4d1f673aea8a92729592c71e2aff6ad73`
 **Lifecycle commits:** `b59b44f` (`fix(agent): fence sandbox allocation lifecycle per attempt`), `eb0d3e02b1a3913911a9c126abc31f96b263eada` (preserve active cleanup lease), `ceab433` (`fix(agent): enforce database sandbox lifecycle integrity`), `b1ba972` (`fix(agent): fence attempt before settling allocation failure`), `82323b4` (`fix(agent): close sandbox destruction trust boundary bypass`)
+**Provider-principal review-fix implementation commit:** `a77cdaed40db2ccc30f10db9af47617f4269b2df`
 **Review Fix (Database Lifecycle Integrity & Privilege Boundaries):**
 - Resolved Finding 1 (explicit operation-state transition matrix) and Finding 2 (prevent fabricated sandbox destruction & enforce least-privilege column grants).
 - Closed Bypass 1 (`stopping -> destroyed`): removed `stopping` from permissible predecessor states so only `destroying` under an active cleanup lease can finalize as `destroyed`.
@@ -43,7 +44,7 @@ Focused verification on local PostgreSQL 18.4 (`127.0.0.1:55471`, isolated test 
 - Agent Skills validator: passed for all 8 skills.
 - Git Workflow validator tests: **6 passed, 0 failed**.
 
-The final full API run completed **610 passed, 0 failed, 0 skipped** in 140.1s. It used `synchronous_commit=off` only on this disposable local test database to keep the Windows PostgreSQL run within the repository's existing 30-second suite timeouts; role, trigger, transaction, migration and application behavior were exercised on real PostgreSQL. This does not test crash durability. E2B adapter tests ran with the injected SDK seam and no provider network calls.
+The final full API run on implementation commit `a77cdaed40db2ccc30f10db9af47617f4269b2df` completed **610 passed, 0 failed, 0 skipped** in 120.5s. It used `synchronous_commit=off` only on this disposable local test database to keep the Windows PostgreSQL run within the repository's existing 30-second suite timeouts; role, trigger, transaction, migration and application behavior were exercised on real PostgreSQL. This does not test crash durability. E2B adapter tests ran with the injected SDK seam and no provider network calls.
 
 This document supersedes earlier 17T-71 evidence. In particular, allocation TTL, a missing in-process sandbox handle, or a lost provider response is not proof of quiescence. No pull request was merged; no live E2B call, cloud resource, deployment, or runtime enablement was used for this work.
 
@@ -94,7 +95,7 @@ All PostgreSQL checks below ran against an isolated local PostgreSQL 18.4 test d
 | API production build | `npm run build --prefix apps/api` | Passed, exit 0. |
 | Provider-authoritative finalizer boundary (Real PostgreSQL) | `npx tsx --test --test-concurrency=1 tests/agent/agent-sandbox-lifecycle-finalizer.test.ts` | **4 passed, 0 failed**. Runtime cannot call privileged functions or forge provider outcomes; dedicated finalizer records valid resource/absence/destruction; stale generations, wrong IDs/tokens, ambiguous outcomes and failed destruction are fenced; quota remains held until successful finalization. |
 | Combined lifecycle, sandbox, quota and migration suites (Real PostgreSQL) | `npx tsx --test --test-concurrency=1 tests/agent/agent-sandbox-lifecycle-finalizer.test.ts tests/agent/agent-sandbox-lifecycle-integrity.test.ts tests/agent/agent-sandbox-sessions.test.ts tests/agent/agent-quotas.test.ts tests/agent/agent-migration.test.ts` | **69 passed, 0 failed, 0 skipped**. |
-| Full API test suite (Real PostgreSQL) | `npm test` from `apps/api` | **610 passed, 0 failed, 0 skipped**; duration 140.1s. Used `synchronous_commit=off` only for the disposable local Windows test database. |
+| Full API test suite (Real PostgreSQL) | `npm test` from `apps/api` | **610 passed, 0 failed, 0 skipped**; duration 120.5s. Used `synchronous_commit=off` only for the disposable local Windows test database. |
 | GitHub Actions Workflow Validation | `validate-git-workflow.mjs` | **Passed** ([Run 40643004261](https://github.com/17thedevv/Giga/actions/runs/40643004261)). |
 | GitHub Actions Backend CI | GitHub Actions runner (Real PostgreSQL) | **Passed** ([Run 40643004271](https://github.com/17thedevv/Giga/actions/runs/40643004271)), all steps successful. |
 | Agent Skills validator | `node .agents/scripts/validate-skills.mjs` | Passed, all 8 skills valid. |
