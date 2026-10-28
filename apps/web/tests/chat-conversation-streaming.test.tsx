@@ -183,6 +183,8 @@ describe('17T-33 — GigaChat Conversation & Streaming UI Tests', () => {
         </ApiModeProvider>
       );
 
+      expect(Object.prototype.hasOwnProperty.call(window, '__mockDataAdapter')).toBe(false);
+
       await waitFor(() => {
         expect(screen.getByText(/No discussions yet/i)).toBeDefined();
       });
@@ -312,6 +314,70 @@ describe('17T-33 — GigaChat Conversation & Streaming UI Tests', () => {
   // Section 3: GigaChat Streaming Lifecycle & Invariants
   // =========================================================================
   describe('Real Mode Streaming Lifecycle', () => {
+    it('keeps a credential split across stream deltas out of rendered state and clipboard', async () => {
+      const activeConv: Conversation = {
+        id: 'conv_stream_redaction', title: 'Stream redaction',
+        createdAt: '2026-10-01T00:00:00.000Z', updatedAt: '2026-10-01T00:00:00.000Z',
+      };
+      const userMessage: Message = {
+        id: 'user-stream-redaction', conversationId: activeConv.id, role: 'user', content: 'Ask a question',
+        createdAt: activeConv.createdAt,
+      };
+      vi.spyOn(realApiClient, 'getMe').mockResolvedValue({ user: { id: 'u1', email: 'user@example.test', displayName: 'User' } });
+      vi.spyOn(realApiClient, 'listConversations').mockResolvedValue({ items: [activeConv], nextCursor: null });
+      vi.spyOn(realApiClient, 'getConversation').mockResolvedValue({ conversation: activeConv, messages: [userMessage] });
+      vi.spyOn(realApiClient, 'getTurnVariants').mockResolvedValue({ userMessageId: userMessage.id, selectedGenerationId: null, items: [] });
+
+      const ordinary = 'This ordinary streamed sentence remains visible before the credential: ';
+      const credential = 'AIzaSyntheticSplitStreamCredential0123456789';
+      let announceDeltas!: () => void;
+      let finishStream!: () => void;
+      const deltasReady = new Promise<void>(resolve => { announceDeltas = resolve; });
+      const completionGate = new Promise<void>(resolve => { finishStream = resolve; });
+      vi.spyOn(realApiClient, 'streamMessage').mockImplementation(async (_id, _content, onEvent) => {
+        onEvent({ event: 'message.started', data: { messageId: 'answer-redaction', generationId: 'generation-redaction', conversationId: activeConv.id } });
+        onEvent({ event: 'message.delta', data: { messageId: 'answer-redaction', generationId: 'generation-redaction', text: ordinary + 'AIzaSyntheticSplit' } });
+        onEvent({ event: 'message.delta', data: { messageId: 'answer-redaction', generationId: 'generation-redaction', text: 'StreamCredential0123456789 and ordinary text after it.' } });
+        announceDeltas();
+        await completionGate;
+        onEvent({ event: 'message.completed', data: { messageId: 'answer-redaction', generationId: 'generation-redaction', finishReason: 'stop' } });
+      });
+
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      const clipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+      Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+      try {
+        render(
+          <ApiModeProvider initialMode="real">
+            <AuthProvider>
+              <RouterProvider initialPath={`/chat/${activeConv.id}`}><ChatView /></RouterProvider>
+            </AuthProvider>
+          </ApiModeProvider>
+        );
+
+        await waitFor(() => expect(screen.getByPlaceholderText(/Message Giga/i)).toBeDefined());
+        const input = screen.getByPlaceholderText(/Message Giga/i) as HTMLTextAreaElement;
+        fireEvent.change(input, { target: { value: 'Ask a question' } });
+        fireEvent.submit(input.closest('form')!);
+        await deltasReady;
+
+        await waitFor(() => expect(document.body.textContent).toContain(ordinary));
+        expect(document.body.textContent).not.toContain(credential);
+        expect(document.body.textContent).not.toContain('AIzaSyntheticSplit');
+        expect(document.body.textContent).not.toContain('StreamCredential0123456789');
+
+        finishStream();
+        const expected = `${ordinary}[redacted credential] and ordinary text after it.`;
+        const copy = await screen.findByTestId('copy-btn-answer-redaction');
+        fireEvent.click(copy);
+        await waitFor(() => expect(writeText).toHaveBeenCalledWith(expected));
+        expect(document.body.textContent).not.toContain(credential);
+      } finally {
+        if (clipboardDescriptor) Object.defineProperty(navigator, 'clipboard', clipboardDescriptor);
+        else Reflect.deleteProperty(navigator, 'clipboard');
+      }
+    });
+
     it('streams assistant response with ordered delta accumulation and reconciles without duplicate user message', async () => {
       const activeConv: Conversation = {
         id: 'conv_streaming_1',

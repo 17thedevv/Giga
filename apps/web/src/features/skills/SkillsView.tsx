@@ -23,6 +23,25 @@ import {
 export type SkillsViewTab = 'skills' | 'personalization';
 export type SkillFilter = 'all' | 'installed' | 'built_in' | 'custom';
 
+type SkillDetail = SkillDefinition & { versions?: SkillVersion[]; installation?: SkillInstallation };
+
+function skillDetailToListItem(skill: SkillDetail): SkillListItem {
+  return {
+    id: skill.id,
+    ownerId: skill.ownerId,
+    slug: skill.slug,
+    title: skill.title,
+    description: skill.description,
+    visibility: skill.visibility,
+    supportedProducts: skill.supportedProducts,
+    ...(skill.revision !== undefined ? { revision: skill.revision } : {}),
+    createdAt: skill.createdAt,
+    installed: Boolean(skill.installation),
+    enabled: skill.installation?.enabled ?? false,
+    selectedVersionId: skill.installation?.selectedVersionId ?? null,
+  };
+}
+
 interface SkillsViewProps {
   initialTab?: SkillsViewTab;
 }
@@ -156,7 +175,7 @@ export const SkillsView: React.FC<SkillsViewProps> = ({ initialTab = 'skills' })
 
   // Load details callback for Detail Modal
   const handleLoadSkillDetail = async (id: string): Promise<{
-    skill: SkillDefinition & { versions?: SkillVersion[]; installation?: SkillInstallation };
+    skill: SkillDetail;
   }> => {
     if (mode === 'real') {
       return realApiClient.getSkill(id);
@@ -252,13 +271,10 @@ export const SkillsView: React.FC<SkillsViewProps> = ({ initialTab = 'skills' })
   // Reload latest version of skill for CAS conflict recovery
   const handleReloadLatestSkill = async (id: string): Promise<SkillListItem | undefined> => {
     await loadSkills();
-    if (mode === 'real') {
-      const res = await realApiClient.getSkill(id);
-      return res.skill as unknown as SkillListItem;
-    } else {
-      const res = await mockDataAdapter.getSkill(id);
-      return res.skill as unknown as SkillListItem;
-    }
+    const res = mode === 'real'
+      ? await realApiClient.getSkill(id)
+      : await mockDataAdapter.getSkill(id);
+    return skillDetailToListItem(res.skill);
   };
 
   // Delete skill flow

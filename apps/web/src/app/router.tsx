@@ -26,7 +26,11 @@ function matchRoute(currentPath: string, pattern: string): Record<string, string
 
     if (patternPart.startsWith(':')) {
       const paramName = patternPart.slice(1);
-      params[paramName] = decodeURIComponent(currentPart);
+      try {
+        params[paramName] = decodeURIComponent(currentPart);
+      } catch {
+        return null;
+      }
     } else if (patternPart !== currentPart) {
       return null;
     }

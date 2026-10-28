@@ -5,6 +5,7 @@ import { Button } from '../../components/Button.js';
 import { Modal } from '../../components/Modal.js';
 import { Alert } from '../../components/Alert.js';
 import { CheckIcon, ExternalLinkIcon, XIcon } from '../../components/Icons.js';
+import { safeGitHubPullRequestUrl } from '../../lib/security/untrusted-content.js';
 
 interface ApprovalBarProps {
   run: AgentRun;
@@ -109,11 +110,16 @@ export const ApprovalBar: React.FC<ApprovalBarProps> = ({
     }
 
     // REAL mode: Authenticated server confirmed remote write
-    if (run.result?.prUrl) {
-      const handleCopy = () => {
-        navigator.clipboard.writeText(run.result?.prUrl || '');
-        setCopied(true);
-        setTimeout(() => setCopied(false), 2000);
+    const prUrl = safeGitHubPullRequestUrl(run.result?.prUrl);
+    if (prUrl) {
+      const handleCopy = async () => {
+        try {
+          await navigator.clipboard.writeText(prUrl);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 2000);
+        } catch {
+          setCopied(false);
+        }
       };
 
       return (
@@ -133,13 +139,13 @@ export const ApprovalBar: React.FC<ApprovalBarProps> = ({
             <strong style={{ fontSize: '15px' }}>Pull Request Created on GitHub</strong>
           </div>
           <p style={{ fontSize: '13px', marginBottom: '12px', color: 'var(--giga-text-secondary, #94A3B8)' }}>
-            Autonomous coding agent finished execution and opened Pull Request #{run.result.prNumber} on {run.repository}.
+            Autonomous coding agent finished execution and opened Pull Request #{run.result?.prNumber} on {run.repository}.
           </p>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
             <a
-              href={run.result.prUrl}
+              href={prUrl}
               target="_blank"
-              rel="noreferrer"
+              rel="noopener noreferrer"
               style={{
                 display: 'inline-flex',
                 alignItems: 'center',
@@ -162,6 +168,9 @@ export const ApprovalBar: React.FC<ApprovalBarProps> = ({
           </div>
         </div>
       );
+    }
+    if (run.result?.prUrl) {
+      return <div data-testid="invalid-pr-link" role="status">The server returned an unsupported pull request link.</div>;
     }
   }
 

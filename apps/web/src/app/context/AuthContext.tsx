@@ -1,6 +1,13 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useLayoutEffect, useCallback } from 'react';
 import type { User } from '../../lib/api/types.js';
-import { realApiClient, ApiException } from '../../lib/api/client.js';
+import {
+  realApiClient,
+  ApiException,
+  SESSION_EXPIRED_EVENT,
+  advanceSessionGeneration,
+  getSessionGeneration,
+  isCurrentSessionGeneration,
+} from '../../lib/api/client.js';
 import { mockDataAdapter } from '../../lib/api/mock-adapter.js';
 import { useApiMode } from './ApiModeContext.js';
 
@@ -24,49 +31,67 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [sessionExpired, setSessionExpired] = useState<boolean>(false);
+  useEffect(() => {
+    if (mode !== 'real' || typeof window === 'undefined') return;
+    const invalidateSession = () => {
+      setUser(null);
+      setIsLoading(false);
+      setError(null);
+      setSessionExpired(false);
+    };
+    window.addEventListener(SESSION_EXPIRED_EVENT, invalidateSession);
+    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, invalidateSession);
+  }, [mode]);
 
   const checkSession = useCallback(async () => {
+    const generation = getSessionGeneration();
     setIsLoading(true);
     setError(null);
     try {
       if (mode === 'real') {
         const res = await realApiClient.getMe();
-        setUser(res.user);
+        if (isCurrentSessionGeneration(generation)) setUser(res.user);
       } else {
         const res = await mockDataAdapter.getMe();
-        setUser(res.user);
+        if (isCurrentSessionGeneration(generation)) setUser(res.user);
       }
     } catch (err: unknown) {
-      if (err instanceof ApiException && err.status === 401) {
-        setUser(null);
-      } else if (mode === 'real') {
-        // If real backend is offline or unauthenticated
-        setUser(null);
-      } else {
-        setUser(null);
+      if (isCurrentSessionGeneration(generation)) {
+        if (err instanceof ApiException && err.status === 401) {
+          setUser(null);
+        } else if (mode === 'real') {
+          // If real backend is offline or unauthenticated
+          setUser(null);
+        } else {
+          setUser(null);
+        }
       }
     } finally {
-      setIsLoading(false);
+      if (isCurrentSessionGeneration(generation)) setIsLoading(false);
     }
   }, [mode]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     let active = true;
+    // Mode transitions invalidate outstanding auth/API requests through the
+    // same generation used by the real API client; Mock and Real stay isolated.
+    const generation = advanceSessionGeneration();
     setIsLoading(true);
     setError(null);
+    const isCurrent = () => active && isCurrentSessionGeneration(generation);
     const run = async () => {
       try {
         if (mode === 'real') {
           const res = await realApiClient.getMe();
-          if (active) setUser(res.user);
+          if (isCurrent()) setUser(res.user);
         } else {
           const res = await mockDataAdapter.getMe();
-          if (active) setUser(res.user);
+          if (isCurrent()) setUser(res.user);
         }
       } catch {
-        if (active) setUser(null);
+        if (isCurrent()) setUser(null);
       } finally {
-        if (active) setIsLoading(false);
+        if (isCurrent()) setIsLoading(false);
       }
     };
     run();
@@ -78,42 +103,58 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const login = async (email: string, password: string) => {
     setIsLoading(true);
     setError(null);
+    let generation: number;
+    let loginRequest: Promise<{ user: User }>;
+    if (mode === 'real') {
+      // RealApiClient advances the generation synchronously when login begins.
+      loginRequest = realApiClient.login(email, password);
+      generation = getSessionGeneration();
+    } else {
+      generation = advanceSessionGeneration();
+      loginRequest = mockDataAdapter.login(email, password);
+    }
     try {
-      if (mode === 'real') {
-        const res = await realApiClient.login(email, password);
-        setUser(res.user);
-      } else {
-        const res = await mockDataAdapter.login(email, password);
-        setUser(res.user);
-      }
-      setSessionExpired(false);
+      const res = await loginRequest;
+      if (isCurrentSessionGeneration(generation)) setUser(res.user);
+      if (isCurrentSessionGeneration(generation)) setSessionExpired(false);
     } catch (err: unknown) {
-      if (err instanceof ApiException) {
-        setError(err.message || 'Authentication failed');
-      } else if (err instanceof Error) {
-        setError(err.message);
-      } else {
-        setError('Unexpected error during login');
+      if (isCurrentSessionGeneration(generation)) {
+        if (err instanceof ApiException) {
+          setError(err.message || 'Authentication failed');
+        } else if (err instanceof Error) {
+          setError(err.message);
+        } else {
+          setError('Unexpected error during login');
+        }
       }
       throw err;
     } finally {
-      setIsLoading(false);
+      if (isCurrentSessionGeneration(generation)) setIsLoading(false);
     }
   };
 
   const logout = async () => {
     setIsLoading(true);
+    let generation: number;
+    let logoutRequest: Promise<void>;
+    if (mode === 'real') {
+      // The real client advances before the request is sent, so a later login
+      // fences this response and its local state update.
+      logoutRequest = realApiClient.logout();
+      generation = getSessionGeneration();
+    } else {
+      generation = advanceSessionGeneration();
+      logoutRequest = mockDataAdapter.logout();
+    }
     try {
-      if (mode === 'real') {
-        await realApiClient.logout();
-      } else {
-        await mockDataAdapter.logout();
-      }
+      await logoutRequest;
     } catch {
       // Ignore logout errors and clear local state
     } finally {
-      setUser(null);
-      setIsLoading(false);
+      if (isCurrentSessionGeneration(generation)) {
+        setUser(null);
+        setIsLoading(false);
+      }
     }
   };
 

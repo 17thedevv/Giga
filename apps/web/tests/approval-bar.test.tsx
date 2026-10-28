@@ -107,6 +107,7 @@ describe('ApprovalBar Component Regression Tests', () => {
       expect(link).toBeDefined();
       expect(link.href).toBe('https://github.com/17thedevv/Giga/pull/99');
       expect(link.target).toBe('_blank');
+      expect(link.rel).toBe('noopener noreferrer');
     });
   });
 

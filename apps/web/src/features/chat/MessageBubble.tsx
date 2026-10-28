@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import type { Message } from '../../lib/api/types.js';
 import { CopyIcon, CheckIcon, RefreshCwIcon } from '../../components/Icons.js';
+import { sanitizeUntrustedText } from '../../lib/security/untrusted-content.js';
 
 interface MessageBubbleProps {
   message: Message;
@@ -17,9 +18,10 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
 }) => {
   const isUser = message.role === 'user';
   const [copied, setCopied] = useState(false);
+  const safeContent = sanitizeUntrustedText(message.content);
 
   const handleCopy = () => {
-    navigator.clipboard.writeText(message.content);
+    navigator.clipboard.writeText(safeContent);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -61,7 +63,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
           boxShadow: 'var(--giga-shadow-sm, 0 1px 2px rgba(0,0,0,0.05))',
         }}
       >
-        {message.content}
+        {safeContent}
         {isStreaming && (
           <span
             style={{

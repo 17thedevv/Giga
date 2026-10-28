@@ -1,12 +1,7 @@
 import type {
   ChatStreamEvent,
-  MessageStartedEventData,
-  MessageDeltaEventData,
-  MessageCompletedEventData,
-  StreamErrorEventData,
-  MessageFailedEventData,
-  MessageStoppedEventData,
 } from './types.js';
+import { sanitizeUntrustedText } from '../security/untrusted-content.js';
 
 export interface SseEvent<T = unknown> {
   id?: string;
@@ -16,14 +11,28 @@ export interface SseEvent<T = unknown> {
 
 export type SseEventHandler<T = unknown> = (event: SseEvent<T>) => void;
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+}
+
 export class SseValidationError extends Error {
   constructor(
     message: string,
-    public readonly event: string,
-    public readonly rawData: unknown
+    public readonly event: string
   ) {
     super(message);
     this.name = 'SseValidationError';
+  }
+}
+
+/** Limits are in UTF-16 code units: 64 Ki per incomplete line and 256 Ki per event payload. */
+export const MAX_SSE_LINE_CHARACTERS = 64 * 1024;
+export const MAX_SSE_EVENT_DATA_CHARACTERS = 256 * 1024;
+
+export class SseBufferLimitError extends Error {
+  constructor(public readonly limit: 'line' | 'event') {
+    super(limit === 'line' ? 'SSE line exceeded the configured size limit' : 'SSE event exceeded the configured size limit');
+    this.name = 'SseBufferLimitError';
   }
 }
 
@@ -48,74 +57,78 @@ export function validateChatStreamEvent(event: string, data: unknown): ChatStrea
     return null; // Ignore unknown event safely
   }
 
-  if (!data || typeof data !== 'object') {
-    throw new SseValidationError(
-      `Known event '${event}' payload must be a JSON object`,
-      event,
-      data
-    );
+  if (!isRecord(data)) {
+    throw new SseValidationError(`Known event '${event}' payload must be a JSON object`, event);
   }
 
-  const d = data as Record<string, unknown>;
-
-  if (typeof d.messageId !== 'string' || typeof d.generationId !== 'string') {
-    throw new SseValidationError(
-      `Known event '${event}' missing required 'messageId' or 'generationId'`,
-      event,
-      data
-    );
+  const messageId = data.messageId;
+  const generationId = data.generationId;
+  if (typeof messageId !== 'string' || typeof generationId !== 'string') {
+    throw new SseValidationError(`Known event '${event}' missing required 'messageId' or 'generationId'`, event);
   }
 
   switch (event) {
     case 'message.started':
-      if (typeof d.conversationId !== 'string') {
-        throw new SseValidationError(
-          `'message.started' event missing 'conversationId'`,
-          event,
-          data
-        );
+      if (typeof data.conversationId !== 'string') {
+        throw new SseValidationError(`'message.started' event missing 'conversationId'`, event);
       }
-      return { event: 'message.started', data: d as unknown as MessageStartedEventData };
+      return { event: 'message.started', data: { messageId, generationId, conversationId: data.conversationId } };
 
     case 'message.delta':
-      if (typeof d.text !== 'string') {
-        throw new SseValidationError(
-          `'message.delta' event missing required string 'text'`,
-          event,
-          data
-        );
+      if (typeof data.text !== 'string') {
+        throw new SseValidationError(`'message.delta' event missing required string 'text'`, event);
       }
-      return { event: 'message.delta', data: d as unknown as MessageDeltaEventData };
+      // Do not redact deltas independently: credentials can cross event boundaries.
+      // ChatView sanitizes the concatenated stream before putting text in UI state.
+      return { event: 'message.delta', data: { messageId, generationId, text: data.text } };
 
     case 'message.completed':
-      return { event: 'message.completed', data: d as unknown as MessageCompletedEventData };
+      if ((data.createdAt !== undefined && typeof data.createdAt !== 'string') || (data.finishReason !== undefined && typeof data.finishReason !== 'string')) {
+        throw new SseValidationError(`'message.completed' event contains invalid optional fields`, event);
+      }
+      return {
+        event: 'message.completed',
+        data: {
+          messageId,
+          generationId,
+          ...(typeof data.createdAt === 'string' ? { createdAt: data.createdAt } : {}),
+          ...(typeof data.finishReason === 'string' ? { finishReason: data.finishReason } : {}),
+        },
+      };
 
     case 'stream.error':
-      if (!d.error || typeof d.error !== 'object') {
-        throw new SseValidationError(
-          `'stream.error' event missing 'error' object`,
-          event,
-          data
-        );
+      if (!isRecord(data.error)) {
+        throw new SseValidationError(`'stream.error' event missing 'error' object`, event);
       }
-      return { event: 'stream.error', data: d as unknown as StreamErrorEventData };
+      return { event: 'stream.error', data: { messageId, generationId, error: safeStreamError(data.error, event) } };
 
     case 'message.failed':
-      if (!d.error || typeof d.error !== 'object') {
-        throw new SseValidationError(
-          `'message.failed' event missing 'error' object`,
-          event,
-          data
-        );
+      if (!isRecord(data.error)) {
+        throw new SseValidationError(`'message.failed' event missing 'error' object`, event);
       }
-      return { event: 'message.failed', data: d as unknown as MessageFailedEventData };
+      return { event: 'message.failed', data: { messageId, generationId, error: safeStreamError(data.error, event) } };
 
     case 'message.stopped':
-      return { event: 'message.stopped', data: d as unknown as MessageStoppedEventData };
+      if (data.finishReason !== undefined && typeof data.finishReason !== 'string') {
+        throw new SseValidationError(`'message.stopped' event contains invalid finishReason`, event);
+      }
+      return { event: 'message.stopped', data: { messageId, generationId, ...(typeof data.finishReason === 'string' ? { finishReason: data.finishReason } : {}) } };
 
     default:
       return null;
   }
+}
+
+function safeStreamError(value: unknown, event: string): { readonly code: string; readonly message: string } {
+  if (!isRecord(value)) throw new SseValidationError('Stream error payload must be an object', event);
+  const error = value;
+  if (typeof error.code !== 'string' || typeof error.message !== 'string') {
+    throw new SseValidationError('Stream error payload has invalid fields', event);
+  }
+  return {
+    code: /^[A-Za-z0-9_.-]{1,80}$/.test(error.code) ? error.code : 'STREAM_ERROR',
+    message: sanitizeUntrustedText(error.message).slice(0, 500),
+  };
 }
 
 /**
@@ -128,8 +141,10 @@ export class SseStreamParser {
   private currentEvent = 'message';
   private currentId?: string;
   private currentDataLines: string[] = [];
+  private currentDataCharacters = 0;
   private decoder?: TextDecoder;
   private terminalDispatched = false;
+  private failed = false;
 
   constructor(
     private readonly onEvent: SseEventHandler,
@@ -144,6 +159,7 @@ export class SseStreamParser {
    * Uses TextDecoder with streaming mode to handle multi-byte UTF-8 sequences.
    */
   feedBytes(chunk: Uint8Array): void {
+    if (this.failed) return;
     if (!this.decoder) {
       this.decoder = new TextDecoder('utf-8', { fatal: false });
     }
@@ -155,15 +171,53 @@ export class SseStreamParser {
    * Feed a new raw string chunk from the readable stream reader.
    */
   feed(chunk: string): void {
-    this.buffer += chunk;
+    if (this.failed || chunk.length === 0) return;
 
-    // Normalize Windows CRLF to LF and split lines
-    let newlineIndex: number;
-    while ((newlineIndex = this.buffer.indexOf('\n')) !== -1) {
-      const line = this.buffer.slice(0, newlineIndex).replace(/\r$/, '');
-      this.buffer = this.buffer.slice(newlineIndex + 1);
+    // Consume a chunk line by line. Check each fragment before copying it into
+    // the incomplete-line buffer so a large network chunk cannot be appended
+    // wholesale and retained before the limit is enforced.
+    let segmentStart = 0;
+    while (segmentStart < chunk.length) {
+      const newlineIndex = chunk.indexOf('\n', segmentStart);
+      const segmentEnd = newlineIndex === -1 ? chunk.length : newlineIndex;
+      if (!this.appendLineFragment(chunk, segmentStart, segmentEnd)) return;
+
+      if (newlineIndex === -1) return;
+
+      const line = this.buffer.endsWith('\r') ? this.buffer.slice(0, -1) : this.buffer;
+      this.buffer = '';
       this.processLine(line);
+      if (this.failed) return;
+      segmentStart = newlineIndex + 1;
     }
+  }
+
+  private appendLineFragment(chunk: string, start: number, end: number): boolean {
+    const fragmentLength = end - start;
+    if (this.buffer.length + fragmentLength > MAX_SSE_LINE_CHARACTERS) {
+      this.fail('line');
+      return false;
+    }
+    this.buffer += chunk.slice(start, end);
+    return true;
+  }
+
+  private fail(limit: 'line' | 'event'): void {
+    if (this.failed) return;
+    this.failed = true;
+    // Drop all retained input before reporting a generic error; never echo an
+    // oversized untrusted payload into logs or error objects.
+    this.buffer = '';
+    this.currentDataLines = [];
+    this.currentDataCharacters = 0;
+    this.currentEvent = 'message';
+    this.currentId = undefined;
+    const error = new SseBufferLimitError(limit);
+    if (this.options?.onError) {
+      this.options.onError(error);
+      return;
+    }
+    throw error;
   }
 
   private processLine(line: string): void {
@@ -195,6 +249,14 @@ export class SseStreamParser {
         this.currentEvent = value;
         break;
       case 'data':
+        {
+          const separatorLength = this.currentDataLines.length > 0 ? 1 : 0;
+          if (this.currentDataCharacters + separatorLength + value.length > MAX_SSE_EVENT_DATA_CHARACTERS) {
+            this.fail('event');
+            return;
+          }
+          this.currentDataCharacters += separatorLength + value.length;
+        }
         this.currentDataLines.push(value);
         break;
       case 'id':
@@ -207,8 +269,10 @@ export class SseStreamParser {
   }
 
   private dispatch(): void {
+    if (this.failed) return;
     if (this.currentDataLines.length === 0) {
       this.currentEvent = 'message';
+      this.currentDataCharacters = 0;
       return;
     }
 
@@ -224,6 +288,7 @@ export class SseStreamParser {
 
     // Reset buffer for next event
     this.currentDataLines = [];
+    this.currentDataCharacters = 0;
     this.currentEvent = 'message';
 
     const isTerminal = ['message.completed', 'message.failed', 'message.stopped'].includes(
@@ -259,16 +324,17 @@ export class SseStreamParser {
    * Flush any remaining buffered data at end of stream.
    */
   flush(): void {
+    if (this.failed) return;
     if (this.decoder) {
       const remaining = this.decoder.decode();
       if (remaining) {
         this.feed(remaining);
       }
     }
-    if (this.buffer.trim().length > 0) {
-      this.processLine(this.buffer);
-      this.buffer = '';
-    }
+    const pendingLine = this.buffer.endsWith('\r') ? this.buffer.slice(0, -1) : this.buffer;
+    this.buffer = '';
+    if (pendingLine.trim().length > 0) this.processLine(pendingLine);
+    if (this.failed) return;
     this.dispatch();
   }
 

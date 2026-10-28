@@ -973,7 +973,7 @@ describe('Workspace-First GigaAgent UX (17T-40)', () => {
       }).not.toThrow();
     });
 
-    it('P1 RunView: Real mode disables Cancel and Approval controls when capabilities are unavailable', async () => {
+    it('P1 RunView: Real mode disables Cancel and omits uncontracted Approval controls', async () => {
       // Mock capabilities with cancellation: false and externalApproval: false
       vi.spyOn(realApiClient, 'getAgentCapabilities').mockResolvedValue(defaultUnavailableCaps as any);
 
@@ -999,7 +999,8 @@ describe('Workspace-First GigaAgent UX (17T-40)', () => {
       expect(cancelBtn.title).toBe('Run cancellation is unavailable in Real Mode');
       firstMount.unmount();
 
-      // 2. Awaiting Approval status -> Approval action buttons disabled
+      // 2. The public AgentRun DTO has no approvalRequest. Ignore the legacy fixture field
+      // rather than surfacing an uncontracted action from a raw response.
       vi.spyOn(realApiClient, 'getAgentRun').mockResolvedValue({
         run: {
           id: 'real-run-approval',
@@ -1021,17 +1022,10 @@ describe('Workspace-First GigaAgent UX (17T-40)', () => {
       const secondMount = renderWithProviders(<AgentRunView />, '/agent/runs/real-run-approval', 'real');
 
       await waitFor(() => {
-        expect(screen.getByTestId('approval-action-card')).toBeDefined();
+        expect(screen.getByTestId('agent-run-view')).toBeDefined();
       });
-
-      const rejectBtn = screen.getByTestId('reject-approval-btn') as HTMLButtonElement;
-      const confirmBtn = screen.getByTestId('confirm-approval-btn') as HTMLButtonElement;
-
-      expect(rejectBtn.disabled).toBe(true);
-      expect(rejectBtn.title).toBe('Action approval is unavailable in Real Mode');
-
-      expect(confirmBtn.disabled).toBe(true);
-      expect(confirmBtn.title).toBe('Action approval is unavailable in Real Mode');
+      expect(screen.queryByTestId('approval-action-card')).toBeNull();
+      expect(screen.queryByTestId('confirm-approval-btn')).toBeNull();
 
       secondMount.unmount();
     });
@@ -1139,6 +1133,24 @@ describe('Workspace-First GigaAgent UX (17T-40)', () => {
       expect(screen.getByTestId('run-workspace-name').textContent).toContain('Analytics Pipeline Workspace');
       expect(screen.getByTestId('demo-run-badge').textContent).toBe('DEMO SIMULATION');
       expect(screen.queryByText('Run not found in workspace session.')).toBeNull();
+    });
+
+    it('redacts credential-shaped values before demo workspace data is persisted or rehydrated', () => {
+      const workspace = workspaceFixtureStore.createWorkspace('Credential privacy test');
+      const sentinel = 'AIzaSyntheticStorageSentinelKey0123456789';
+      const run = workspaceFixtureStore.createDemoRun({
+        workspaceId: workspace.id,
+        task: `Review key ${sentinel} and DATABASE_URL=postgres://demo:synthetic@db.example/giga`,
+        mode: 'plan',
+      });
+      const persisted = localStorage.getItem(DEMO_STORAGE_KEY_RUNS) ?? '';
+      expect(persisted).not.toContain(sentinel);
+      expect(persisted).not.toContain('postgres://');
+
+      workspaceFixtureStore.rehydrateFromStorage();
+      const restored = workspaceFixtureStore.getRun(run.id);
+      expect(restored?.task).toContain('[redacted credential]');
+      expect(restored?.task).toContain('[redacted connection URL]');
     });
 
     it('renders persisted workspaces and runs in AgentLauncherView after browser refresh', async () => {
