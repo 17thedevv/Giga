@@ -9,7 +9,9 @@ import { AGENT_ERROR_CODES, type AgentRun } from './types.js';
 export interface OrchestratorOptions {
   readonly workerId?: string;
   readonly maxSteps?: number;
+  readonly maxDecisions?: number;
   readonly maxRepairs?: number;
+  readonly maxIdenticalToolCalls?: number;
   readonly leaseDurationMs?: number;
 }
 
@@ -20,71 +22,103 @@ export type OrchestrationOutcome =
   | { readonly status: 'skipped'; readonly reason: string }
   | { readonly status: 'fenced'; readonly reason: string };
 
+function hasExactKeys(value: unknown, allowed: readonly string[], required: readonly string[] = allowed): value is Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const keys = Object.keys(value);
+  return keys.every((key) => allowed.includes(key)) && required.every((key) => Object.hasOwn(value, key));
+}
+
 function validateDecision(decision: AgentDecision): { valid: true } | { valid: false; error: string } {
-  if (!decision || typeof decision !== 'object' || !('kind' in decision)) {
+  if (!decision || typeof decision !== 'object' || Array.isArray(decision) || !('kind' in decision)) {
     return { valid: false, error: 'Malformed decision: object with kind required' };
   }
   switch (decision.kind) {
     case 'plan': {
-      if (!decision.plan || typeof decision.plan !== 'object') {
+      if (!hasExactKeys(decision, ['kind', 'plan']) || !hasExactKeys(decision.plan, ['version', 'steps'])) {
         return { valid: false, error: 'Malformed plan: plan object required' };
       }
-      if (typeof decision.plan.version !== 'number' || decision.plan.version < 1) {
+      if (!Number.isSafeInteger(decision.plan.version) || (decision.plan.version as number) < 1) {
         return { valid: false, error: 'Malformed plan: version must be integer >= 1' };
       }
       if (!Array.isArray(decision.plan.steps) || decision.plan.steps.length === 0 || decision.plan.steps.length > 20) {
         return { valid: false, error: 'Malformed plan: steps must be array of 1..20 items' };
       }
       for (const s of decision.plan.steps) {
-        if (typeof s !== 'string' || s.trim().length === 0 || s.length > 256) {
+        if (typeof s !== 'string' || s.trim().length === 0 || Buffer.byteLength(s, 'utf8') > 256) {
           return { valid: false, error: 'Malformed plan step: each step must be string <= 256 chars' };
         }
       }
       return { valid: true };
     }
     case 'tool_call': {
-      if (!decision.toolCall || typeof decision.toolCall !== 'object') {
+      if (!hasExactKeys(decision, ['kind', 'toolCall']) || !hasExactKeys(decision.toolCall, ['toolCallId', 'toolName', 'arguments'])) {
         return { valid: false, error: 'Malformed tool_call: toolCall object required' };
       }
       const { toolCallId, toolName, arguments: args } = decision.toolCall;
-      if (typeof toolCallId !== 'string' || toolCallId.trim().length === 0 || toolCallId.length > 64) {
+      if (typeof toolCallId !== 'string' || toolCallId.trim().length === 0 || Buffer.byteLength(toolCallId, 'utf8') > 64) {
         return { valid: false, error: 'Malformed toolCallId: must be non-empty string <= 64 chars' };
       }
       if (!/^[a-zA-Z0-9_-]+$/.test(toolCallId)) {
         return { valid: false, error: 'Malformed toolCallId: must contain only alphanumeric, _, -' };
       }
-      if (typeof toolName !== 'string' || toolName.trim().length === 0 || toolName.length > 64) {
+      if (typeof toolName !== 'string' || toolName.trim().length === 0 || Buffer.byteLength(toolName, 'utf8') > 64) {
         return { valid: false, error: 'Malformed toolName: must be non-empty string <= 64 chars' };
       }
-      if (args === undefined || typeof args !== 'object' || Array.isArray(args)) {
+      if (args === undefined || args === null || typeof args !== 'object' || Array.isArray(args)) {
         return { valid: false, error: 'Malformed tool arguments: must be an object' };
       }
       return { valid: true };
     }
     case 'complete': {
-      if (typeof decision.summary !== 'string' || decision.summary.trim().length === 0 || decision.summary.length > 2048) {
+      if (!hasExactKeys(decision, ['kind', 'summary', 'verifiedChecks'], ['kind', 'summary'])) {
+        return { valid: false, error: 'Malformed completion: unknown field' };
+      }
+      if (typeof decision.summary !== 'string' || decision.summary.trim().length === 0 || Buffer.byteLength(decision.summary, 'utf8') > 2048) {
         return { valid: false, error: 'Malformed completion summary: must be non-empty string <= 2048 chars' };
+      }
+      if (decision.verifiedChecks !== undefined) {
+        if (!Array.isArray(decision.verifiedChecks) || decision.verifiedChecks.length > 32) return { valid: false, error: 'Malformed completion checks' };
+        for (const check of decision.verifiedChecks) {
+          if (!hasExactKeys(check, ['name', 'outcome', 'summary'], ['name', 'outcome']) ||
+              typeof check.name !== 'string' || Buffer.byteLength(check.name, 'utf8') > 128 ||
+              !['passed', 'failed', 'not_run'].includes(String(check.outcome)) ||
+              (check.summary !== undefined && (typeof check.summary !== 'string' || Buffer.byteLength(check.summary, 'utf8') > 512))) {
+            return { valid: false, error: 'Malformed completion checks' };
+          }
+        }
       }
       return { valid: true };
     }
     case 'fail': {
+      if (!hasExactKeys(decision, ['kind', 'code', 'message'])) return { valid: false, error: 'Malformed failure: unknown field' };
       if (typeof decision.code !== 'string' || decision.code.length === 0 || decision.code.length > 40) {
         return { valid: false, error: 'Malformed failure code: must be non-empty string <= 40 chars' };
       }
-      if (typeof decision.message !== 'string' || decision.message.length === 0 || decision.message.length > 1024) {
+      if (typeof decision.message !== 'string' || decision.message.length === 0 || Buffer.byteLength(decision.message, 'utf8') > 1024) {
         return { valid: false, error: 'Malformed failure message: must be non-empty string <= 1024 chars' };
       }
       return { valid: true };
     }
     default:
-      return { valid: false, error: `Unknown decision kind: ${(decision as { kind: string }).kind}` };
+      return { valid: false, error: 'Unknown decision kind' };
   }
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return '[' + value.map(canonicalJson).join(',') + ']';
+  if (value && typeof value === 'object') {
+    const object = value as Record<string, unknown>;
+    return '{' + Object.keys(object).sort().map((key) => JSON.stringify(key) + ':' + canonicalJson(object[key])).join(',') + '}';
+  }
+  return JSON.stringify(value);
 }
 
 export class AgentOrchestrator {
   private readonly workerId: string;
   private readonly maxSteps: number;
+  private readonly maxDecisions: number;
   private readonly maxRepairs: number;
+  private readonly maxIdenticalToolCalls: number;
   private readonly leaseDurationMs: number;
 
   constructor(
@@ -96,8 +130,14 @@ export class AgentOrchestrator {
   ) {
     this.workerId = options.workerId ?? `worker-${crypto.randomUUID()}`;
     this.maxSteps = options.maxSteps ?? 30;
+    this.maxDecisions = options.maxDecisions ?? 60;
     this.maxRepairs = options.maxRepairs ?? 3;
+    this.maxIdenticalToolCalls = options.maxIdenticalToolCalls ?? 3;
     this.leaseDurationMs = options.leaseDurationMs ?? 30000;
+    if (![this.maxSteps, this.maxDecisions, this.maxIdenticalToolCalls, this.leaseDurationMs].every((value) => Number.isSafeInteger(value) && value > 0) ||
+        !Number.isSafeInteger(this.maxRepairs) || this.maxRepairs < 0) {
+      throw new Error('Agent orchestrator limits must be positive safe integers');
+    }
   }
 
   /**
@@ -186,6 +226,8 @@ export class AgentOrchestrator {
         let lastStepResult: StepObservation | undefined;
         let currentPlan: AgentPlan | undefined;
         let repairCount = 0;
+        let decisionCount = 0;
+        const equivalentToolCalls = new Map<string, number>();
 
         while (true) {
           if (runAbortController.signal.aborted) {
@@ -202,6 +244,15 @@ export class AgentOrchestrator {
             return { status: 'failed', run: finalized.run };
           }
 
+          if (decisionCount >= this.maxDecisions) {
+            const finalized = await this.repository.finalizeRun(ownerId, runId, leaseToken, {
+              status: 'failed',
+              errorCode: 'STEP_LIMIT_EXCEEDED',
+              errorMessage: `Exceeded maximum allowed decision limit of ${this.maxDecisions}`,
+            });
+            return { status: 'failed', run: finalized.run };
+          }
+
           // Proactively renew lease before decision provider invocation
           const renewedBeforeDecision = await this.repository.renewLease(ownerId, runId, leaseToken, this.leaseDurationMs);
           if (!renewedBeforeDecision) {
@@ -210,25 +261,49 @@ export class AgentOrchestrator {
           }
 
           const conversationContext = await this.repository.getConversationContext(ownerId, runId);
+          if (runAbortController.signal.aborted) {
+            const finalized = await this.repository.finalizeRun(ownerId, runId, leaseToken, { status: 'cancelled' });
+            return { status: 'cancelled', run: finalized.run };
+          }
           const currentRunMessages = conversationContext.messages.filter((m) => !m.runId || m.runId === runId);
           const maxProcessedRunSequence = currentRunMessages.length > 0
             ? Math.max(...currentRunMessages.map((m) => m.sequence))
             : 0;
 
-          const decision = await this.decisionProvider.decide({
-            runId,
-            workspaceId: currentRun.workspaceId,
-            ownerId,
-            task: currentRun.task,
-            mode: currentRun.mode,
-            modelId: currentRun.modelId,
-            currentPlan,
-            completedSteps,
-            lastStepResult,
-            attemptCount,
-            signal: runAbortController.signal,
-            conversationContext,
-          });
+          decisionCount++;
+          let decision: AgentDecision;
+          try {
+            decision = await this.decisionProvider.decide({
+              runId,
+              workspaceId: currentRun.workspaceId,
+              ownerId,
+              task: currentRun.task,
+              mode: currentRun.mode,
+              modelId: currentRun.modelId,
+              currentPlan,
+              completedSteps,
+              lastStepResult,
+              attemptCount,
+              signal: runAbortController.signal,
+              conversationContext,
+            });
+          } catch {
+            if (runAbortController.signal.aborted) {
+              const finalized = await this.repository.finalizeRun(ownerId, runId, leaseToken, { status: 'cancelled' });
+              return { status: 'cancelled', run: finalized.run };
+            }
+            const finalized = await this.repository.finalizeRun(ownerId, runId, leaseToken, {
+              status: 'failed',
+              errorCode: 'RUNTIME_UNAVAILABLE',
+              errorMessage: 'Agent decision provider is unavailable',
+            });
+            return { status: 'failed', run: finalized.run };
+          }
+
+          if (runAbortController.signal.aborted) {
+            const finalized = await this.repository.finalizeRun(ownerId, runId, leaseToken, { status: 'cancelled' });
+            return { status: 'cancelled', run: finalized.run };
+          }
 
           // Validate decision structure and field bounds
           const decisionValidation = validateDecision(decision);
@@ -355,6 +430,29 @@ export class AgentOrchestrator {
               continue;
             }
 
+            const equivalenceKey = toolValidation.tool.name + ':' + canonicalJson(toolValidation.args);
+            const equivalentCount = (equivalentToolCalls.get(equivalenceKey) ?? 0) + 1;
+            equivalentToolCalls.set(equivalenceKey, equivalentCount);
+            if (equivalentCount > this.maxIdenticalToolCalls) {
+              const finalized = await this.repository.finalizeRun(ownerId, runId, leaseToken, {
+                status: 'failed',
+                errorCode: 'POLICY_VIOLATION',
+                errorMessage: 'Repeated equivalent tool calls exceeded the server limit',
+              });
+              return { status: 'failed', run: finalized.run };
+            }
+
+            // Refresh fencing before persisting or dispatching a model-proposed action.
+            const renewedBeforeInvoke = await this.repository.renewLease(ownerId, runId, leaseToken, this.leaseDurationMs);
+            if (!renewedBeforeInvoke) {
+              runAbortController.abort();
+              return { status: 'fenced', reason: 'Worker lease expired before tool execution' };
+            }
+            if (runAbortController.signal.aborted) {
+              const finalized = await this.repository.finalizeRun(ownerId, runId, leaseToken, { status: 'cancelled' });
+              return { status: 'cancelled', run: finalized.run };
+            }
+
             // Valid tool and arguments: record step started
             const { step } = await this.repository.recordStepStarted(ownerId, runId, leaseToken, {
               toolName: toolValidation.tool.name,
@@ -363,11 +461,12 @@ export class AgentOrchestrator {
               arguments: toolValidation.args,
             });
 
-            // Proactively renew lease before tool execution
-            const renewedBeforeInvoke = await this.repository.renewLease(ownerId, runId, leaseToken, this.leaseDurationMs);
-            if (!renewedBeforeInvoke) {
-              runAbortController.abort();
-              return { status: 'fenced', reason: 'Worker lease expired before tool execution' };
+            if (runAbortController.signal.aborted) {
+              await this.repository.recordStepFailed(ownerId, runId, leaseToken, step.stepNumber, {
+                errorCode: 'ABORTED', errorMessage: 'Execution was cancelled before tool dispatch',
+              });
+              const finalized = await this.repository.finalizeRun(ownerId, runId, leaseToken, { status: 'cancelled' });
+              return { status: 'cancelled', run: finalized.run };
             }
 
             const result = await this.executionRuntime.invoke(

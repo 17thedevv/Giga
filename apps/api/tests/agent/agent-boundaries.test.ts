@@ -9,7 +9,7 @@ import { AgentService } from '../../src/modules/agent/service.js';
 import { AGENT_MODEL_ALIAS } from '../../src/modules/agent/types.js';
 import { UnavailableExecutionRuntime, type ExecutionRuntime } from '../../src/modules/agent/execution-runtime.js';
 
-it('execution port returns unavailable without executing task text; Agent sources contain no host execution or Chat/provider path', async () => {
+it('execution port remains unavailable; Agent sources contain no host execution, Chat service, or BYOK path', async () => {
   const runtime: ExecutionRuntime = new UnavailableExecutionRuntime();
   assert.deepEqual(await runtime.prepare({ runId: randomUUID(), workspaceId: randomUUID(), ownerId: randomUUID(),
     mode: 'execute', task: 'run arbitrary host commands', modelId: AGENT_MODEL_ALIAS, signal: new AbortController().signal }),
@@ -22,7 +22,7 @@ it('execution port returns unavailable without executing task text; Agent source
     const visit = (node: ts.Node): void => {
       if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
         const imported = node.moduleSpecifier.text;
-        assert.doesNotMatch(imported, /child_process|worker_threads|node:vm|node:fs|shell|execa|cross-spawn|\/chat\/|\/credentials\/|\/llm\//);
+        assert.doesNotMatch(imported, /child_process|worker_threads|node:vm|node:fs|shell|execa|cross-spawn|\/chat\/|\/credentials\/|\/llm\/(?:byok|credentials)\//);
       }
       if (ts.isCallExpression(node) || ts.isNewExpression(node)) {
         assert.doesNotMatch(node.expression.getText(source), /^(eval|Function|require|import)$|process\.(binding|dlopen)/);
