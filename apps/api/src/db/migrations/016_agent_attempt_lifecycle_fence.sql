@@ -1,6 +1,24 @@
 -- Migration 016: durable exact-attempt fence and provider/runtime operation ledger.
 -- A missing in-memory sandbox is never treated as proof that allocation stopped.
 
+DO $$
+DECLARE
+    migration_login NAME := current_user;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'giga_agent_lifecycle_owner') THEN
+        EXECUTE 'CREATE ROLE giga_agent_lifecycle_owner NOLOGIN NOINHERIT';
+    ELSIF (SELECT rolcanlogin FROM pg_roles WHERE rolname = 'giga_agent_lifecycle_owner') THEN
+        RAISE EXCEPTION 'giga_agent_lifecycle_owner must be a NOLOGIN role';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'giga_api_runtime') THEN
+        EXECUTE 'CREATE ROLE giga_api_runtime NOLOGIN NOINHERIT';
+    ELSIF (SELECT rolcanlogin FROM pg_roles WHERE rolname = 'giga_api_runtime') THEN
+        RAISE EXCEPTION 'giga_api_runtime must be a NOLOGIN role';
+    END IF;
+    EXECUTE format('GRANT giga_agent_lifecycle_owner TO %I', migration_login);
+END;
+$$;
+
 CREATE TABLE agent_sandbox_attempt_fences (
     owner_id UUID NOT NULL,
     workspace_id UUID NOT NULL,
@@ -114,6 +132,9 @@ DECLARE
     fence_row agent_sandbox_attempt_fences%ROWTYPE;
 BEGIN
     IF TG_OP = 'INSERT' THEN
+        IF NEW.lifecycle_state <> 'allocating' OR NEW.allocation_state <> 'pending' OR NEW.destroyed_at IS NOT NULL THEN
+            RAISE EXCEPTION 'New sandbox sessions must start in allocating state';
+        END IF;
         -- Consistent lock order for allocation admission and fencing: run, then attempt fence.
         PERFORM 1 FROM agent_runs
          WHERE owner_id = NEW.owner_id AND workspace_id = NEW.workspace_id AND id = NEW.run_id
@@ -150,6 +171,12 @@ DECLARE
     fence_row agent_sandbox_attempt_fences%ROWTYPE;
 BEGIN
     IF TG_OP = 'INSERT' THEN
+        IF NEW.operation_kind = 'allocation' THEN
+            IF NEW.state <> 'not_started' OR NEW.outcome IS NOT NULL OR NEW.provider_resource_id IS NOT NULL OR NEW.settled_at IS NOT NULL THEN
+                RAISE EXCEPTION 'New allocation operations must start in not_started state without outcome or provider resource ID';
+            END IF;
+        END IF;
+
         -- Match the same lock order as attempt fencing, even for direct SQL inserts.
         PERFORM 1 FROM agent_runs
          WHERE owner_id = NEW.owner_id AND workspace_id = NEW.workspace_id AND id = NEW.run_id
@@ -180,6 +207,13 @@ BEGIN
 
         -- 3. Explicit Operation-State Transition Matrix
         IF OLD.operation_kind = 'allocation' THEN
+            -- Authoritative settlement requires the controlled database routine
+            IF NEW.state = 'settled' AND OLD.state <> 'settled' THEN
+                IF current_user <> 'giga_agent_lifecycle_owner' THEN
+                    RAISE EXCEPTION 'Agent sandbox allocation settlement requires the controlled database operation';
+                END IF;
+            END IF;
+
             IF OLD.state = 'not_started' THEN
                 IF NEW.state = 'in_progress' THEN
                     PERFORM 1 FROM agent_runs
@@ -334,17 +368,24 @@ BEGIN
         END IF;
     END IF;
 
-    -- 3. Transition into 'destroying' requires active cleanup lease
+    -- 3. Transition into 'destroying' requires active cleanup lease and controlled operation
     IF NEW.lifecycle_state = 'destroying' AND OLD.lifecycle_state <> 'destroying' THEN
+        IF current_user <> 'giga_agent_lifecycle_owner' THEN
+            RAISE EXCEPTION 'Claiming sandbox cleanup lease requires the controlled database operation';
+        END IF;
         IF NEW.cleanup_state <> 'in_progress' OR NEW.cleanup_lease_expires_at IS NULL OR NEW.cleanup_lease_expires_at <= NOW() THEN
             RAISE EXCEPTION 'Transition to destroying requires active cleanup lease';
         END IF;
     END IF;
 
-    -- 4. Transition into 'destroyed' requires verified invariants
+    -- 4. Transition into 'destroyed' requires verified invariants and controlled operation
     IF NEW.lifecycle_state = 'destroyed' AND OLD.lifecycle_state <> 'destroyed' THEN
-        -- 4a. Old state must be 'destroying'
-        IF OLD.lifecycle_state NOT IN ('destroying', 'stopping') THEN
+        IF current_user <> 'giga_agent_lifecycle_owner' THEN
+            RAISE EXCEPTION 'Sandbox destruction finalization requires the controlled database operation';
+        END IF;
+
+        -- 4a. Old state must be 'destroying' (strictly no direct transition from stopping or active)
+        IF OLD.lifecycle_state <> 'destroying' THEN
             RAISE EXCEPTION 'Direct transition to destroyed is forbidden from state %', OLD.lifecycle_state;
         END IF;
 
@@ -400,23 +441,350 @@ CREATE TRIGGER trg_agent_sandbox_session_update
     BEFORE UPDATE ON agent_sandbox_sessions
     FOR EACH ROW EXECUTE FUNCTION guard_agent_sandbox_session_update();
 
--- Reassess privileges: Revoke blanket permissions and apply least-privilege column grants for giga_api_runtime
-REVOKE ALL PRIVILEGES ON agent_sandbox_sessions FROM giga_api_runtime;
-GRANT SELECT, INSERT ON agent_sandbox_sessions TO giga_api_runtime;
-GRANT UPDATE (
-    provider_session_id, lifecycle_state, allocation_state, cleanup_state,
-    worker_id, lease_token, cleanup_attempts, next_cleanup_retry_at,
-    cleanup_lease_token, cleanup_lease_expires_at, cleanup_worker_id,
-    allocation_expires_at, updated_at, destroyed_at, diagnostics, verified_checks
-) ON agent_sandbox_sessions TO giga_api_runtime;
-REVOKE DELETE, TRUNCATE ON agent_sandbox_sessions FROM giga_api_runtime;
+-- Controlled SECURITY DEFINER routines owned by giga_agent_lifecycle_owner
+DO $lifecycle_functions$
+DECLARE
+    lifecycle_schema TEXT := current_schema();
+BEGIN
+    EXECUTE format($func$
+        CREATE OR REPLACE FUNCTION %I.settle_agent_sandbox_allocation(
+            p_session_id UUID,
+            p_owner_id UUID,
+            p_run_id UUID,
+            p_attempt_number INTEGER,
+            p_attempt_generation UUID,
+            p_outcome VARCHAR,
+            p_provider_resource_id VARCHAR DEFAULT NULL
+        ) RETURNS agent_sandbox_sessions
+        LANGUAGE plpgsql
+        SECURITY DEFINER
+        SET search_path = pg_catalog, %I
+        AS $body$
+        DECLARE
+            session_row agent_sandbox_sessions%%ROWTYPE;
+            op_row agent_sandbox_lifecycle_operations%%ROWTYPE;
+            fence_row agent_sandbox_attempt_fences%%ROWTYPE;
+            run_row agent_runs%%ROWTYPE;
+            v_fenced BOOLEAN := FALSE;
+            v_lifecycle_state VARCHAR(32);
+        BEGIN
+            IF p_outcome NOT IN ('resource', 'no_resource') THEN
+                RAISE EXCEPTION 'Invalid allocation outcome %%', p_outcome;
+            END IF;
 
-REVOKE ALL PRIVILEGES ON agent_sandbox_lifecycle_operations FROM giga_api_runtime;
-GRANT SELECT, INSERT ON agent_sandbox_lifecycle_operations TO giga_api_runtime;
-GRANT UPDATE (state, outcome, provider_resource_id, operation_name, settled_at) ON agent_sandbox_lifecycle_operations TO giga_api_runtime;
-REVOKE DELETE, TRUNCATE ON agent_sandbox_lifecycle_operations FROM giga_api_runtime;
+            IF p_outcome = 'resource' AND (p_provider_resource_id IS NULL OR char_length(p_provider_resource_id) < 1) THEN
+                RAISE EXCEPTION 'Settled allocation with resource outcome requires provider resource id';
+            END IF;
 
-REVOKE ALL PRIVILEGES ON agent_sandbox_attempt_fences FROM giga_api_runtime;
-GRANT SELECT, INSERT ON agent_sandbox_attempt_fences TO giga_api_runtime;
-GRANT UPDATE (fenced_at, fence_reason) ON agent_sandbox_attempt_fences TO giga_api_runtime;
-REVOKE DELETE, TRUNCATE ON agent_sandbox_attempt_fences FROM giga_api_runtime;
+            -- Consistent lock order: run -> fence -> session -> operation
+            SELECT * INTO run_row
+            FROM agent_runs
+            WHERE owner_id = p_owner_id AND id = p_run_id
+            FOR UPDATE;
+            IF NOT FOUND THEN
+                RAISE EXCEPTION 'Agent run not found';
+            END IF;
+
+            SELECT * INTO fence_row
+            FROM agent_sandbox_attempt_fences
+            WHERE owner_id = p_owner_id
+              AND workspace_id = run_row.workspace_id
+              AND run_id = p_run_id
+              AND attempt_number = p_attempt_number
+              AND generation = p_attempt_generation
+            FOR UPDATE;
+            IF NOT FOUND THEN
+                RAISE EXCEPTION 'Sandbox attempt generation no longer exists';
+            END IF;
+
+            SELECT * INTO session_row
+            FROM agent_sandbox_sessions
+            WHERE id = p_session_id AND owner_id = p_owner_id AND run_id = p_run_id
+            FOR UPDATE;
+            IF NOT FOUND THEN
+                RAISE EXCEPTION 'Sandbox session not found';
+            END IF;
+
+            IF session_row.attempt_number <> p_attempt_number OR session_row.attempt_generation <> p_attempt_generation THEN
+                RAISE EXCEPTION 'Sandbox attempt generation mismatch';
+            END IF;
+
+            SELECT * INTO op_row
+            FROM agent_sandbox_lifecycle_operations
+            WHERE id = session_row.allocation_intent_id
+              AND session_id = p_session_id
+              AND operation_kind = 'allocation'
+            FOR UPDATE;
+            IF NOT FOUND THEN
+                RAISE EXCEPTION 'Durable allocation operation is missing';
+            END IF;
+
+            -- Idempotency check: already settled
+            IF op_row.state = 'settled' THEN
+                IF op_row.outcome <> p_outcome OR (p_outcome = 'resource' AND op_row.provider_resource_id <> p_provider_resource_id) THEN
+                    RAISE EXCEPTION 'Allocation callback conflicts with its settled provider outcome';
+                END IF;
+                RETURN session_row;
+            END IF;
+
+            IF p_outcome = 'no_resource' THEN
+                IF fence_row.fenced_at IS NULL THEN
+                    RAISE EXCEPTION 'Cannot settle never-started allocation as no_resource before attempt is durably fenced';
+                END IF;
+                IF op_row.state <> 'not_started' THEN
+                    RAISE EXCEPTION 'Cannot settle %% allocation as no_resource', op_row.state;
+                END IF;
+
+                UPDATE agent_sandbox_lifecycle_operations SET
+                    state = 'settled',
+                    outcome = 'no_resource',
+                    settled_at = clock_timestamp()
+                WHERE id = op_row.id;
+
+                UPDATE agent_sandbox_sessions SET
+                    lifecycle_state = 'failed',
+                    allocation_state = 'failed',
+                    updated_at = clock_timestamp()
+                WHERE id = p_session_id
+                RETURNING * INTO session_row;
+
+                RETURN session_row;
+            END IF;
+
+            -- p_outcome = 'resource'
+            IF op_row.state = 'not_started' THEN
+                RAISE EXCEPTION 'Provider allocation callback arrived before the durable operation started';
+            END IF;
+
+            IF fence_row.fenced_at IS NOT NULL THEN
+                v_fenced := TRUE;
+            END IF;
+
+            UPDATE agent_sandbox_lifecycle_operations SET
+                state = 'settled',
+                outcome = 'resource',
+                provider_resource_id = p_provider_resource_id,
+                settled_at = clock_timestamp()
+            WHERE id = op_row.id;
+
+            v_lifecycle_state := CASE WHEN v_fenced THEN 'cleanup_pending' ELSE 'active' END;
+
+            UPDATE agent_sandbox_sessions SET
+                provider_session_id = p_provider_resource_id,
+                lifecycle_state = v_lifecycle_state,
+                allocation_state = 'allocated',
+                cleanup_state = CASE WHEN v_fenced THEN 'pending' ELSE cleanup_state END,
+                updated_at = clock_timestamp()
+            WHERE id = p_session_id
+            RETURNING * INTO session_row;
+
+            RETURN session_row;
+        END;
+        $body$
+    $func$, lifecycle_schema, lifecycle_schema);
+
+    EXECUTE format($func$
+        CREATE OR REPLACE FUNCTION %I.claim_agent_sandbox_cleanup(
+            p_session_id UUID,
+            p_worker_id VARCHAR,
+            p_lease_token VARCHAR,
+            p_lease_duration_ms INTEGER
+        ) RETURNS agent_sandbox_sessions
+        LANGUAGE plpgsql
+        SECURITY DEFINER
+        SET search_path = pg_catalog, %I
+        AS $body$
+        DECLARE
+            session_row agent_sandbox_sessions%%ROWTYPE;
+            fence_row agent_sandbox_attempt_fences%%ROWTYPE;
+        BEGIN
+            SELECT * INTO session_row
+            FROM agent_sandbox_sessions
+            WHERE id = p_session_id
+            FOR UPDATE;
+
+            IF NOT FOUND THEN
+                RETURN NULL;
+            END IF;
+
+            -- Terminal sessions cannot be claimed for cleanup
+            IF session_row.lifecycle_state = 'destroyed' THEN
+                RETURN NULL;
+            END IF;
+
+            -- Active unexpired lease held by another claim cannot be preempted
+            IF session_row.cleanup_state = 'in_progress' AND
+               session_row.cleanup_lease_expires_at IS NOT NULL AND
+               session_row.cleanup_lease_expires_at > clock_timestamp() THEN
+                RETURN NULL;
+            END IF;
+
+            SELECT * INTO fence_row
+            FROM agent_sandbox_attempt_fences
+            WHERE owner_id = session_row.owner_id
+              AND workspace_id = session_row.workspace_id
+              AND run_id = session_row.run_id
+              AND attempt_number = session_row.attempt_number
+              AND generation = session_row.attempt_generation;
+
+            IF NOT FOUND THEN
+                RAISE EXCEPTION 'Attempt fence missing for sandbox session';
+            END IF;
+
+            UPDATE agent_sandbox_sessions SET
+                lifecycle_state = 'destroying',
+                cleanup_state = 'in_progress',
+                cleanup_worker_id = p_worker_id,
+                cleanup_lease_token = p_lease_token,
+                cleanup_lease_expires_at = clock_timestamp() + (p_lease_duration_ms * INTERVAL '1 millisecond'),
+                updated_at = clock_timestamp()
+            WHERE id = p_session_id
+            RETURNING * INTO session_row;
+
+            RETURN session_row;
+        END;
+        $body$
+    $func$, lifecycle_schema, lifecycle_schema);
+
+    EXECUTE format($func$
+        CREATE OR REPLACE FUNCTION %I.finalize_agent_sandbox_destruction(
+            p_session_id UUID,
+            p_provider_session_id VARCHAR,
+            p_lease_token VARCHAR
+        ) RETURNS agent_sandbox_sessions
+        LANGUAGE plpgsql
+        SECURITY DEFINER
+        SET search_path = pg_catalog, %I
+        AS $body$
+        DECLARE
+            session_row agent_sandbox_sessions%%ROWTYPE;
+            op_row agent_sandbox_lifecycle_operations%%ROWTYPE;
+        BEGIN
+            IF p_provider_session_id IS NULL OR char_length(p_provider_session_id) < 1 THEN
+                RAISE EXCEPTION 'Provider destruction requires the exact resource identity';
+            END IF;
+
+            SELECT * INTO session_row
+            FROM agent_sandbox_sessions
+            WHERE id = p_session_id
+            FOR UPDATE;
+
+            IF NOT FOUND THEN
+                RAISE EXCEPTION 'Sandbox session not found';
+            END IF;
+
+            -- Idempotency check: already destroyed
+            IF session_row.lifecycle_state = 'destroyed' THEN
+                IF session_row.provider_session_id <> p_provider_session_id THEN
+                    RAISE EXCEPTION 'Repeated destruction callback conflicts with the tombstoned provider identity';
+                END IF;
+                RETURN session_row;
+            END IF;
+
+            -- Provider identity mismatch check
+            IF session_row.provider_session_id IS NOT NULL AND session_row.provider_session_id <> p_provider_session_id THEN
+                RAISE EXCEPTION 'Provider destruction identity conflicts with the durable sandbox session';
+            END IF;
+
+            -- Cleanup lease check
+            IF p_lease_token IS NOT NULL AND (session_row.cleanup_lease_token IS NULL OR session_row.cleanup_lease_token <> p_lease_token) THEN
+                RAISE EXCEPTION 'Cleanup lease was fenced before destruction could be recorded';
+            END IF;
+
+            IF session_row.cleanup_state = 'in_progress' AND session_row.cleanup_lease_expires_at IS NOT NULL AND
+               session_row.cleanup_lease_expires_at <= clock_timestamp() THEN
+                RAISE EXCEPTION 'Cleanup lease expired before destruction could be committed';
+            END IF;
+
+            -- Verify settled allocation operation exists with matching provider resource ID
+            SELECT * INTO op_row
+            FROM agent_sandbox_lifecycle_operations
+            WHERE id = session_row.allocation_intent_id
+              AND session_id = p_session_id
+              AND operation_kind = 'allocation'
+            FOR UPDATE;
+
+            IF NOT FOUND OR op_row.state <> 'settled' OR op_row.outcome <> 'resource' OR
+               op_row.provider_resource_id <> p_provider_session_id THEN
+                RAISE EXCEPTION 'Provider destruction cannot settle an unverified allocation identity';
+            END IF;
+
+            -- If not yet destroying, put into destroying first under lifecycle owner
+            IF session_row.lifecycle_state <> 'destroying' THEN
+                UPDATE agent_sandbox_sessions SET
+                    lifecycle_state = 'destroying',
+                    cleanup_state = 'in_progress',
+                    cleanup_lease_token = COALESCE(p_lease_token, gen_random_uuid()::VARCHAR),
+                    cleanup_lease_expires_at = clock_timestamp() + INTERVAL '30 seconds',
+                    cleanup_worker_id = COALESCE(cleanup_worker_id, 'direct_destroy'),
+                    updated_at = clock_timestamp()
+                WHERE id = p_session_id;
+            END IF;
+
+            UPDATE agent_sandbox_sessions SET
+                lifecycle_state = 'destroyed',
+                cleanup_state = 'completed',
+                cleanup_lease_token = NULL,
+                cleanup_lease_expires_at = NULL,
+                destroyed_at = COALESCE(destroyed_at, clock_timestamp()),
+                provider_session_id = p_provider_session_id,
+                updated_at = clock_timestamp()
+            WHERE id = p_session_id
+            RETURNING * INTO session_row;
+
+            RETURN session_row;
+        END;
+        $body$
+    $func$, lifecycle_schema, lifecycle_schema);
+END;
+$lifecycle_functions$;
+
+-- Privilege and ownership boundaries
+DO $lifecycle_privileges$
+DECLARE
+    lifecycle_schema TEXT := current_schema();
+BEGIN
+    EXECUTE format('GRANT USAGE ON SCHEMA %I TO giga_agent_lifecycle_owner', lifecycle_schema);
+    EXECUTE format('GRANT USAGE ON SCHEMA %I TO giga_api_runtime', lifecycle_schema);
+    EXECUTE format('GRANT SELECT ON %I.agent_runs TO giga_agent_lifecycle_owner', lifecycle_schema);
+    EXECUTE format('GRANT UPDATE (updated_at) ON %I.agent_runs TO giga_agent_lifecycle_owner', lifecycle_schema);
+
+    EXECUTE format('ALTER TABLE %I.agent_sandbox_sessions OWNER TO giga_agent_lifecycle_owner', lifecycle_schema);
+    EXECUTE format('ALTER TABLE %I.agent_sandbox_lifecycle_operations OWNER TO giga_agent_lifecycle_owner', lifecycle_schema);
+    EXECUTE format('ALTER TABLE %I.agent_sandbox_attempt_fences OWNER TO giga_agent_lifecycle_owner', lifecycle_schema);
+
+    EXECUTE format('ALTER FUNCTION %I.settle_agent_sandbox_allocation(uuid, uuid, uuid, integer, uuid, character varying, character varying) OWNER TO giga_agent_lifecycle_owner', lifecycle_schema);
+    EXECUTE format('ALTER FUNCTION %I.claim_agent_sandbox_cleanup(uuid, character varying, character varying, integer) OWNER TO giga_agent_lifecycle_owner', lifecycle_schema);
+    EXECUTE format('ALTER FUNCTION %I.finalize_agent_sandbox_destruction(uuid, character varying, character varying) OWNER TO giga_agent_lifecycle_owner', lifecycle_schema);
+
+    EXECUTE format('REVOKE ALL ON FUNCTION %I.settle_agent_sandbox_allocation(uuid, uuid, uuid, integer, uuid, character varying, character varying) FROM PUBLIC', lifecycle_schema);
+    EXECUTE format('REVOKE ALL ON FUNCTION %I.claim_agent_sandbox_cleanup(uuid, character varying, character varying, integer) FROM PUBLIC', lifecycle_schema);
+    EXECUTE format('REVOKE ALL ON FUNCTION %I.finalize_agent_sandbox_destruction(uuid, character varying, character varying) FROM PUBLIC', lifecycle_schema);
+
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.settle_agent_sandbox_allocation(uuid, uuid, uuid, integer, uuid, character varying, character varying) TO giga_api_runtime', lifecycle_schema);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.claim_agent_sandbox_cleanup(uuid, character varying, character varying, integer) TO giga_api_runtime', lifecycle_schema);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.finalize_agent_sandbox_destruction(uuid, character varying, character varying) TO giga_api_runtime', lifecycle_schema);
+
+    -- Least-privilege column grants for giga_api_runtime:
+    -- Cannot update destroyed_at on sessions; cannot update outcome or provider_resource_id on operations.
+    EXECUTE format('REVOKE ALL PRIVILEGES ON %I.agent_sandbox_sessions FROM giga_api_runtime', lifecycle_schema);
+    EXECUTE format('GRANT SELECT, INSERT ON %I.agent_sandbox_sessions TO giga_api_runtime', lifecycle_schema);
+    EXECUTE format('GRANT UPDATE (
+        provider_session_id, lifecycle_state, allocation_state, cleanup_state,
+        worker_id, lease_token, cleanup_attempts, next_cleanup_retry_at,
+        cleanup_lease_token, cleanup_lease_expires_at, cleanup_worker_id,
+        allocation_expires_at, updated_at, diagnostics, verified_checks
+    ) ON %I.agent_sandbox_sessions TO giga_api_runtime', lifecycle_schema);
+    EXECUTE format('REVOKE DELETE, TRUNCATE ON %I.agent_sandbox_sessions FROM giga_api_runtime', lifecycle_schema);
+
+    EXECUTE format('REVOKE ALL PRIVILEGES ON %I.agent_sandbox_lifecycle_operations FROM giga_api_runtime', lifecycle_schema);
+    EXECUTE format('GRANT SELECT, INSERT ON %I.agent_sandbox_lifecycle_operations TO giga_api_runtime', lifecycle_schema);
+    EXECUTE format('GRANT UPDATE (state, operation_name, settled_at) ON %I.agent_sandbox_lifecycle_operations TO giga_api_runtime', lifecycle_schema);
+    EXECUTE format('REVOKE DELETE, TRUNCATE ON %I.agent_sandbox_lifecycle_operations FROM giga_api_runtime', lifecycle_schema);
+
+    EXECUTE format('REVOKE ALL PRIVILEGES ON %I.agent_sandbox_attempt_fences FROM giga_api_runtime', lifecycle_schema);
+    EXECUTE format('GRANT SELECT, INSERT ON %I.agent_sandbox_attempt_fences TO giga_api_runtime', lifecycle_schema);
+    EXECUTE format('GRANT UPDATE (fenced_at, fence_reason) ON %I.agent_sandbox_attempt_fences TO giga_api_runtime', lifecycle_schema);
+    EXECUTE format('REVOKE DELETE, TRUNCATE ON %I.agent_sandbox_attempt_fences FROM giga_api_runtime', lifecycle_schema);
+END;
+$lifecycle_privileges$;

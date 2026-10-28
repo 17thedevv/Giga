@@ -5,8 +5,13 @@
 **Branch:** `feat/17t-71-agent-sandbox-sessions`
 **Merged dependency:** PR #42, merge commit `207d78327fd58962dd9acdb4f2cf3048234df0d9`
 **Baseline 17T-71 commit:** `c98eb1d4d1f673aea8a92729592c71e2aff6ad73`
-**Lifecycle commits:** `b59b44f` (`fix(agent): fence sandbox allocation lifecycle per attempt`), `eb0d3e02b1a3913911a9c126abc31f96b263eada` (preserve active cleanup lease), `ceab433` (`fix(agent): enforce database sandbox lifecycle integrity`), `b1ba972` (`fix(agent): fence attempt before settling allocation failure`)
-**Review Fix (Database Lifecycle Integrity):** Resolved Finding 1 (explicit operation-state transition matrix) and Finding 2 (prevent fabricated sandbox destruction & enforce least-privilege column grants).
+**Lifecycle commits:** `b59b44f` (`fix(agent): fence sandbox allocation lifecycle per attempt`), `eb0d3e02b1a3913911a9c126abc31f96b263eada` (preserve active cleanup lease), `ceab433` (`fix(agent): enforce database sandbox lifecycle integrity`), `b1ba972` (`fix(agent): fence attempt before settling allocation failure`), `82323b4` (`fix(agent): close sandbox destruction trust boundary bypass`)
+**Review Fix (Database Lifecycle Integrity & Privilege Boundaries):**
+- Resolved Finding 1 (explicit operation-state transition matrix) and Finding 2 (prevent fabricated sandbox destruction & enforce least-privilege column grants).
+- Closed Bypass 1 (`stopping -> destroyed`): removed `stopping` from permissible predecessor states so only `destroying` under an active cleanup lease can finalize as `destroyed`.
+- Closed Bypass 2 (fabricated cleanup lease): transitioned `destroying` and `destroyed` to require execution under `giga_agent_lifecycle_owner` via controlled `SECURITY DEFINER` routines (`claim_agent_sandbox_cleanup`, `finalize_agent_sandbox_destruction`). Ordinary `giga_api_runtime` cannot forge cleanup leases or mark sessions destroyed.
+- Closed Bypass 3 (forged `settled/resource`): allocation settlement into `settled` requires `giga_agent_lifecycle_owner` via controlled routine `settle_agent_sandbox_allocation`. Raw `UPDATE` on `outcome` and `provider_resource_id` revoked from `giga_api_runtime`.
+- Database role & table ownership: `giga_agent_lifecycle_owner` owns tables (`agent_sandbox_sessions`, `agent_sandbox_lifecycle_operations`, `agent_sandbox_attempt_fences`) and routines; `giga_api_runtime` receives only execution privileges on the controlled routines and least-privilege column updates.
 **Draft PR:** [#44](https://github.com/17thedevv/Giga/pull/44)
 **GitHub Actions CI:** Both `Validate Git Workflow` ([Run 40643004261](https://github.com/17thedevv/Giga/actions/runs/40643004261)) and `Backend CI` ([Run 40643004271](https://github.com/17thedevv/Giga/actions/runs/40643004271)) completed with `conclusion: success` on HEAD commit `b1ba972`.
 **Decision:** NO-GO for 17T-73 runtime integration until independent review and provider settlement limits below are closed.

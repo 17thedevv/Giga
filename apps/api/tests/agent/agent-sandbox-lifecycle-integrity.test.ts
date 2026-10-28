@@ -87,7 +87,7 @@ describe('17T-71 Review Fix: Database-Level Sandbox Lifecycle Integrity', {
           [session.id]
         );
       },
-      /In-progress allocation cannot be settled as no_resource/i
+      /permission denied|Agent sandbox allocation settlement requires the controlled database operation|In-progress allocation cannot be settled as no_resource/i
     );
   });
 
@@ -118,7 +118,7 @@ describe('17T-71 Review Fix: Database-Level Sandbox Lifecycle Integrity', {
           [session.id]
         );
       },
-      /Ambiguous allocation cannot be settled as no_resource/i
+      /permission denied|Agent sandbox allocation settlement requires the controlled database operation|Ambiguous allocation cannot be settled as no_resource/i
     );
   });
 
@@ -155,7 +155,7 @@ describe('17T-71 Review Fix: Database-Level Sandbox Lifecycle Integrity', {
           [session.id]
         );
       },
-      /Settled sandbox lifecycle operations are immutable/i
+      /permission denied|Settled sandbox lifecycle operations are immutable/i
     );
 
     // Attempt to rewrite provider_resource_id on settled row
@@ -168,12 +168,12 @@ describe('17T-71 Review Fix: Database-Level Sandbox Lifecycle Integrity', {
           [session.id]
         );
       },
-      /Settled sandbox lifecycle operations are immutable/i
+      /permission denied|Settled sandbox lifecycle operations are immutable/i
     );
   });
 
-  // 4. Attempt to mark a live or cleanup-pending session destroyed directly; assert rejection.
-  it('Scenario 4: direct UPDATE to mark a live (active) or cleanup_pending session destroyed is rejected', async () => {
+  // 4. Attempt to mark a live, stopping, or cleanup-pending session destroyed directly; assert rejection.
+  it('Scenario 4: direct UPDATE to mark a live (active, stopping) or cleanup_pending session destroyed is rejected', async () => {
     const { run, claim } = await createClaimedRun();
     const { session } = await repo.createSandboxAllocationIntent({
       ownerId,
@@ -206,7 +206,40 @@ describe('17T-71 Review Fix: Database-Level Sandbox Lifecycle Integrity', {
           [session.id]
         );
       },
-      /Direct transition to destroyed is forbidden from state active/i
+      /Sandbox destruction finalization requires the controlled database operation|Direct transition to destroyed is forbidden from state active/i
+    );
+
+    // 4b. Bypass 1 check: transition to stopping, then attempt direct SQL update stopping -> destroyed
+    await db.pool.query(
+      `UPDATE agent_sandbox_sessions SET lifecycle_state = 'stopping' WHERE id = $1`,
+      [session.id]
+    );
+    await assert.rejects(
+      async () => {
+        await runtimeClient.query(
+          `UPDATE agent_sandbox_sessions
+           SET lifecycle_state = 'destroyed', cleanup_state = 'completed',
+               cleanup_lease_token = NULL, cleanup_lease_expires_at = NULL
+           WHERE id = $1`,
+          [session.id]
+        );
+      },
+      /Sandbox destruction finalization requires the controlled database operation|Direct transition to destroyed is forbidden/i
+    );
+
+    // 4c. Bypass 2 check: attempt to manufacture active -> destroying with fabricated cleanup lease
+    await assert.rejects(
+      async () => {
+        await runtimeClient.query(
+          `UPDATE agent_sandbox_sessions
+           SET lifecycle_state = 'destroying', cleanup_state = 'in_progress',
+               cleanup_lease_token = 'fake-lease-token',
+               cleanup_lease_expires_at = NOW() + INTERVAL '1 hour'
+           WHERE id = $1`,
+          [session.id]
+        );
+      },
+      /Claiming sandbox cleanup lease requires the controlled database operation|requires active cleanup lease/i
     );
 
     // Transition to cleanup_pending via legitimate abort/fence
@@ -214,7 +247,7 @@ describe('17T-71 Review Fix: Database-Level Sandbox Lifecycle Integrity', {
     const pending = await repo.getSandboxSession(ownerId, session.id);
     assert.equal(pending.lifecycleState, 'cleanup_pending');
 
-    // 4b. Direct SQL update from cleanup_pending -> destroyed
+    // 4d. Direct SQL update from cleanup_pending -> destroyed
     await assert.rejects(
       async () => {
         await runtimeClient.query(
@@ -224,7 +257,7 @@ describe('17T-71 Review Fix: Database-Level Sandbox Lifecycle Integrity', {
           [session.id]
         );
       },
-      /Direct transition to destroyed is forbidden from state cleanup_pending/i
+      /Sandbox destruction finalization requires the controlled database operation|Direct transition to destroyed is forbidden from state cleanup_pending/i
     );
   });
 
@@ -555,23 +588,44 @@ describe('17T-71 Review Fix: Database-Level Sandbox Lifecycle Integrity', {
     assert.equal(await checkPrivilege("SELECT has_table_privilege('giga_api_runtime', 'agent_sandbox_sessions', 'DELETE') AS has_priv"), false);
     assert.equal(await checkPrivilege("SELECT has_table_privilege('giga_api_runtime', 'agent_sandbox_sessions', 'TRUNCATE') AS has_priv"), false);
 
-    // Column privileges on agent_sandbox_sessions: lifecycle_state can be updated, identity columns CANNOT
+    // Column privileges on agent_sandbox_sessions: lifecycle_state can be updated, destroyed_at and identity columns CANNOT
     assert.equal(await checkPrivilege("SELECT has_column_privilege('giga_api_runtime', 'agent_sandbox_sessions', 'lifecycle_state', 'UPDATE') AS has_priv"), true);
     assert.equal(await checkPrivilege("SELECT has_column_privilege('giga_api_runtime', 'agent_sandbox_sessions', 'provider_session_id', 'UPDATE') AS has_priv"), true);
+    assert.equal(await checkPrivilege("SELECT has_column_privilege('giga_api_runtime', 'agent_sandbox_sessions', 'destroyed_at', 'UPDATE') AS has_priv"), false);
     assert.equal(await checkPrivilege("SELECT has_column_privilege('giga_api_runtime', 'agent_sandbox_sessions', 'owner_id', 'UPDATE') AS has_priv"), false);
     assert.equal(await checkPrivilege("SELECT has_column_privilege('giga_api_runtime', 'agent_sandbox_sessions', 'run_id', 'UPDATE') AS has_priv"), false);
     assert.equal(await checkPrivilege("SELECT has_column_privilege('giga_api_runtime', 'agent_sandbox_sessions', 'attempt_number', 'UPDATE') AS has_priv"), false);
     assert.equal(await checkPrivilege("SELECT has_column_privilege('giga_api_runtime', 'agent_sandbox_sessions', 'attempt_generation', 'UPDATE') AS has_priv"), false);
 
-    // agent_sandbox_lifecycle_operations: SELECT, INSERT, specific column UPDATE granted; DELETE and TRUNCATE revoked
+    // agent_sandbox_lifecycle_operations: SELECT, INSERT, specific column UPDATE granted; outcome, provider_resource_id, DELETE, TRUNCATE revoked
     assert.equal(await checkPrivilege("SELECT has_table_privilege('giga_api_runtime', 'agent_sandbox_lifecycle_operations', 'SELECT') AS has_priv"), true);
     assert.equal(await checkPrivilege("SELECT has_table_privilege('giga_api_runtime', 'agent_sandbox_lifecycle_operations', 'INSERT') AS has_priv"), true);
     assert.equal(await checkPrivilege("SELECT has_table_privilege('giga_api_runtime', 'agent_sandbox_lifecycle_operations', 'DELETE') AS has_priv"), false);
     assert.equal(await checkPrivilege("SELECT has_table_privilege('giga_api_runtime', 'agent_sandbox_lifecycle_operations', 'TRUNCATE') AS has_priv"), false);
     assert.equal(await checkPrivilege("SELECT has_column_privilege('giga_api_runtime', 'agent_sandbox_lifecycle_operations', 'state', 'UPDATE') AS has_priv"), true);
-    assert.equal(await checkPrivilege("SELECT has_column_privilege('giga_api_runtime', 'agent_sandbox_lifecycle_operations', 'outcome', 'UPDATE') AS has_priv"), true);
+    assert.equal(await checkPrivilege("SELECT has_column_privilege('giga_api_runtime', 'agent_sandbox_lifecycle_operations', 'outcome', 'UPDATE') AS has_priv"), false);
+    assert.equal(await checkPrivilege("SELECT has_column_privilege('giga_api_runtime', 'agent_sandbox_lifecycle_operations', 'provider_resource_id', 'UPDATE') AS has_priv"), false);
     assert.equal(await checkPrivilege("SELECT has_column_privilege('giga_api_runtime', 'agent_sandbox_lifecycle_operations', 'generation', 'UPDATE') AS has_priv"), false);
     assert.equal(await checkPrivilege("SELECT has_column_privilege('giga_api_runtime', 'agent_sandbox_lifecycle_operations', 'operation_kind', 'UPDATE') AS has_priv"), false);
+
+    // Table ownership boundaries: tables and routines owned by giga_agent_lifecycle_owner
+    const tableOwnerRes = await db.pool.query<{ tablename: string; tableowner: string }>(
+      "SELECT tablename, tableowner FROM pg_tables WHERE tablename IN ('agent_sandbox_sessions', 'agent_sandbox_lifecycle_operations', 'agent_sandbox_attempt_fences')"
+    );
+    for (const row of tableOwnerRes.rows) {
+      assert.equal(row.tableowner, 'giga_agent_lifecycle_owner');
+    }
+
+    // Routines executable by giga_api_runtime
+    const checkRoutinePrivilege = async (routine: string): Promise<boolean> => {
+      const res = await db.pool.query<{ has_priv: boolean }>(
+        `SELECT has_function_privilege('giga_api_runtime', '${routine}', 'EXECUTE') AS has_priv`
+      );
+      return Boolean(res.rows[0]?.has_priv);
+    };
+    assert.equal(await checkRoutinePrivilege('settle_agent_sandbox_allocation(uuid, uuid, uuid, integer, uuid, varchar, varchar)'), true);
+    assert.equal(await checkRoutinePrivilege('claim_agent_sandbox_cleanup(uuid, varchar, varchar, integer)'), true);
+    assert.equal(await checkRoutinePrivilege('finalize_agent_sandbox_destruction(uuid, varchar, varchar)'), true);
 
     // agent_sandbox_attempt_fences: SELECT, INSERT, column UPDATE granted; DELETE revoked
     assert.equal(await checkPrivilege("SELECT has_table_privilege('giga_api_runtime', 'agent_sandbox_attempt_fences', 'SELECT') AS has_priv"), true);

@@ -204,12 +204,22 @@ export async function createTestDatabase(migrations?: readonly Migration[]): Pro
     }
 
     // Intercept and strip PostgreSQL triggers/plpgsql DDL that pg-mem does not support
-    if (sql.includes('prevent_skill_versions_update') || sql.includes('CREATE TRIGGER')) {
+    if (
+      sql.includes('prevent_skill_versions_update') ||
+      sql.includes('CREATE TRIGGER') ||
+      sql.includes('CREATE OR REPLACE FUNCTION') ||
+      sql.includes('DO $$') ||
+      sql.includes('DO $lifecycle_')
+    ) {
       const stripped = sql
+        .replace(/DO \$(?:lifecycle_functions|lifecycle_privileges|[^$]*)\$[\s\S]*?\$(?:lifecycle_functions|lifecycle_privileges|[^$]*)\$;/gi, '')
+        .replace(/DO \$\$[\s\S]*?\$\$;/gi, '')
         .replace(/CREATE OR REPLACE FUNCTION[\s\S]*?LANGUAGE plpgsql;/gi, '')
+        .replace(/ALTER (?:TABLE|FUNCTION)[\s\S]*?OWNER TO [^;]+;/gi, '')
         .replace(/DROP TRIGGER[\s\S]*?;/gi, '')
         .replace(/CREATE TRIGGER[\s\S]*?;/gi, '')
-        .replace(/(?:GRANT|REVOKE)[\s\S]*?(?:TO|FROM)\s+giga_api_runtime\s*;/gi, '');
+        .replace(/(?:GRANT|REVOKE)[\s\S]*?;/gi, '');
+      if (!stripped.trim()) return [];
       return db.public.many(stripped);
     }
     if (sql.includes('FOR UPDATE OF s SKIP LOCKED')) {

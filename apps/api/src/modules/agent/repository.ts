@@ -1659,6 +1659,27 @@ export class AgentRepository {
         }
       }
 
+      try {
+        const result = await client.query<SandboxSessionRow>(
+          'SELECT * FROM settle_agent_sandbox_allocation($1::uuid, $2::uuid, $3::uuid, $4::integer, $5::uuid, $6::varchar, $7::varchar)',
+          [session.id, params.ownerId, params.runId, session.attempt_number, session.attempt_generation, 'resource', params.providerSessionId]
+        );
+        const row = result.rows[0];
+        if (row && row.id) {
+          if (fenced) {
+            const diagnostics = JSON.stringify({ ...(session.diagnostics ?? {}), fence_reason: 'late_or_stale_allocation_callback' });
+            await client.query('UPDATE agent_sandbox_sessions SET diagnostics = $1 WHERE id = $2', [diagnostics, session.id]);
+          }
+          return sandboxSession({ ...row, diagnostics: fenced ? { ...(session.diagnostics ?? {}), fence_reason: 'late_or_stale_allocation_callback' } : session.diagnostics });
+        }
+      } catch (err: any) {
+        if (err?.code !== '42883' && !err?.message?.includes('does not exist')) {
+          if (err?.message?.includes('conflicts')) throw new ConflictError(err.message);
+          if (err?.message?.includes('not found')) throw new NotFoundError();
+          throw err;
+        }
+      }
+
       await client.query(
         `UPDATE agent_sandbox_lifecycle_operations
          SET state = 'settled', outcome = 'resource', provider_resource_id = $1, settled_at = NOW()
@@ -1851,11 +1872,21 @@ export class AgentRepository {
         if (operation.state !== 'not_started') {
           throw new ConflictError('Cannot confirm allocation absence for an operation that was already submitted to provider');
         }
-        await client.query(
-          `UPDATE agent_sandbox_lifecycle_operations SET state = 'settled', outcome = 'no_resource',
-             provider_resource_id = NULL, operation_name = $2, settled_at = NOW() WHERE id = $1`,
-          [identity.allocation_intent_id, `provider_absence:${evidence}`.slice(0, 128)]
-        );
+        try {
+          await client.query(
+            'SELECT * FROM settle_agent_sandbox_allocation($1::uuid, $2::uuid, $3::uuid, $4::integer, $5::uuid, $6::varchar, NULL::varchar)',
+            [sessionId, identity.owner_id, identity.run_id, identity.attempt_number, identity.attempt_generation, 'no_resource']
+          );
+        } catch (err: any) {
+          if (err?.code !== '42883' && !err?.message?.includes('does not exist')) {
+            throw err;
+          }
+          await client.query(
+            `UPDATE agent_sandbox_lifecycle_operations SET state = 'settled', outcome = 'no_resource',
+               provider_resource_id = NULL, operation_name = $2, settled_at = NOW() WHERE id = $1`,
+            [identity.allocation_intent_id, `provider_absence:${evidence}`.slice(0, 128)]
+          );
+        }
       }
       const session = (await client.query<SandboxSessionRow>(
         'SELECT * FROM agent_sandbox_sessions WHERE id = $1 FOR UPDATE', [sessionId]
@@ -1925,10 +1956,26 @@ export class AgentRepository {
       if (session) {
         const diagnostics = { ...(session.diagnostics ?? {}), fence_reason: 'attempt_fenced' };
         // An operation not yet submitted to the provider is provably resource-free.
-        await client.query(
-          `UPDATE agent_sandbox_lifecycle_operations SET state = 'settled', outcome = 'no_resource', settled_at = NOW()
-           WHERE session_id = $1 AND operation_kind = 'allocation' AND state = 'not_started'`, [session.id]
-        );
+        const allocOp = (await client.query<{ state: string }>(
+          `SELECT state FROM agent_sandbox_lifecycle_operations WHERE id = $1 AND session_id = $2 AND operation_kind = 'allocation'`,
+          [session.allocation_intent_id, session.id]
+        )).rows[0];
+        if (allocOp?.state === 'not_started') {
+          try {
+            await client.query(
+              'SELECT * FROM settle_agent_sandbox_allocation($1::uuid, $2::uuid, $3::uuid, $4::integer, $5::uuid, $6::varchar, NULL::varchar)',
+              [session.id, reference.ownerId, reference.runId, reference.attemptNumber, fence.generation, 'no_resource']
+            );
+          } catch (err: any) {
+            if (err?.code !== '42883' && !err?.message?.includes('does not exist')) {
+              throw err;
+            }
+            await client.query(
+              `UPDATE agent_sandbox_lifecycle_operations SET state = 'settled', outcome = 'no_resource', settled_at = NOW()
+               WHERE session_id = $1 AND operation_kind = 'allocation' AND state = 'not_started'`, [session.id]
+            );
+          }
+        }
         const allocation = (await client.query<{ state: string; outcome: string | null }>(
           `SELECT state, outcome FROM agent_sandbox_lifecycle_operations
            WHERE session_id = $1 AND operation_kind = 'allocation'`, [session.id]
@@ -2030,7 +2077,7 @@ export class AgentRepository {
         [identity.owner_id, identity.workspace_id, identity.run_id, identity.attempt_number, identity.attempt_generation]
       )).rows[0];
       const session = (await client.query<SandboxSessionRow>(
-        "SELECT * FROM agent_sandbox_sessions WHERE id = $1 AND lifecycle_state IN ('allocating', 'destroying') FOR UPDATE", [sessionId]
+        "SELECT * FROM agent_sandbox_sessions WHERE id = $1 AND lifecycle_state IN ('allocating', 'destroying', 'failed') FOR UPDATE", [sessionId]
       )).rows[0];
       if (!session) throw new NotFoundError();
       const operation = (await client.query<{ state: string; outcome: string | null }>(
@@ -2051,10 +2098,20 @@ export class AgentRepository {
         );
       }
       if (operation.state === 'not_started') {
-        await client.query(
-          `UPDATE agent_sandbox_lifecycle_operations SET state = 'settled', outcome = 'no_resource', settled_at = NOW()
-           WHERE id = $1`, [identity.allocation_intent_id]
-        );
+        try {
+          await client.query(
+            'SELECT * FROM settle_agent_sandbox_allocation($1::uuid, $2::uuid, $3::uuid, $4::integer, $5::uuid, $6::varchar, NULL::varchar)',
+            [sessionId, identity.owner_id, identity.run_id, identity.attempt_number, identity.attempt_generation, 'no_resource']
+          );
+        } catch (err: any) {
+          if (err?.code !== '42883' && !err?.message?.includes('does not exist')) {
+            throw err;
+          }
+          await client.query(
+            `UPDATE agent_sandbox_lifecycle_operations SET state = 'settled', outcome = 'no_resource', settled_at = NOW()
+             WHERE id = $1`, [identity.allocation_intent_id]
+          );
+        }
       }
       const existingDiag = session.diagnostics && typeof session.diagnostics === 'object' ? session.diagnostics : {};
       const mergedDiag = JSON.stringify({ ...existingDiag, reason: cleanReason, ...cleanDiag,
@@ -2153,6 +2210,28 @@ export class AgentRepository {
     leaseToken?: string
   ): Promise<DurableSandboxSession> {
     if (!providerSessionId) throw new ConflictError('Provider destruction requires the exact resource identity');
+    try {
+      const result = await this.pool.query<SandboxSessionRow>(
+        'SELECT * FROM finalize_agent_sandbox_destruction($1::uuid, $2::varchar, $3::varchar)',
+        [sessionId, providerSessionId, leaseToken ?? null]
+      );
+      const row = result.rows[0];
+      if (!row || !row.id) throw new NotFoundError();
+      return sandboxSession(row);
+    } catch (err: any) {
+      if (err?.code !== '42883' && !err?.message?.includes('does not exist')) {
+        if (err?.message?.includes('not found') || err?.message?.includes('Sandbox session not found')) throw new NotFoundError();
+        if (
+          err?.message?.includes('fenced') || err?.message?.includes('conflicts') ||
+          err?.message?.includes('expired') || err?.message?.includes('unverified') ||
+          err?.message?.includes('forbidden') || err?.message?.includes('mismatch') ||
+          err?.message?.includes('requires')
+        ) {
+          throw new ConflictError(err.message);
+        }
+        throw err;
+      }
+    }
     return this.transaction(async (client) => {
       const session = (await client.query<SandboxSessionRow>(
         'SELECT * FROM agent_sandbox_sessions WHERE id = $1 FOR UPDATE', [sessionId]
@@ -2243,12 +2322,23 @@ export class AgentRepository {
           (operation.outcome !== 'resource' || operation.provider_resource_id !== providerSessionId))) {
         throw new ConflictError('Provider cleanup identity conflicts with the durable allocation outcome');
       }
-      if (operation.state !== 'settled') {
+      try {
         await client.query(
-          `UPDATE agent_sandbox_lifecycle_operations SET state = 'settled', outcome = 'resource',
-             provider_resource_id = $1, settled_at = NOW()
-           WHERE id = $2 AND session_id = $3`, [providerSessionId, row.allocation_intent_id, sessionId]
+          'SELECT * FROM settle_agent_sandbox_allocation($1::uuid, $2::uuid, $3::uuid, $4::integer, $5::uuid, $6::varchar, $7::varchar)',
+          [sessionId, row.owner_id, row.run_id, row.attempt_number, row.attempt_generation, 'resource', providerSessionId]
         );
+      } catch (err: any) {
+        if (err?.code !== '42883' && !err?.message?.includes('does not exist')) {
+          if (err?.message?.includes('conflicts')) throw new ConflictError(err.message);
+          throw err;
+        }
+        if (operation.state !== 'settled') {
+          await client.query(
+            `UPDATE agent_sandbox_lifecycle_operations SET state = 'settled', outcome = 'resource',
+               provider_resource_id = $1, settled_at = NOW()
+             WHERE id = $2 AND session_id = $3`, [providerSessionId, row.allocation_intent_id, sessionId]
+          );
+        }
       }
       const existingDiag = row.diagnostics && typeof row.diagnostics === 'object' ? row.diagnostics : {};
       const mergedDiag = JSON.stringify({ ...existingDiag, allocation_cleanup_error: cleanError });
@@ -2405,26 +2495,37 @@ export class AgentRepository {
     leaseDurationMs?: number;
   }): Promise<DurableSandboxSession | null> {
     const durationMs = params.leaseDurationMs ?? 30_000;
-    const expiresAt = new Date(Date.now() + durationMs);
-
-    const result = await this.pool.query<SandboxSessionRow>(
-      `UPDATE agent_sandbox_sessions
-       SET cleanup_state = 'in_progress',
-           lifecycle_state = 'destroying',
-           cleanup_worker_id = $2,
-           cleanup_lease_token = $3,
-           cleanup_lease_expires_at = $4,
-           updated_at = NOW()
-       WHERE id = $1
-         AND lifecycle_state <> 'destroyed'
-         AND (
-           cleanup_state <> 'in_progress'
-           OR cleanup_lease_expires_at IS NULL
-           OR cleanup_lease_expires_at <= NOW()
-         )
-       RETURNING *`,
-      [params.sessionId, params.workerId, params.leaseToken, expiresAt.toISOString()]
-    );
-    return result.rows[0] ? sandboxSession(result.rows[0]) : null;
+    try {
+      const result = await this.pool.query<SandboxSessionRow>(
+        'SELECT * FROM claim_agent_sandbox_cleanup($1::uuid, $2::varchar, $3::varchar, $4::integer)',
+        [params.sessionId, params.workerId, params.leaseToken, durationMs]
+      );
+      const row = result.rows[0];
+      return row && row.id ? sandboxSession(row) : null;
+    } catch (err: any) {
+      if (err?.code !== '42883' && !err?.message?.includes('does not exist')) {
+        throw err;
+      }
+      const expiresAt = new Date(Date.now() + durationMs);
+      const result = await this.pool.query<SandboxSessionRow>(
+        `UPDATE agent_sandbox_sessions
+         SET cleanup_state = 'in_progress',
+             lifecycle_state = 'destroying',
+             cleanup_worker_id = $2,
+             cleanup_lease_token = $3,
+             cleanup_lease_expires_at = $4,
+             updated_at = NOW()
+         WHERE id = $1
+           AND lifecycle_state <> 'destroyed'
+           AND (
+             cleanup_state <> 'in_progress'
+             OR cleanup_lease_expires_at IS NULL
+             OR cleanup_lease_expires_at <= NOW()
+           )
+         RETURNING *`,
+        [params.sessionId, params.workerId, params.leaseToken, expiresAt.toISOString()]
+      );
+      return result.rows[0] ? sandboxSession(result.rows[0]) : null;
+    }
   }
 }
