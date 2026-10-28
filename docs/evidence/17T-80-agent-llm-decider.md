@@ -15,7 +15,12 @@
 **PR title:** `feat(agent): add bounded shared-LLM decision provider`
 
 **Tested source commit:** `c4629bc122f673e8b2870e722c093f737f826899`
-**PR / CI:** pending publication
+
+**Draft PR:** [17thedevv/Giga#45](https://github.com/17thedevv/Giga/pull/45)
+
+**PR checks:** [current checks page](https://github.com/17thedevv/Giga/pull/45/checks)
+
+**Initial published PR head:** `7130a0aa184a96ca7605d0f8f94677225b70c678` (evidence and review follow-up commits may advance the branch head)
 
 ## Scope and architecture
 
@@ -66,6 +71,8 @@ Before edits, the baseline focused command at `4436fa1560296f7dba20632fb2220bf7b
 
 The local environment has no `TEST_DATABASE_URL`, `psql`, PostgreSQL server binaries or Docker. PostgreSQL-only tests therefore could not be run locally. The repository's API CI workflow provisions PostgreSQL 16 and runs the complete API suite; final CI status for the PR head is pending.
 
+On initial PR head `7130a0aa184a96ca7605d0f8f94677225b70c678`, Git Workflow passed and Backend CI was still running. See the [Git Workflow run](https://github.com/17thedevv/Giga/actions/runs/40681222913/job/122792111848) and [Backend CI run](https://github.com/17thedevv/Giga/actions/runs/40681223190/job/122792112492). Recheck the live PR checks page for the final head.
+
 ## Contract, database and Cloud impact
 
 - No public API, DTO, event, authentication or persistence contract changes; API v0.2 remains DRAFT.
@@ -75,4 +82,4 @@ The local environment has no `TEST_DATABASE_URL`, `psql`, PostgreSQL server bina
 
 ## Handoff and remaining gates
 
-The code is prepared for a Draft PR linked to 17T-80. The tested source SHA, final PR head SHA, PR link and exact-head GitHub Actions checks will be added after branch publication. Independent reviewer approval and PostgreSQL CI remain open gates. No merge or deployment is authorized by this evidence.
+The Draft PR is linked to 17T-80. A formal GitHub review request for the assigned peer reviewer was attempted; GitHub rejected it with HTTP 422 because the account is not a repository collaborator. No independent human review is claimed; reviewer access/request remains open. The final PR head SHA and exact-head CI status must be read from the live PR checks page after the evidence update. No merge or deployment is authorized by this evidence.
