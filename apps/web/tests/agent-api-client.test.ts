@@ -93,7 +93,7 @@ describe('Real Agent API client', () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
-  it('reconciles an uncertain admission only through one recent exact run and authoritative GET', async () => {
+  it('replays the same uncertain admission key, then confirms the run through authoritative GET', async () => {
     const run = {
       ...fixture.run,
       task: 'Inspect the owned workspace',
@@ -102,7 +102,7 @@ describe('Real Agent API client', () => {
     };
     const fetchMock = vi.fn()
       .mockRejectedValueOnce(new TypeError('synthetic network timeout'))
-      .mockResolvedValueOnce(json({ items: [run], nextCursor: null }))
+      .mockResolvedValueOnce(json({ run }, 200))
       .mockResolvedValueOnce(json({ run: { ...run, status: 'failed', error: { code: 'RUNTIME_UNAVAILABLE', message: 'No Cloud runtime' } } }));
     vi.stubGlobal('fetch', fetchMock);
 
@@ -115,23 +115,27 @@ describe('Real Agent API client', () => {
     expect(result.run.status).toBe('failed');
     expect(result.run.error?.code).toBe('RUNTIME_UNAVAILABLE');
     expect(fetchMock).toHaveBeenCalledTimes(3);
-    expect(String(fetchMock.mock.calls[1][0])).toContain('/api/v1/agent/runs?');
+    expect(String(fetchMock.mock.calls[0][0])).toBe('/api/v1/agent/runs');
+    expect(String(fetchMock.mock.calls[1][0])).toBe('/api/v1/agent/runs');
+    expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get('Idempotency-Key'))
+      .toBe(new Headers(fetchMock.mock.calls[1][1]?.headers).get('Idempotency-Key'));
+    expect(fetchMock.mock.calls[0][1]?.body).toBe(fetchMock.mock.calls[1][1]?.body);
     expect(String(fetchMock.mock.calls[2][0])).toBe('/api/v1/agent/runs/' + run.id);
   });
 
-  it('keeps an uncertain admission unresolved when recent matching records are ambiguous', async () => {
-    const run = { ...fixture.run, task: 'Repeatable identical task', createdAt: new Date().toISOString() };
+  it('keeps an uncertain admission unresolved when idempotent replay also fails, without guessing from history', async () => {
     const fetchMock = vi.fn()
       .mockRejectedValueOnce(new TypeError('synthetic network timeout'))
-      .mockResolvedValueOnce(json({ items: [run, { ...run, id: '20000000-0000-4000-8000-000000000002' }], nextCursor: null }));
+      .mockRejectedValueOnce(new TypeError('synthetic replay timeout'));
     vi.stubGlobal('fetch', fetchMock);
 
     await expect(new RealApiClient().createAgentRun({
       workspaceId: fixture.workspace.id,
-      task: run.task,
+      task: 'Repeatable identical task',
       mode: 'ask',
     }, { idempotencyKey: 'agent-same-key' })).rejects.toBeInstanceOf(TypeError);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual(['/api/v1/agent/runs', '/api/v1/agent/runs']);
   });
 
   it('rejects malformed pages and run DTOs instead of passing them into UI state', async () => {

@@ -1027,47 +1027,39 @@ export class RealApiClient {
     const key = options?.idempotencyKey ?? generateAgentIdempotencyKey();
     const headers = new Headers();
     headers.set('Idempotency-Key', key);
-    const startedAt = Date.now();
+    const requestOptions: RequestInit = {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(input),
+    };
     try {
-      return projectAgentRunEnvelope(await this.request('/api/v1/agent/runs', {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(input),
-      }));
+      return projectAgentRunEnvelope(await this.request('/api/v1/agent/runs', requestOptions));
     } catch (error) {
       if (!isUncertainAdmissionFailure(error)) throw error;
 
       // Admission can commit before a transport/5xx failure reaches the browser.
-      // The API has no key lookup, so only reconcile when a recent, exact, unique
-      // tuple can be found, then confirm its current state with GET /runs/:id.
+      // Replay the exact request with the same key: the backend returns the
+      // durable run for an exact duplicate, or creates it if the first request
+      // never committed. Never guess from a task/workspace tuple in run history.
+      let replay: { run: AgentRun };
       try {
-        const { items } = await this.listAgentRuns({ workspaceId: input.workspaceId, limit: 100 });
-        const now = Date.now();
-        const expected = {
-          workspaceId: input.workspaceId,
-          task: input.task.trim(),
-          mode: input.mode ?? 'ask',
-          runtime: input.runtime ?? 'cloud',
-          modelId: input.modelId ?? 'giga-agent-default',
-        };
-        const matches = items.filter((run) => {
-          const createdAt = Date.parse(run.createdAt);
-          return run.workspaceId === expected.workspaceId && run.task === expected.task &&
-            run.mode === expected.mode && run.runtime === expected.runtime && run.modelId === expected.modelId &&
-            createdAt >= startedAt - 60_000 && createdAt <= now + 60_000;
-        });
-        if (matches.length === 1) {
-          const authoritative = await this.getAgentRun(matches[0].id);
-          const run = authoritative.run;
-          if (run.workspaceId === expected.workspaceId && run.task === expected.task && run.mode === expected.mode &&
-              run.runtime === expected.runtime && run.modelId === expected.modelId) return authoritative;
-        }
+        replay = projectAgentRunEnvelope(await this.request('/api/v1/agent/runs', requestOptions));
       } catch (reconciliationError) {
-        // A concurrent session expiry is more actionable and must reach AuthContext.
-        if (reconciliationError instanceof ApiException && reconciliationError.status === 401) throw reconciliationError;
+        // A definite response (especially session expiry or a key conflict) is
+        // more actionable than the original uncertain transport/5xx failure.
+        if (reconciliationError instanceof ApiException && reconciliationError.status < 500) throw reconciliationError;
+        throw error;
       }
-      // Keep the caller's idempotency key so an explicit retry replays this action.
-      throw error;
+
+      const authoritative = await this.getAgentRun(replay.run.id);
+      const expectedMode = input.mode ?? 'ask';
+      if (authoritative.run.id !== replay.run.id || authoritative.run.workspaceId !== input.workspaceId ||
+          authoritative.run.task !== input.task.trim() || authoritative.run.mode !== expectedMode ||
+          authoritative.run.runtime !== (input.runtime ?? 'cloud') ||
+          authoritative.run.modelId !== (input.modelId ?? 'giga-agent-default')) {
+        throw invalidDto();
+      }
+      return authoritative;
     }
   }
 
