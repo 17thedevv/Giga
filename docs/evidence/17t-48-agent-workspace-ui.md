@@ -61,8 +61,9 @@ The checked-in backend routes, schemas, and capability configuration were inspec
 | `node --test .agents/scripts/validate-git-workflow.test.mjs` | Pass: 6/6. |
 | `node .agents/scripts/validate-skills.mjs` | Pass. |
 | `git diff --check` | Pass before documentation was added; rerun after final edits. |
-| Repository Git workflow validator | To run on the committed PR range before push. |
-| GitHub CI | To verify on final pushed HEAD. |
+| Repository Git workflow validator | Pass on branch `feat/17t-48-agent-workspaces-real-ui`, PR title `feat(web): connect Agent workspaces and run history`, base `e5b429593f126857a2a3a4213b2ab04a629d41a2`, and implementation head `130e39f301ce4e46ed0aff4747008fd00eabec10`; both commit subjects passed. |
+| GitHub Frontend CI | Pass: [run #60](https://github.com/17thedevv/Giga/actions/runs/40849169753) on implementation head `130e39f301ce4e46ed0aff4747008fd00eabec10`; typecheck, build, bundle security scan and Vitest all succeeded. |
+| GitHub Validate Git Workflow | Pass: [run #205](https://github.com/17thedevv/Giga/actions/runs/40849169782) on the same implementation head. |
 
 ## Review and gate
 
