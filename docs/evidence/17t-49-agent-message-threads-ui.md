@@ -127,6 +127,8 @@ Added deterministic deferred-promise coverage in `apps/web/tests/agent-real-view
 | `node --test .agents/scripts/validate-git-workflow.test.mjs` | PASS; 6 tests |
 | `node .agents/scripts/validate-skills.mjs` | PASS |
 | `git diff --check` | PASS |
-| `node .agents/scripts/validate-git-workflow.mjs` | To run against the committed PR range; requires exact PR metadata environment variables |
+| `node .agents/scripts/validate-git-workflow.mjs` | PASS with the existing PR #47 title/body and exact `main`/HEAD SHAs |
+| GitHub Frontend CI | PASS on review-fix code commit `385bcc225649aa1cf255a17a978f7cfce18b3460`; [run #69](https://github.com/17thedevv/Giga/actions/runs/41032087554) |
+| GitHub Validate Git Workflow | PASS on review-fix code commit `385bcc225649aa1cf255a17a978f7cfce18b3460`; [run #217](https://github.com/17thedevv/Giga/actions/runs/41032087439) |
 
-The focused Real Agent view suite passes 33/33, including all deferred follow-up regressions. GitHub CI is run after pushing the scoped commit; final CI links and source commit SHA are recorded in the PR. Browser E2E and deployed Real API verification remain unavailable in this environment; no browser or deployment acceptance is claimed.
+The focused Real Agent view suite passes 33/33, including all deferred follow-up regressions. `385bcc225649aa1cf255a17a978f7cfce18b3460` is the exact implementation/test HEAD verified by CI; a later evidence-only commit updates this file, and its exact branch HEAD/checks are reflected in the live PR metadata. Browser E2E and deployed Real API verification remain unavailable in this environment; no browser or deployment acceptance is claimed.
