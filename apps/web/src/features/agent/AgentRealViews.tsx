@@ -16,6 +16,7 @@ import { Button } from '../../components/Button.js';
 import { Input } from '../../components/Input.js';
 import { Modal } from '../../components/Modal.js';
 import { Textarea } from '../../components/Textarea.js';
+import { AgentMessageThread } from './AgentMessageThread.js';
 
 const modes: readonly { value: AgentMode; title: string; detail: string }[] = [
   { value: 'ask', title: 'Ask', detail: 'Answer a question without changing workspace files.' },
@@ -803,6 +804,12 @@ export const AgentRealRunView: React.FC = () => {
             </p>
           )}
         </section>
+        <AgentMessageThread
+          key={run.id}
+          run={run}
+          onStartNewRun={() => navigate('/agent?workspace=' + encodeURIComponent(run.workspaceId))}
+          onRefreshRun={loadRun}
+        />
       </div>
     </main>
   );

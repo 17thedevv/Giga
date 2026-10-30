@@ -8,12 +8,18 @@ import { ApiModeProvider, useApiMode } from '../src/app/context/ApiModeContext.j
 import { ThemeProvider } from '../src/app/context/ThemeContext.js';
 import { AuthProvider } from '../src/app/context/AuthContext.js';
 import { RouterProvider, useRouter } from '../src/app/router.js';
-import { ApiException, realApiClient } from '../src/lib/api/client.js';
-import type { AgentCapabilities, AgentRun, AgentWorkspace } from '../src/lib/api/agent-contract.js';
+import {
+  advanceSessionGeneration,
+  ApiException,
+  realApiClient,
+  SESSION_EXPIRED_EVENT,
+} from '../src/lib/api/client.js';
+import type { AgentCapabilities, AgentMessage, AgentRun, AgentWorkspace } from '../src/lib/api/agent-contract.js';
 
 const capabilities = fixture.capabilities as AgentCapabilities;
 const workspace = fixture.workspace as AgentWorkspace;
 const failedRun = fixture.run as AgentRun;
+const initialMessage = fixture.message as AgentMessage;
 
 function renderReal(ui: React.ReactElement, initialPath = '/agent') {
   return render(
@@ -34,11 +40,28 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+function followUpEnabledCapabilities(): AgentCapabilities {
+  return {
+    ...capabilities,
+    capabilities: {
+      ...capabilities.capabilities,
+      cloudRuntime: { available: true },
+      runExecution: { available: true },
+      followUp: { available: true },
+    },
+  };
+}
+
 describe('Real Agent workspace and run integration', () => {
   beforeEach(() => {
     localStorage.clear();
     sessionStorage.clear();
     vi.restoreAllMocks();
+    vi.spyOn(realApiClient, 'getAgentCapabilities').mockResolvedValue(capabilities);
+    vi.spyOn(realApiClient, 'listAgentMessages').mockImplementation(async (id, options) => ({
+      items: [{ ...initialMessage, runId: id, workspaceId: options.workspaceId }],
+      nextCursor: null,
+    }));
   });
 
   afterEach(() => {
@@ -278,6 +301,8 @@ describe('Real Agent workspace and run integration', () => {
     expect(screen.queryByText(/Created src\//)).toBeNull();
     expect(screen.queryByText(/Production Build/)).toBeNull();
     expect(screen.queryByTestId('demo-run-badge')).toBeNull();
+    expect(await screen.findByText(failedRun.task, { selector: '.g-agent-message__content' })).toBeDefined();
+    expect(screen.getByTestId('agent-thread-read-only').textContent).toContain('read-only');
   });
 
   it('treats an owner-scoped 404 as unavailable and does not render any Demo run', async () => {
@@ -308,6 +333,596 @@ describe('Real Agent workspace and run integration', () => {
 
     await waitFor(() => expect(screen.queryByText('Stale old route task')).toBeNull());
     expect(screen.getByTestId('run-task-title').textContent).toBe('New route task');
+  });
+
+  it('renders durable messages as escaped plain text and refreshes them with the route', async () => {
+    const activeRun = { ...failedRun, status: 'running' as const };
+    const messageWithInternalField = {
+      ...initialMessage,
+      runId: activeRun.id,
+      workspaceId: activeRun.workspaceId,
+      sequence: 2,
+      id: '30000000-0000-4000-8000-000000000002',
+      role: 'tool_summary' as const,
+      content: '<script>synthetic()</script> Tool output summary',
+      rawReasoning: 'private model state',
+    };
+    const listMessages = vi.spyOn(realApiClient, 'listAgentMessages').mockResolvedValue({
+      items: [{ ...initialMessage, runId: activeRun.id, workspaceId: activeRun.workspaceId }, messageWithInternalField],
+      nextCursor: null,
+    });
+    vi.spyOn(realApiClient, 'getAgentRun').mockResolvedValue({ run: activeRun });
+    vi.spyOn(realApiClient, 'getAgentWorkspace').mockResolvedValue({ workspace });
+
+    const { container } = renderReal(<AgentRunView />, '/agent/runs/' + activeRun.id);
+
+    expect(await screen.findByText('<script>synthetic()</script> Tool output summary')).toBeDefined();
+    expect(screen.getAllByTestId('agent-message-item').map((item) => item.getAttribute('data-sequence'))).toEqual(['1', '2']);
+    expect(container.querySelector('script')).toBeNull();
+    expect(container.querySelector('img')).toBeNull();
+    expect(container.textContent).not.toContain('private model state');
+    expect(screen.getByTestId('agent-thread-read-only').textContent).toContain('runtime is unavailable');
+    expect(screen.queryByTestId('agent-follow-up-input')).toBeNull();
+
+    fireEvent.click(screen.getByTestId('refresh-agent-messages-btn'));
+    await waitFor(() => expect(listMessages).toHaveBeenCalledTimes(2));
+  });
+
+  it('paginates ascending message history using only the server cursor', async () => {
+    const later = {
+      ...initialMessage,
+      id: '30000000-0000-4000-8000-000000000005',
+      sequence: 2,
+      content: 'Later durable message',
+    };
+    const listMessages = vi.spyOn(realApiClient, 'listAgentMessages')
+      .mockResolvedValueOnce({ items: [initialMessage], nextCursor: 'opaque-thread-cursor' })
+      .mockResolvedValueOnce({ items: [later], nextCursor: null });
+    vi.spyOn(realApiClient, 'getAgentRun').mockResolvedValue({ run: failedRun });
+    vi.spyOn(realApiClient, 'getAgentWorkspace').mockResolvedValue({ workspace });
+
+    renderReal(<AgentRunView />, '/agent/runs/' + failedRun.id);
+    expect(await screen.findByText(initialMessage.content, { selector: '.g-agent-message__content' })).toBeDefined();
+    fireEvent.click(screen.getByTestId('load-more-agent-messages-btn'));
+
+    expect(await screen.findByText('Later durable message')).toBeDefined();
+    expect(listMessages).toHaveBeenNthCalledWith(2, failedRun.id, {
+      workspaceId: failedRun.workspaceId,
+      cursor: 'opaque-thread-cursor',
+    });
+    expect(screen.getAllByTestId('agent-message-item').map((item) => item.getAttribute('data-sequence'))).toEqual(['1', '2']);
+  });
+
+  it('ignores a stale message page after navigating to another run', async () => {
+    const olderRun = { ...failedRun, status: 'running' as const };
+    const newerRun = { ...failedRun, id: '20000000-0000-4000-8000-000000000006', task: 'New route task' };
+    const olderMessages = deferred<{ items: AgentMessage[]; nextCursor: null }>();
+    vi.spyOn(realApiClient, 'getAgentRun').mockImplementation((id) => Promise.resolve({ run: id === olderRun.id ? olderRun : newerRun }));
+    vi.spyOn(realApiClient, 'getAgentWorkspace').mockResolvedValue({ workspace });
+    vi.spyOn(realApiClient, 'listAgentMessages').mockImplementation((id, options) => {
+      if (id === olderRun.id) return olderMessages.promise;
+      return Promise.resolve({
+        items: [{ ...initialMessage, runId: id, workspaceId: options.workspaceId, content: 'Current run message' }],
+        nextCursor: null,
+      });
+    });
+
+    function RouteControl() {
+      const { navigate } = useRouter();
+      return <button data-testid="navigate-to-new-message-thread" onClick={() => navigate('/agent/runs/' + newerRun.id)}>Open newer run</button>;
+    }
+
+    renderReal(<><RouteControl /><AgentRunView /></>, '/agent/runs/' + olderRun.id);
+    await screen.findByTestId('agent-messages-loading');
+    fireEvent.click(screen.getByTestId('navigate-to-new-message-thread'));
+    expect(await screen.findByText('Current run message')).toBeDefined();
+    await act(async () => {
+      olderMessages.resolve({
+        items: [{ ...initialMessage, runId: olderRun.id, workspaceId: olderRun.workspaceId, content: 'Stale previous run message' }],
+        nextCursor: null,
+      });
+    });
+    expect(screen.queryByText('Stale previous run message')).toBeNull();
+    expect(screen.getByText('Current run message')).toBeDefined();
+  });
+
+  it('enables follow-up only when capability is true and run status is nonterminal, and blocks duplicate sends', async () => {
+    const activeRun = { ...failedRun, status: 'running' as const };
+    const enabledCapabilities = {
+      ...capabilities,
+      capabilities: {
+        ...capabilities.capabilities,
+        cloudRuntime: { available: true as const },
+        runExecution: { available: true as const },
+        followUp: { available: true as const },
+      },
+    };
+    vi.spyOn(realApiClient, 'getAgentCapabilities').mockResolvedValue(enabledCapabilities);
+    vi.spyOn(realApiClient, 'getAgentRun').mockResolvedValue({ run: activeRun });
+    vi.spyOn(realApiClient, 'getAgentWorkspace').mockResolvedValue({ workspace });
+    const pending = deferred<{ message: AgentMessage }>();
+    const createMessage = vi.spyOn(realApiClient, 'createAgentMessage').mockReturnValue(pending.promise);
+
+    renderReal(<AgentRunView />, '/agent/runs/' + activeRun.id);
+    const input = await screen.findByTestId('agent-follow-up-input');
+    fireEvent.change(input, { target: { value: 'Continue with the next step' } });
+    const submit = screen.getByTestId('send-agent-follow-up-btn') as HTMLButtonElement;
+    fireEvent.click(submit);
+    fireEvent.click(submit);
+
+    expect(createMessage).toHaveBeenCalledTimes(1);
+    expect(submit.disabled).toBe(true);
+    const [runId, body, options] = createMessage.mock.calls[0];
+    expect(runId).toBe(activeRun.id);
+    expect(body).toEqual({ content: 'Continue with the next step' });
+    expect(options?.workspaceId).toBe(activeRun.workspaceId);
+    expect(options?.idempotencyKey).toMatch(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/);
+
+    await act(async () => {
+      pending.resolve({ message: {
+        ...initialMessage,
+        id: '30000000-0000-4000-8000-000000000003',
+        runId: activeRun.id,
+        workspaceId: activeRun.workspaceId,
+        sequence: 2,
+        content: 'Continue with the next step',
+      } });
+    });
+    expect(await screen.findByText('Continue with the next step')).toBeDefined();
+    expect((screen.getByTestId('agent-follow-up-input') as HTMLTextAreaElement).value).toBe('');
+  });
+
+  it('keeps uncertain follow-up submissions pinned to the same body and idempotency key', async () => {
+    const activeRun = { ...failedRun, status: 'queued' as const };
+    const enabledCapabilities = {
+      ...capabilities,
+      capabilities: {
+        ...capabilities.capabilities,
+        cloudRuntime: { available: true as const },
+        runExecution: { available: true as const },
+        followUp: { available: true as const },
+      },
+    };
+    vi.spyOn(realApiClient, 'getAgentCapabilities').mockResolvedValue(enabledCapabilities);
+    vi.spyOn(realApiClient, 'getAgentRun').mockResolvedValue({ run: activeRun });
+    vi.spyOn(realApiClient, 'getAgentWorkspace').mockResolvedValue({ workspace });
+    const createMessage = vi.spyOn(realApiClient, 'createAgentMessage')
+      .mockRejectedValueOnce(new TypeError('synthetic timeout'))
+      .mockResolvedValueOnce({ message: {
+        ...initialMessage,
+        id: '30000000-0000-4000-8000-000000000004',
+        runId: activeRun.id,
+        workspaceId: activeRun.workspaceId,
+        sequence: 2,
+        content: 'Keep this request stable',
+      } });
+
+    renderReal(<AgentRunView />, '/agent/runs/' + activeRun.id);
+    fireEvent.change(await screen.findByTestId('agent-follow-up-input'), { target: { value: 'Keep this request stable' } });
+    fireEvent.click(screen.getByTestId('send-agent-follow-up-btn'));
+    expect(await screen.findByTestId('agent-follow-up-error')).toBeDefined();
+    expect((screen.getByTestId('agent-follow-up-input') as HTMLTextAreaElement).disabled).toBe(true);
+    fireEvent.click(screen.getByTestId('send-agent-follow-up-btn'));
+    fireEvent.click(screen.getByTestId('send-agent-follow-up-btn'));
+
+    await waitFor(() => expect(createMessage).toHaveBeenCalledTimes(2));
+    expect(createMessage.mock.calls[1][0]).toBe(createMessage.mock.calls[0][0]);
+    expect(createMessage.mock.calls[1][1]).toEqual(createMessage.mock.calls[0][1]);
+    expect(createMessage.mock.calls[1][2]?.idempotencyKey).toBe(createMessage.mock.calls[0][2]?.idempotencyKey);
+    expect(await screen.findByText('Keep this request stable')).toBeDefined();
+  });
+
+  it('disables refresh during a pending POST, reconciles once, and releases the lock for a new message', async () => {
+    const activeRun = { ...failedRun, status: 'running' as const };
+    const firstMessage = {
+      ...initialMessage,
+      id: '30000000-0000-4000-8000-000000000021',
+      runId: activeRun.id,
+      workspaceId: activeRun.workspaceId,
+      sequence: 2,
+      content: 'Confirmed first follow-up',
+    };
+    const secondMessage = {
+      ...firstMessage,
+      id: '30000000-0000-4000-8000-000000000022',
+      sequence: 3,
+      content: 'Confirmed second follow-up',
+    };
+    const persistedMessages: AgentMessage[] = [];
+    const listMessages = vi.spyOn(realApiClient, 'listAgentMessages').mockImplementation(async (runId, options) => ({
+      items: [{ ...initialMessage, runId, workspaceId: options.workspaceId }, ...persistedMessages],
+      nextCursor: null,
+    }));
+    vi.spyOn(realApiClient, 'getAgentCapabilities').mockResolvedValue(followUpEnabledCapabilities());
+    vi.spyOn(realApiClient, 'getAgentRun').mockResolvedValue({ run: activeRun });
+    vi.spyOn(realApiClient, 'getAgentWorkspace').mockResolvedValue({ workspace });
+    const firstPost = deferred<{ message: AgentMessage }>();
+    const createMessage = vi.spyOn(realApiClient, 'createAgentMessage').mockImplementation((_runId, body) => {
+      if (body.content === firstMessage.content) return firstPost.promise;
+      persistedMessages.push(secondMessage);
+      return Promise.resolve({ message: secondMessage });
+    });
+
+    renderReal(<AgentRunView />, '/agent/runs/' + activeRun.id);
+    const input = await screen.findByTestId('agent-follow-up-input');
+    fireEvent.change(input, { target: { value: firstMessage.content } });
+    fireEvent.click(screen.getByTestId('send-agent-follow-up-btn'));
+
+    const refresh = screen.getByTestId('refresh-agent-messages-btn') as HTMLButtonElement;
+    expect(refresh.disabled).toBe(true);
+    fireEvent.click(refresh);
+    expect(listMessages).toHaveBeenCalledTimes(1);
+    expect((screen.getByTestId('agent-follow-up-input') as HTMLTextAreaElement).disabled).toBe(true);
+
+    persistedMessages.push(firstMessage);
+    await act(async () => { firstPost.resolve({ message: firstMessage }); });
+
+    await waitFor(() => expect(listMessages).toHaveBeenCalledTimes(2));
+    expect(screen.getAllByText(firstMessage.content, { selector: '.g-agent-message__content' })).toHaveLength(1);
+    expect((screen.getByTestId('agent-follow-up-input') as HTMLTextAreaElement).disabled).toBe(false);
+    expect((screen.getByTestId('refresh-agent-messages-btn') as HTMLButtonElement).disabled).toBe(false);
+
+    const firstKey = createMessage.mock.calls[0][2]?.idempotencyKey;
+    fireEvent.change(screen.getByTestId('agent-follow-up-input'), { target: { value: secondMessage.content } });
+    fireEvent.click(screen.getByTestId('send-agent-follow-up-btn'));
+    expect(createMessage).toHaveBeenCalledTimes(2);
+    expect(createMessage.mock.calls[1][2]?.idempotencyKey).not.toBe(firstKey);
+    expect(await screen.findByText(secondMessage.content, { selector: '.g-agent-message__content' })).toBeDefined();
+    expect(screen.getAllByTestId('agent-message-item').filter((item) => item.textContent?.includes(firstMessage.content))).toHaveLength(1);
+  });
+
+  it('ignores a pre-commit refresh after POST confirmation and retains the fresh pagination cursor', async () => {
+    const activeRun = { ...failedRun, status: 'running' as const };
+    const committedMessage = {
+      ...initialMessage,
+      id: '30000000-0000-4000-8000-000000000023',
+      runId: activeRun.id,
+      workspaceId: activeRun.workspaceId,
+      sequence: 2,
+      content: 'Visible after server commit',
+    };
+    const oldRefresh = deferred<{ items: AgentMessage[]; nextCursor: string | null }>();
+    const post = deferred<{ message: AgentMessage }>();
+    let readCount = 0;
+    const listMessages = vi.spyOn(realApiClient, 'listAgentMessages').mockImplementation((runId, options) => {
+      readCount++;
+      if (readCount === 1) return Promise.resolve({
+        items: [{ ...initialMessage, runId, workspaceId: options.workspaceId }], nextCursor: null,
+      });
+      if (readCount === 2) return oldRefresh.promise;
+      if (readCount === 3) return Promise.resolve({
+        items: [
+          { ...initialMessage, runId, workspaceId: options.workspaceId },
+          committedMessage,
+        ],
+        nextCursor: 'cursor-after-commit',
+      });
+      return Promise.resolve({ items: [], nextCursor: null });
+    });
+    vi.spyOn(realApiClient, 'getAgentCapabilities').mockResolvedValue(followUpEnabledCapabilities());
+    vi.spyOn(realApiClient, 'getAgentRun').mockResolvedValue({ run: activeRun });
+    vi.spyOn(realApiClient, 'getAgentWorkspace').mockResolvedValue({ workspace });
+    const createMessage = vi.spyOn(realApiClient, 'createAgentMessage').mockReturnValue(post.promise);
+
+    renderReal(<AgentRunView />, '/agent/runs/' + activeRun.id);
+    await screen.findByTestId('agent-follow-up-input');
+    fireEvent.click(screen.getByTestId('refresh-agent-messages-btn'));
+    await waitFor(() => expect(listMessages).toHaveBeenCalledTimes(2));
+    fireEvent.change(screen.getByTestId('agent-follow-up-input'), { target: { value: committedMessage.content } });
+    fireEvent.click(screen.getByTestId('send-agent-follow-up-btn'));
+    expect(createMessage).toHaveBeenCalledTimes(1);
+
+    await act(async () => { post.resolve({ message: committedMessage }); });
+    await waitFor(() => expect(listMessages).toHaveBeenCalledTimes(3));
+    expect(await screen.findByText(committedMessage.content, { selector: '.g-agent-message__content' })).toBeDefined();
+    expect(screen.getAllByText(committedMessage.content, { selector: '.g-agent-message__content' })).toHaveLength(1);
+
+    await act(async () => {
+      oldRefresh.resolve({
+        items: [{ ...initialMessage, runId: activeRun.id, workspaceId: activeRun.workspaceId }],
+        nextCursor: 'stale-cursor-before-commit',
+      });
+    });
+    expect(screen.getAllByText(committedMessage.content, { selector: '.g-agent-message__content' })).toHaveLength(1);
+    fireEvent.click(screen.getByTestId('load-more-agent-messages-btn'));
+    await waitFor(() => expect(listMessages).toHaveBeenCalledTimes(4));
+    expect(listMessages).toHaveBeenLastCalledWith(activeRun.id, {
+      workspaceId: activeRun.workspaceId,
+      cursor: 'cursor-after-commit',
+    });
+  });
+
+  it.each([
+    { label: 'definite 4xx', error: () => new ApiException(400, 'INVALID_REQUEST', 'Invalid message'), reusesKey: false },
+    { label: 'uncertain network failure', error: () => new TypeError('synthetic timeout'), reusesKey: true },
+  ])('settles a $label during refresh without duplicating the follow-up', async ({ error, reusesKey }) => {
+    const activeRun = { ...failedRun, status: 'running' as const };
+    const postedMessage = {
+      ...initialMessage,
+      id: '30000000-0000-4000-8000-000000000024',
+      runId: activeRun.id,
+      workspaceId: activeRun.workspaceId,
+      sequence: 2,
+      content: 'Retry after refresh failure',
+    };
+    const refreshPage = deferred<{ items: AgentMessage[]; nextCursor: null }>();
+    const persistedMessages: AgentMessage[] = [];
+    let readCount = 0;
+    const listMessages = vi.spyOn(realApiClient, 'listAgentMessages').mockImplementation((runId, options) => {
+      readCount++;
+      if (readCount === 1) return Promise.resolve({
+        items: [{ ...initialMessage, runId, workspaceId: options.workspaceId }], nextCursor: null,
+      });
+      if (readCount === 2) return refreshPage.promise;
+      return Promise.resolve({
+        items: [{ ...initialMessage, runId, workspaceId: options.workspaceId }, ...persistedMessages],
+        nextCursor: null,
+      });
+    });
+    vi.spyOn(realApiClient, 'getAgentCapabilities').mockResolvedValue(followUpEnabledCapabilities());
+    vi.spyOn(realApiClient, 'getAgentRun').mockResolvedValue({ run: activeRun });
+    vi.spyOn(realApiClient, 'getAgentWorkspace').mockResolvedValue({ workspace });
+    const createMessage = vi.spyOn(realApiClient, 'createAgentMessage')
+      .mockRejectedValueOnce(error())
+      .mockImplementationOnce(async (_runId, body) => {
+        expect(body.content).toBe(postedMessage.content);
+        persistedMessages.push(postedMessage);
+        return { message: postedMessage };
+      });
+
+    renderReal(<AgentRunView />, '/agent/runs/' + activeRun.id);
+    fireEvent.click(await screen.findByTestId('refresh-agent-messages-btn'));
+    await waitFor(() => expect(listMessages).toHaveBeenCalledTimes(2));
+    fireEvent.change(screen.getByTestId('agent-follow-up-input'), { target: { value: postedMessage.content } });
+    fireEvent.click(screen.getByTestId('send-agent-follow-up-btn'));
+    expect(await screen.findByTestId('agent-follow-up-error')).toBeDefined();
+    await waitFor(() => expect((screen.getByTestId('agent-follow-up-input') as HTMLTextAreaElement).disabled).toBe(reusesKey));
+
+    const firstKey = createMessage.mock.calls[0][2]?.idempotencyKey;
+    await act(async () => {
+      refreshPage.resolve({
+        items: [{ ...initialMessage, runId: activeRun.id, workspaceId: activeRun.workspaceId }],
+        nextCursor: null,
+      });
+    });
+    fireEvent.click(screen.getByTestId('send-agent-follow-up-btn'));
+    await waitFor(() => expect(createMessage).toHaveBeenCalledTimes(2));
+    if (reusesKey) {
+      expect(createMessage.mock.calls[1][2]?.idempotencyKey).toBe(firstKey);
+    } else {
+      expect(createMessage.mock.calls[1][2]?.idempotencyKey).not.toBe(firstKey);
+    }
+    expect(await screen.findByText(postedMessage.content, { selector: '.g-agent-message__content' })).toBeDefined();
+    expect(screen.getAllByText(postedMessage.content, { selector: '.g-agent-message__content' })).toHaveLength(1);
+  });
+
+  it('fences pending POST and refresh results across rapid A-to-B-to-C navigation', async () => {
+    const runA = { ...failedRun, id: '20000000-0000-4000-8000-000000000031', status: 'running' as const };
+    const runB = { ...runA, id: '20000000-0000-4000-8000-000000000032', task: 'Run B' };
+    const runC = { ...runA, id: '20000000-0000-4000-8000-000000000033', task: 'Run C' };
+    const runs = new Map([[runA.id, runA], [runB.id, runB], [runC.id, runC]]);
+    const oldRefresh = deferred<{ items: AgentMessage[]; nextCursor: null }>();
+    const oldPost = deferred<{ message: AgentMessage }>();
+    const runCMessage = {
+      ...initialMessage,
+      id: '30000000-0000-4000-8000-000000000032',
+      runId: runC.id,
+      workspaceId: runC.workspaceId,
+      sequence: 2,
+      content: 'C follow-up confirmed',
+    };
+    let runAReads = 0;
+    vi.spyOn(realApiClient, 'getAgentCapabilities').mockResolvedValue(followUpEnabledCapabilities());
+    vi.spyOn(realApiClient, 'getAgentRun').mockImplementation(async (id) => ({ run: runs.get(id) ?? runC }));
+    vi.spyOn(realApiClient, 'getAgentWorkspace').mockResolvedValue({ workspace });
+    vi.spyOn(realApiClient, 'listAgentMessages').mockImplementation((runId, options) => {
+      if (runId === runA.id && ++runAReads === 2) return oldRefresh.promise;
+      const label = runId === runA.id ? 'Run A history' : runId === runB.id ? 'Run B history' : 'Run C history';
+      return Promise.resolve({
+        items: [{ ...initialMessage, runId, workspaceId: options.workspaceId, content: label }],
+        nextCursor: null,
+      });
+    });
+    const createMessage = vi.spyOn(realApiClient, 'createAgentMessage').mockImplementation((runId, body) => {
+      if (runId === runA.id) return oldPost.promise;
+      expect(runId).toBe(runC.id);
+      expect(body.content).toBe(runCMessage.content);
+      return Promise.resolve({ message: runCMessage });
+    });
+
+    function RouteControls() {
+      const { navigate } = useRouter();
+      return <>
+        <button data-testid="navigate-to-run-b" onClick={() => navigate('/agent/runs/' + runB.id)}>Run B</button>
+        <button data-testid="navigate-to-run-c" onClick={() => navigate('/agent/runs/' + runC.id)}>Run C</button>
+      </>;
+    }
+
+    renderReal(<><RouteControls /><AgentRunView /></>, '/agent/runs/' + runA.id);
+    await screen.findByText('Run A history', { selector: '.g-agent-message__content' });
+    fireEvent.click(screen.getByTestId('refresh-agent-messages-btn'));
+    await waitFor(() => expect(realApiClient.listAgentMessages).toHaveBeenCalledTimes(2));
+    fireEvent.change(screen.getByTestId('agent-follow-up-input'), { target: { value: 'A pending request' } });
+    fireEvent.click(screen.getByTestId('send-agent-follow-up-btn'));
+    const oldKey = createMessage.mock.calls[0][2]?.idempotencyKey;
+
+    fireEvent.click(screen.getByTestId('navigate-to-run-b'));
+    await screen.findByText('Run B history', { selector: '.g-agent-message__content' });
+    fireEvent.click(screen.getByTestId('navigate-to-run-c'));
+    await screen.findByText('Run C history', { selector: '.g-agent-message__content' });
+    fireEvent.change(screen.getByTestId('agent-follow-up-input'), { target: { value: runCMessage.content } });
+    fireEvent.click(screen.getByTestId('send-agent-follow-up-btn'));
+    await screen.findByText(runCMessage.content, { selector: '.g-agent-message__content' });
+    const currentKey = createMessage.mock.calls[1][2]?.idempotencyKey;
+    expect(createMessage.mock.calls[1][0]).toBe(runC.id);
+    expect(currentKey).not.toBe(oldKey);
+
+    await act(async () => {
+      oldPost.resolve({ message: {
+        ...initialMessage,
+        id: '30000000-0000-4000-8000-000000000031',
+        runId: runA.id,
+        workspaceId: runA.workspaceId,
+        sequence: 2,
+        content: 'Stale A post must not leak',
+      } });
+      oldRefresh.resolve({
+        items: [{ ...initialMessage, runId: runA.id, workspaceId: runA.workspaceId, content: 'Stale A refresh must not leak' }],
+        nextCursor: null,
+      });
+    });
+    expect(screen.queryByText('Stale A post must not leak')).toBeNull();
+    expect(screen.queryByText('Stale A refresh must not leak')).toBeNull();
+    expect(screen.getByText(runCMessage.content, { selector: '.g-agent-message__content' })).toBeDefined();
+  });
+
+  it('clears protected thread data on session expiry and never applies the stale POST after reauthentication', async () => {
+    const activeRun = { ...failedRun, status: 'running' as const };
+    const oldSessionMessage = {
+      ...initialMessage,
+      id: '30000000-0000-4000-8000-000000000041',
+      runId: activeRun.id,
+      workspaceId: activeRun.workspaceId,
+      sequence: 2,
+      content: 'Old session POST result',
+    };
+    const newSessionMessage = {
+      ...oldSessionMessage,
+      id: '30000000-0000-4000-8000-000000000042',
+      sequence: 3,
+      content: 'New session follow-up',
+    };
+    const oldPost = deferred<{ message: AgentMessage }>();
+    const persistedMessages: AgentMessage[] = [];
+    const listMessages = vi.spyOn(realApiClient, 'listAgentMessages').mockImplementation(async (runId, options) => ({
+      items: [{ ...initialMessage, runId, workspaceId: options.workspaceId }, ...persistedMessages],
+      nextCursor: null,
+    }));
+    vi.spyOn(realApiClient, 'getAgentCapabilities').mockResolvedValue(followUpEnabledCapabilities());
+    vi.spyOn(realApiClient, 'getAgentRun').mockResolvedValue({ run: activeRun });
+    vi.spyOn(realApiClient, 'getAgentWorkspace').mockResolvedValue({ workspace });
+    const createMessage = vi.spyOn(realApiClient, 'createAgentMessage')
+      .mockReturnValueOnce(oldPost.promise)
+      .mockImplementationOnce(async () => {
+        persistedMessages.push(newSessionMessage);
+        return { message: newSessionMessage };
+      });
+
+    renderReal(<AgentRunView />, '/agent/runs/' + activeRun.id);
+    fireEvent.change(await screen.findByTestId('agent-follow-up-input'), { target: { value: oldSessionMessage.content } });
+    fireEvent.click(screen.getByTestId('send-agent-follow-up-btn'));
+    const oldKey = createMessage.mock.calls[0][2]?.idempotencyKey;
+
+    act(() => {
+      advanceSessionGeneration();
+      window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT));
+    });
+    expect(screen.queryByText(initialMessage.content, { selector: '.g-agent-message__content' })).toBeNull();
+    expect(screen.getByTestId('agent-messages-error').textContent).toContain('session has expired');
+
+    await act(async () => { oldPost.resolve({ message: oldSessionMessage }); });
+    expect(screen.queryByText(oldSessionMessage.content, { selector: '.g-agent-message__content' })).toBeNull();
+    expect(screen.queryByTestId('agent-follow-up-input')).toBeNull();
+
+    advanceSessionGeneration();
+    fireEvent.click(screen.getByTestId('refresh-agent-messages-btn'));
+    const input = await screen.findByTestId('agent-follow-up-input');
+    fireEvent.change(input, { target: { value: newSessionMessage.content } });
+    fireEvent.click(screen.getByTestId('send-agent-follow-up-btn'));
+    await screen.findByText(newSessionMessage.content, { selector: '.g-agent-message__content' });
+    expect(createMessage).toHaveBeenCalledTimes(2);
+    expect(createMessage.mock.calls[1][2]?.idempotencyKey).not.toBe(oldKey);
+    expect(listMessages).toHaveBeenCalledTimes(3);
+  });
+
+  it('treats a confirmed 401 as session invalidation instead of an uncertain retry', async () => {
+    const activeRun = { ...failedRun, status: 'running' as const };
+    vi.spyOn(realApiClient, 'getAgentCapabilities').mockResolvedValue(followUpEnabledCapabilities());
+    vi.spyOn(realApiClient, 'getAgentRun').mockResolvedValue({ run: activeRun });
+    vi.spyOn(realApiClient, 'getAgentWorkspace').mockResolvedValue({ workspace });
+    const createMessage = vi.spyOn(realApiClient, 'createAgentMessage')
+      .mockRejectedValue(new ApiException(401, 'UNAUTHORIZED', 'Session expired'));
+
+    renderReal(<AgentRunView />, '/agent/runs/' + activeRun.id);
+    fireEvent.change(await screen.findByTestId('agent-follow-up-input'), { target: { value: 'Do not retry after 401' } });
+    fireEvent.click(screen.getByTestId('send-agent-follow-up-btn'));
+
+    await waitFor(() => expect(screen.queryByTestId('agent-follow-up-input')).toBeNull());
+    expect(createMessage).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId('agent-messages-error').textContent).toContain('session has expired');
+    expect(screen.queryByText(initialMessage.content, { selector: '.g-agent-message__content' })).toBeNull();
+  });
+
+  it('supports keyboard submission from the follow-up composer', async () => {
+    const activeRun = { ...failedRun, status: 'running' as const };
+    const enabledCapabilities = {
+      ...capabilities,
+      capabilities: {
+        ...capabilities.capabilities,
+        cloudRuntime: { available: true as const },
+        runExecution: { available: true as const },
+        followUp: { available: true as const },
+      },
+    };
+    vi.spyOn(realApiClient, 'getAgentCapabilities').mockResolvedValue(enabledCapabilities);
+    vi.spyOn(realApiClient, 'getAgentRun').mockResolvedValue({ run: activeRun });
+    vi.spyOn(realApiClient, 'getAgentWorkspace').mockResolvedValue({ workspace });
+    vi.spyOn(realApiClient, 'createAgentMessage').mockResolvedValue({ message: {
+      ...initialMessage,
+      id: '30000000-0000-4000-8000-000000000007',
+      runId: activeRun.id,
+      workspaceId: activeRun.workspaceId,
+      sequence: 2,
+      content: 'Keyboard sent message',
+    } });
+
+    renderReal(<AgentRunView />, '/agent/runs/' + activeRun.id);
+    const input = await screen.findByRole('textbox', { name: 'Follow-up message' });
+    fireEvent.change(input, { target: { value: 'Keyboard sent message' } });
+    fireEvent.keyDown(input, { key: 'Enter', ctrlKey: true });
+
+    expect(await screen.findByText('Keyboard sent message')).toBeDefined();
+    expect(realApiClient.createAgentMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows a new-run action for terminal runs', async () => {
+    vi.spyOn(realApiClient, 'getAgentRun').mockResolvedValue({ run: failedRun });
+    vi.spyOn(realApiClient, 'getAgentWorkspace').mockResolvedValue({ workspace });
+    renderReal(<AgentRunView />, '/agent/runs/' + failedRun.id);
+    fireEvent.click(await screen.findByTestId('start-new-agent-run-btn'));
+    await waitFor(() => expect(window.location.pathname).toBe('/agent'));
+    expect(window.location.search).toBe('?workspace=' + workspace.id);
+  });
+
+  it('refreshes authoritative run state after a follow-up conflict', async () => {
+    const activeRun = { ...failedRun, status: 'running' as const };
+    const terminalRun = { ...activeRun, status: 'completed' as const };
+    const enabledCapabilities = {
+      ...capabilities,
+      capabilities: {
+        ...capabilities.capabilities,
+        cloudRuntime: { available: true as const },
+        runExecution: { available: true as const },
+        followUp: { available: true as const },
+      },
+    };
+    vi.spyOn(realApiClient, 'getAgentCapabilities').mockResolvedValue(enabledCapabilities);
+    const getRun = vi.spyOn(realApiClient, 'getAgentRun')
+      .mockResolvedValueOnce({ run: activeRun })
+      .mockResolvedValueOnce({ run: terminalRun });
+    vi.spyOn(realApiClient, 'getAgentWorkspace').mockResolvedValue({ workspace });
+    const createMessage = vi.spyOn(realApiClient, 'createAgentMessage')
+      .mockRejectedValue(new ApiException(409, 'CONFLICT', 'Run has completed'));
+
+    renderReal(<AgentRunView />, '/agent/runs/' + activeRun.id);
+    fireEvent.change(await screen.findByTestId('agent-follow-up-input'), { target: { value: 'Too late to send' } });
+    fireEvent.click(screen.getByTestId('send-agent-follow-up-btn'));
+
+    expect(createMessage).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(getRun).toHaveBeenCalledTimes(2));
+    expect(await screen.findByTestId('start-new-agent-run-btn')).toBeDefined();
+    expect(screen.getByTestId('run-status-badge').textContent).toBe('completed');
+    expect(screen.queryByTestId('agent-follow-up-input')).toBeNull();
   });
 
   it('keeps Real and Demo views separated when mode changes with a Real list request in flight', async () => {
