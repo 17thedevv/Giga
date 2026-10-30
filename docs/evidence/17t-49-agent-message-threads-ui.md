@@ -65,6 +65,7 @@ Added Real Agent UI tests in `apps/web/tests/agent-real-views.test.tsx` for:
 | `git diff --check` | PASS at local verification checkpoint |
 | GitHub Frontend CI | PASS on implementation commit `105607edf25800811cea4ba00d7fcc05bbb65ecb`; [run #66](https://github.com/17thedevv/Giga/actions/runs/41025581394) |
 | GitHub Validate Git Workflow | PASS on implementation commit `105607edf25800811cea4ba00d7fcc05bbb65ecb`; [run #213](https://github.com/17thedevv/Giga/actions/runs/41025581472) |
+| Final evidence-commit CI refresh | PASS on `4ac42738bd2fde8dbf9cfac2989fb49fe2ef0199`; Frontend CI [run #67](https://github.com/17thedevv/Giga/actions/runs/41025731548), Git Workflow [run #214](https://github.com/17thedevv/Giga/actions/runs/41025731768) |
 | `npm run typecheck --prefix apps/api` / `npm run build --prefix apps/api` | PASS; backend sources unchanged |
 | Agent API focus: `npx tsx --test --test-concurrency=1 tests/agent/agent-messages.test.ts tests/agent/agent-api.test.ts tests/agent/agent-contract.test.ts` | PASS; 56 passed, 3 PostgreSQL-specific skips |
 | `npm test --prefix apps/api` | BLOCKED/FAIL in this environment; see below |
