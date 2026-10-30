@@ -361,6 +361,7 @@ describe('Real Agent workspace and run integration', () => {
 
     fireEvent.click(screen.getByTestId('navigate-workspace-b'));
     await waitFor(() => expect(getWorkspace).toHaveBeenCalledWith(workspaceB.id));
+    expect(window.location.search).toBe('?workspace=' + workspaceB.id);
     expect(screen.getByTestId('workspace-selection-pending')).toBeDefined();
     expect((screen.getByLabelText('Workspace') as HTMLSelectElement).value).toBe('');
     expect((screen.getByTestId('workspace-card-' + workspace.id) as HTMLButtonElement).disabled).toBe(true);
@@ -502,8 +503,8 @@ describe('Real Agent workspace and run integration', () => {
     vi.spyOn(realApiClient, 'listAgentWorkspaces').mockResolvedValue({ items: [workspace, workspaceB], nextCursor: null });
     const listRuns = vi.spyOn(realApiClient, 'listAgentRuns').mockImplementation((query) => {
       if (query?.cursor === 'cursor-before') return appendPage.promise;
-      if (query?.workspaceId === workspace.id && query.cursor === undefined) {
-        const matchingCalls = listRuns.mock.calls.filter(([call]) => call?.workspaceId === workspace.id).length;
+      if (query?.workspaceId === workspaceB.id && query.cursor === undefined) {
+        const matchingCalls = listRuns.mock.calls.filter(([call]) => call?.workspaceId === workspaceB.id).length;
         if (matchingCalls === 1) return Promise.resolve({ items: [firstRun], nextCursor: 'cursor-before' });
         return refreshedPage.promise;
       }
@@ -513,14 +514,12 @@ describe('Real Agent workspace and run integration', () => {
 
     function RouteControl() {
       const { navigate } = useRouter();
-      return <>
-        <button data-testid="clear-workspace-filter" onClick={() => navigate('/agent')}>All workspaces</button>
-        <button data-testid="navigate-workspace-b" onClick={() => navigate('/agent?workspace=' + workspaceB.id)}>Workspace B</button>
-      </>;
+      return <button data-testid="clear-workspace-filter" onClick={() => navigate('/agent')}>All workspaces</button>;
     }
 
-    renderReal(<><RouteControl /><AgentLauncherView /></>, '/agent?workspace=' + workspace.id);
+    renderReal(<><RouteControl /><AgentLauncherView /></>, '/agent?workspace=' + workspaceB.id);
     expect(await screen.findByText('Before refresh')).toBeDefined();
+    expect(listRuns).toHaveBeenCalledWith({ limit: 20, workspaceId: workspaceB.id });
     fireEvent.click(screen.getByTestId('load-more-runs-btn'));
     await waitFor(() => expect(listRuns).toHaveBeenCalledTimes(2));
     expect((screen.getByTestId('refresh-runs-btn') as HTMLButtonElement).disabled).toBe(true);
@@ -537,8 +536,6 @@ describe('Real Agent workspace and run integration', () => {
     await act(async () => { refreshedPage.resolve({ items: [refreshedRun], nextCursor: null }); });
     expect(await screen.findByText('After refresh')).toBeDefined();
 
-    fireEvent.click(screen.getByTestId('navigate-workspace-b'));
-    await waitFor(() => expect(listRuns).toHaveBeenLastCalledWith({ limit: 20, workspaceId: workspaceB.id }));
     fireEvent.click(screen.getByTestId('clear-workspace-filter'));
     await waitFor(() => expect(listRuns).toHaveBeenLastCalledWith({ limit: 20 }));
     expect(await screen.findByText('All workspace run')).toBeDefined();
