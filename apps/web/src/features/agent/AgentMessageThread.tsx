@@ -1,5 +1,11 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ApiException, realApiClient } from '../../lib/api/client.js';
+import {
+  ApiException,
+  getSessionGeneration,
+  isCurrentSessionGeneration,
+  realApiClient,
+  SESSION_EXPIRED_EVENT,
+} from '../../lib/api/client.js';
 import type { AgentMessage, AgentRun } from '../../lib/api/agent-contract.js';
 import { Button } from '../../components/Button.js';
 import { Textarea } from '../../components/Textarea.js';
@@ -9,6 +15,12 @@ const TERMINAL_STATUSES: readonly AgentRun['status'][] = ['completed', 'failed',
 interface PendingSubmission {
   readonly content: string;
   readonly idempotencyKey: string;
+  readonly runId: string;
+  readonly workspaceId: string;
+}
+
+interface LoadOptions {
+  readonly preserveThread?: boolean;
 }
 
 interface AgentMessageThreadProps {
@@ -65,53 +77,123 @@ export const AgentMessageThread: React.FC<AgentMessageThreadProps> = ({ run, onS
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [pendingSubmission, setPendingSubmission] = useState<PendingSubmission | null>(null);
-  const requestRef = useRef(0);
+  const readGenerationRef = useRef(0);
+  const submissionGenerationRef = useRef(0);
+  const messageRevisionRef = useRef(0);
+  const confirmedMessagesRef = useRef<AgentMessage[]>([]);
+  const mountedRef = useRef(false);
+  const activeRouteRef = useRef({ runId: run.id, workspaceId: run.workspaceId });
+  activeRouteRef.current = { runId: run.id, workspaceId: run.workspaceId };
   const loadMoreRef = useRef(false);
   const submitLockRef = useRef(false);
   const pendingSubmissionRef = useRef<PendingSubmission | null>(null);
   const messagesRef = useRef<AgentMessage[]>([]);
   messagesRef.current = messages;
 
-  const load = useCallback(async () => {
-    const requestId = ++requestRef.current;
-    setIsLoading(true);
-    setMessages([]);
+  const invalidateForSessionExpiry = useCallback(() => {
+    readGenerationRef.current++;
+    submissionGenerationRef.current++;
+    messageRevisionRef.current++;
+    loadMoreRef.current = false;
+    submitLockRef.current = false;
+    pendingSubmissionRef.current = null;
+    confirmedMessagesRef.current = [];
     messagesRef.current = [];
+    setMessages([]);
+    setCursor(null);
+    setIsLoading(false);
+    setIsLoadingMore(false);
+    setLoadError('Your session has expired. Sign in again to reload this conversation.');
+    setFollowUpAvailable(false);
+    setCapabilityReason('Your session has expired. Sign in again before using this conversation.');
+    setDraft('');
+    setIsSubmitting(false);
+    setSubmitError('Your session expired before this request could be confirmed. Sign in again and reload the conversation.');
+    setPendingSubmission(null);
+  }, []);
+
+  const load = useCallback(async ({ preserveThread = false }: LoadOptions = {}) => {
+    const requestId = ++readGenerationRef.current;
+    const sessionGeneration = getSessionGeneration();
+    const requestedRunId = run.id;
+    const requestedWorkspaceId = run.workspaceId;
+    setIsLoading(true);
     loadMoreRef.current = false;
     setIsLoadingMore(false);
-    setCursor(null);
     setLoadError(null);
-    setFollowUpAvailable(false);
-    setCapabilityReason('Checking whether follow-up messages are available…');
-
-    const [pageResult, capabilityResult] = await Promise.allSettled([
-      realApiClient.listAgentMessages(run.id, { workspaceId: run.workspaceId }),
-      realApiClient.getAgentCapabilities(),
-    ]);
-    if (requestRef.current !== requestId) return;
-
-    if (pageResult.status === 'fulfilled') {
-      setMessages([...pageResult.value.items]);
-      messagesRef.current = [...pageResult.value.items];
-      setCursor(pageResult.value.nextCursor);
-    } else {
-      setLoadError(safeMessageError(pageResult.reason));
-    }
-
-    if (capabilityResult.status === 'fulfilled') {
-      const capability = capabilityResult.value.capabilities.followUp;
-      setFollowUpAvailable(capability.available);
-      setCapabilityReason(capability.available ? null : capability.reason === 'runtime_unavailable'
-        ? 'The Agent execution runtime is unavailable, so this thread is read-only.'
-        : capability.reason === 'not_implemented'
-          ? 'Follow-up messages are not enabled by this Agent API, so this thread is read-only.'
-          : 'The Agent API has not confirmed follow-up support. Sending is disabled.');
-    } else {
+    if (!preserveThread) {
+      setMessages([]);
+      messagesRef.current = [];
+      confirmedMessagesRef.current = [];
+      messageRevisionRef.current++;
+      setCursor(null);
       setFollowUpAvailable(false);
-      setCapabilityReason('Could not confirm follow-up support. Sending is disabled until the Agent API confirms it.');
+      setCapabilityReason('Checking whether follow-up messages are available…');
     }
-    setIsLoading(false);
-  }, [run.id, run.workspaceId]);
+    const messageRevision = messageRevisionRef.current;
+
+    const isCurrentRead = () => mountedRef.current &&
+      readGenerationRef.current === requestId &&
+      activeRouteRef.current.runId === requestedRunId &&
+      activeRouteRef.current.workspaceId === requestedWorkspaceId;
+
+    try {
+      const [pageResult, capabilityResult] = await Promise.allSettled([
+        realApiClient.listAgentMessages(requestedRunId, { workspaceId: requestedWorkspaceId }),
+        realApiClient.getAgentCapabilities(),
+      ]);
+      if (!isCurrentRead()) return;
+      if (!isCurrentSessionGeneration(sessionGeneration)) {
+        invalidateForSessionExpiry();
+        return;
+      }
+
+      if (pageResult.status === 'fulfilled') {
+        if (messageRevisionRef.current === messageRevision) {
+          const reconciled = mergeMessagePages(pageResult.value.items, confirmedMessagesRef.current);
+          setMessages(reconciled);
+          messagesRef.current = reconciled;
+          setCursor(pageResult.value.nextCursor);
+        }
+      } else {
+        setLoadError(safeMessageError(pageResult.reason));
+      }
+
+      if (capabilityResult.status === 'fulfilled') {
+        const capability = capabilityResult.value.capabilities.followUp;
+        setFollowUpAvailable(capability.available);
+        setCapabilityReason(capability.available ? null : capability.reason === 'runtime_unavailable'
+          ? 'The Agent execution runtime is unavailable, so this thread is read-only.'
+          : capability.reason === 'not_implemented'
+            ? 'Follow-up messages are not enabled by this Agent API, so this thread is read-only.'
+            : 'The Agent API has not confirmed follow-up support. Sending is disabled.');
+      } else {
+        setFollowUpAvailable(false);
+        setCapabilityReason('Could not confirm follow-up support. Sending is disabled until the Agent API confirms it.');
+      }
+    } catch {
+      if (isCurrentRead() && isCurrentSessionGeneration(sessionGeneration)) {
+        setLoadError('The Agent service returned an invalid conversation response.');
+      } else if (isCurrentRead()) {
+        invalidateForSessionExpiry();
+      }
+    } finally {
+      if (isCurrentRead()) setIsLoading(false);
+    }
+  }, [invalidateForSessionExpiry, run.id, run.workspaceId]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    const handleSessionExpired = () => invalidateForSessionExpiry();
+    window.addEventListener(SESSION_EXPIRED_EVENT, handleSessionExpired);
+    return () => {
+      mountedRef.current = false;
+      readGenerationRef.current++;
+      submissionGenerationRef.current++;
+      submitLockRef.current = false;
+      window.removeEventListener(SESSION_EXPIRED_EVENT, handleSessionExpired);
+    };
+  }, [invalidateForSessionExpiry]);
 
   useEffect(() => {
     setDraft('');
@@ -119,33 +201,56 @@ export const AgentMessageThread: React.FC<AgentMessageThreadProps> = ({ run, onS
     setPendingSubmission(null);
     pendingSubmissionRef.current = null;
     void load();
-    return () => { requestRef.current++; };
+    return () => {
+      readGenerationRef.current++;
+      submissionGenerationRef.current++;
+      submitLockRef.current = false;
+    };
   }, [load]);
 
   const loadMore = async () => {
-    if (!cursor || loadMoreRef.current || isLoading || isLoadingMore) return;
+    if (!cursor || loadMoreRef.current || submitLockRef.current || isLoading || isLoadingMore) return;
     loadMoreRef.current = true;
     setIsLoadingMore(true);
     setLoadError(null);
-    const requestId = requestRef.current;
+    const requestId = readGenerationRef.current;
+    const sessionGeneration = getSessionGeneration();
+    const messageRevision = messageRevisionRef.current;
+    const requestedRunId = run.id;
+    const requestedWorkspaceId = run.workspaceId;
+    const isCurrentRead = () => mountedRef.current && readGenerationRef.current === requestId &&
+      activeRouteRef.current.runId === requestedRunId &&
+      activeRouteRef.current.workspaceId === requestedWorkspaceId;
     try {
-      const page = await realApiClient.listAgentMessages(run.id, {
-        workspaceId: run.workspaceId,
+      const page = await realApiClient.listAgentMessages(requestedRunId, {
+        workspaceId: requestedWorkspaceId,
         cursor,
       });
-      if (requestRef.current !== requestId) return;
-      const merged = mergeMessagePages(messagesRef.current, page.items);
-      setMessages(merged);
-      messagesRef.current = merged;
-      setCursor(page.nextCursor);
+      if (!isCurrentRead()) return;
+      if (!isCurrentSessionGeneration(sessionGeneration)) {
+        invalidateForSessionExpiry();
+        return;
+      }
+      if (messageRevisionRef.current === messageRevision) {
+        const merged = mergeMessagePages(messagesRef.current, [...page.items, ...confirmedMessagesRef.current]);
+        setMessages(merged);
+        messagesRef.current = merged;
+        setCursor(page.nextCursor);
+      }
     } catch (error) {
-      if (requestRef.current === requestId) setLoadError(safeMessageError(error));
+      if (isCurrentRead() && isCurrentSessionGeneration(sessionGeneration)) setLoadError(safeMessageError(error));
+      else if (isCurrentRead()) invalidateForSessionExpiry();
     } finally {
-      if (requestRef.current === requestId) {
+      if (isCurrentRead()) {
         loadMoreRef.current = false;
         setIsLoadingMore(false);
       }
     }
+  };
+
+  const refresh = () => {
+    if (submitLockRef.current) return;
+    void load({ preserveThread: true });
   };
 
   const terminal = TERMINAL_STATUSES.includes(run.status);
@@ -156,11 +261,14 @@ export const AgentMessageThread: React.FC<AgentMessageThreadProps> = ({ run, onS
 
   const submit = async (event?: React.FormEvent<HTMLFormElement>) => {
     event?.preventDefault();
-    if (!canSubmit || submitLockRef.current) return;
+    if (!canSubmit || submitLockRef.current || !mountedRef.current) return;
     const pending = pendingSubmissionRef.current ?? {
       content: draft.trim(),
       idempotencyKey: createIdempotencyKey(),
+      runId: run.id,
+      workspaceId: run.workspaceId,
     };
+    if (pending.runId !== run.id || pending.workspaceId !== run.workspaceId) return;
     if (!pendingSubmissionRef.current) {
       if (!pending.content || pending.content.includes('\0') || utf8Length(pending.content) > 16384) return;
       pendingSubmissionRef.current = pending;
@@ -170,33 +278,55 @@ export const AgentMessageThread: React.FC<AgentMessageThreadProps> = ({ run, onS
     submitLockRef.current = true;
     setIsSubmitting(true);
     setSubmitError(null);
-    const operationId = requestRef.current;
+    const operationId = ++submissionGenerationRef.current;
+    const sessionGeneration = getSessionGeneration();
+    const submittedRunId = run.id;
+    const submittedWorkspaceId = run.workspaceId;
+    const isCurrentSubmission = () => mountedRef.current &&
+      submissionGenerationRef.current === operationId &&
+      activeRouteRef.current.runId === submittedRunId &&
+      activeRouteRef.current.workspaceId === submittedWorkspaceId;
     try {
-      const response = await realApiClient.createAgentMessage(run.id, { content: pending.content }, {
-        workspaceId: run.workspaceId,
+      const response = await realApiClient.createAgentMessage(submittedRunId, { content: pending.content }, {
+        workspaceId: submittedWorkspaceId,
         idempotencyKey: pending.idempotencyKey,
       });
-      if (requestRef.current !== operationId) return;
+      if (!isCurrentSubmission()) return;
+      if (!isCurrentSessionGeneration(sessionGeneration)) {
+        invalidateForSessionExpiry();
+        return;
+      }
       let merged: AgentMessage[];
       try {
         merged = mergeMessagePages(messagesRef.current, [response.message]);
+        confirmedMessagesRef.current = mergeMessagePages(confirmedMessagesRef.current, [response.message]);
       } catch {
         pendingSubmissionRef.current = null;
         setPendingSubmission(null);
         setDraft('');
-        setSubmitError('The API accepted the message, but the visible history could not be reconciled. Reloading the conversation from the server.');
-        setIsSubmitting(false);
-        void load();
+        setSubmitError('The API confirmed this message, but the visible history conflicted. Reloading the authoritative conversation.');
+        messageRevisionRef.current++;
+        setCursor(null);
+        void load({ preserveThread: true });
         return;
       }
+      messageRevisionRef.current++;
       setMessages(merged);
       messagesRef.current = merged;
       setDraft('');
       pendingSubmissionRef.current = null;
       setPendingSubmission(null);
+      setCursor(null);
+      void load({ preserveThread: true });
     } catch (error) {
-      if (requestRef.current !== operationId) return;
-      if (error instanceof ApiException && error.status === 409) {
+      if (!isCurrentSubmission()) return;
+      if (!isCurrentSessionGeneration(sessionGeneration)) {
+        invalidateForSessionExpiry();
+        return;
+      }
+      if (error instanceof ApiException && error.status === 401) {
+        invalidateForSessionExpiry();
+      } else if (error instanceof ApiException && error.status === 409) {
         pendingSubmissionRef.current = null;
         setPendingSubmission(null);
         setSubmitError('The run changed state before this message was accepted. Its status is being refreshed; start a new run if it is terminal.');
@@ -204,14 +334,20 @@ export const AgentMessageThread: React.FC<AgentMessageThreadProps> = ({ run, onS
       } else if (!(error instanceof ApiException) || error.status >= 500) {
         // The same body and key stay pinned until exact idempotent replay confirms the outcome.
         setSubmitError('The message outcome could not be confirmed. Retry the same message safely; it will reuse the same request key.');
+        void load({ preserveThread: true });
       } else {
         pendingSubmissionRef.current = null;
         setPendingSubmission(null);
         setSubmitError(safeMessageError(error));
       }
     } finally {
-      submitLockRef.current = false;
-      if (requestRef.current === operationId) setIsSubmitting(false);
+      if (submissionGenerationRef.current === operationId) {
+        submitLockRef.current = false;
+        if (mountedRef.current && activeRouteRef.current.runId === submittedRunId &&
+            activeRouteRef.current.workspaceId === submittedWorkspaceId) {
+          setIsSubmitting(false);
+        }
+      }
     }
   };
 
@@ -226,7 +362,7 @@ export const AgentMessageThread: React.FC<AgentMessageThreadProps> = ({ run, onS
           <h2 id="agent-message-thread-heading">Conversation</h2>
           <p>Messages are loaded from the Agent API and shown as plain text.</p>
         </div>
-        <Button variant="outline" size="sm" onClick={() => void load()} disabled={isLoading} data-testid="refresh-agent-messages-btn">
+        <Button variant="outline" size="sm" onClick={refresh} disabled={isLoading || isSubmitting} data-testid="refresh-agent-messages-btn">
           Refresh conversation
         </Button>
       </div>
@@ -238,7 +374,7 @@ export const AgentMessageThread: React.FC<AgentMessageThreadProps> = ({ run, onS
       {loadError && (
         <div role="alert" className="g-agent-thread__error" data-testid="agent-messages-error">
           <span>{loadError}</span>
-          <Button variant="outline" size="sm" onClick={() => void load()}>Retry loading</Button>
+          <Button variant="outline" size="sm" onClick={refresh} disabled={isSubmitting}>Retry loading</Button>
         </div>
       )}
       {!isLoading && !loadError && messages.length === 0 && (
@@ -262,7 +398,7 @@ export const AgentMessageThread: React.FC<AgentMessageThreadProps> = ({ run, onS
       )}
 
       {cursor && !loadError && (
-        <Button variant="outline" onClick={() => void loadMore()} disabled={isLoadingMore || isLoading} loading={isLoadingMore} data-testid="load-more-agent-messages-btn">
+        <Button variant="outline" onClick={() => void loadMore()} disabled={isLoadingMore || isLoading || isSubmitting} loading={isLoadingMore} data-testid="load-more-agent-messages-btn">
           Load more messages
         </Button>
       )}

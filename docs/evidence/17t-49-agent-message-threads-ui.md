@@ -85,3 +85,48 @@ Draft PR #47: https://github.com/17thedevv/Giga/pull/47. The PR was created at i
 An explicit GitHub reviewer request for the Linear reviewer account `17thedev` was rejected with HTTP 422 because that account is not a repository collaborator. A PR conversation comment mentioning `@17thedev` was posted (comment ID `6518343353`); GitHub's formal requested-reviewer list remains empty. Trà's independent review is still pending.
 
 The API contract remains DRAFT. No deployed frontend/backend SHA, authenticated browser flow, or database migration state is verified here. Keep the PR Draft; local checks and CI are not deployment evidence.
+
+## Review follow-up — MSG-REFRESH-01
+
+**GitHub review:** [#5710027564](https://github.com/17thedevv/Giga/pull/47#pullrequestreview-5710027564) · **Severity:** P1.
+
+### Root cause
+
+Message reads and a follow-up POST shared `requestRef`. Refresh incremented that generation while a POST was pending. The POST response then skipped reconciliation and its `finally` block skipped clearing `isSubmitting`, leaving the same mounted composer disabled. A GET started before the POST commit could also replace the accepted message or its newer pagination cursor.
+
+### Fix and lifecycle
+
+- Read requests use their own generation and capture the message revision and session generation. A stale response cannot replace data after a newer read, route, session, or confirmed message change.
+- Each POST has an independent submission generation and captures the run ID, workspace ID, session generation, body, and idempotency key. The synchronous submit lock is released by the active operation's `finally`; stale operations cannot release a newer run/session's lock or write into its state.
+- Refresh, retry-loading, and load-more controls are disabled while a POST is pending. Their handlers also check the synchronous submit lock, so a programmatic or rapid repeated action cannot start a competing read.
+- On 200/201 confirmation, the exact server message is merged into visible state once, retained as confirmed thread data, and followed by a fresh first-page GET. That GET supplies the authoritative cursor; GETs started before confirmation are fenced out. A DTO/history conflict triggers an authoritative reload without claiming success from local content.
+- Network/5xx uncertainty keeps the original body and idempotency key for exact replay. Definite 4xx clears that retry record; 401 clears protected thread state and is never offered as an uncertain retry. 409 continues to refresh authoritative run status.
+- Session expiry clears protected messages and pending UI, invalidates both operation generations, and releases the lock. Late POST/GET responses are ignored. The keyed run view and route identity checks prevent A→B→C responses from crossing into another thread.
+
+### Regression tests
+
+Added deterministic deferred-promise coverage in `apps/web/tests/agent-real-views.test.tsx`:
+
+- `disables refresh during a pending POST, reconciles once, and releases the lock for a new message` — asserts disabled UI and no extra GET on refresh attempt, one confirmed row, released composer, and a fresh key for the next logical message.
+- `ignores a pre-commit refresh after POST confirmation and retains the fresh pagination cursor` — resolves an older refresh after commit; asserts the confirmed message remains once and load-more uses the post-commit server cursor.
+- `settles a definite 4xx during refresh without duplicating the follow-up` and `settles an uncertain network failure during refresh without duplicating the follow-up` — verify cleanup, key reset versus exact key reuse, retry, and one visible result. Repeated retry clicks remain single-flight.
+- `fences pending POST and refresh results across rapid A-to-B-to-C navigation` — verifies stale route responses are ignored and C uses a fresh run-scoped request key.
+- `clears protected thread data on session expiry and never applies the stale POST after reauthentication` — verifies old-session success is ignored and a new session can submit.
+- `treats a confirmed 401 as session invalidation instead of an uncertain retry` — verifies no retained/retryable submission or protected cached messages after 401.
+
+### Verification for this review fix
+
+| Command | Result |
+| --- | --- |
+| `npm ci --prefix apps/web` | PASS; 148 packages installed, 0 vulnerabilities |
+| `npm run typecheck --prefix apps/web` | PASS |
+| `npm test --prefix apps/web -- --reporter=dot` | PASS; 307 tests in 19 files (7 added to the 300-test baseline) |
+| `npm run build --prefix apps/web` | PASS; production bundle built |
+| `npm run test:production-security --prefix apps/web` | PASS; one JavaScript asset scanned |
+| `npm audit --prefix apps/web --audit-level=moderate` | PASS; 0 vulnerabilities |
+| `node --test .agents/scripts/validate-git-workflow.test.mjs` | PASS; 6 tests |
+| `node .agents/scripts/validate-skills.mjs` | PASS |
+| `git diff --check` | PASS |
+| `node .agents/scripts/validate-git-workflow.mjs` | To run against the committed PR range; requires exact PR metadata environment variables |
+
+The focused Real Agent view suite passes 33/33, including all deferred follow-up regressions. GitHub CI is run after pushing the scoped commit; final CI links and source commit SHA are recorded in the PR. Browser E2E and deployed Real API verification remain unavailable in this environment; no browser or deployment acceptance is claimed.
