@@ -63,6 +63,8 @@ Added Real Agent UI tests in `apps/web/tests/agent-real-views.test.tsx` for:
 | `node --test .agents/scripts/validate-git-workflow.test.mjs` | PASS; 6 tests |
 | `node .agents/scripts/validate-skills.mjs` | PASS |
 | `git diff --check` | PASS at local verification checkpoint |
+| GitHub Frontend CI | PASS on implementation commit `105607edf25800811cea4ba00d7fcc05bbb65ecb`; [run #66](https://github.com/17thedevv/Giga/actions/runs/41025581394) |
+| GitHub Validate Git Workflow | PASS on implementation commit `105607edf25800811cea4ba00d7fcc05bbb65ecb`; [run #213](https://github.com/17thedevv/Giga/actions/runs/41025581472) |
 | `npm run typecheck --prefix apps/api` / `npm run build --prefix apps/api` | PASS; backend sources unchanged |
 | Agent API focus: `npx tsx --test --test-concurrency=1 tests/agent/agent-messages.test.ts tests/agent/agent-api.test.ts tests/agent/agent-contract.test.ts` | PASS; 56 passed, 3 PostgreSQL-specific skips |
 | `npm test --prefix apps/api` | BLOCKED/FAIL in this environment; see below |
@@ -77,4 +79,8 @@ The requested frontend audit is clean. A separate, unchanged backend audit repor
 
 ## Review and delivery state
 
-The API contract remains DRAFT and needs Trà's compatibility review. No exact deployed frontend/backend SHA, authenticated browser flow, or database migration state is verified here. Draft PR, remote CI, and Linear evidence should be appended after push; do not treat local checks as deployment evidence.
+Draft PR #47: https://github.com/17thedevv/Giga/pull/47. The PR was created at implementation commit `105607edf25800811cea4ba00d7fcc05bbb65ecb`; CI runs #66 and #213 passed on that commit. The code and verification record are separate commits so the evidence file can contain a stable SHA for the code commit.
+
+An explicit GitHub reviewer request for the Linear reviewer account `17thedev` was rejected with HTTP 422 because that account is not a repository collaborator. A PR conversation comment mentioning `@17thedev` was posted (comment ID `6518343353`); GitHub's formal requested-reviewer list remains empty. Trà's independent review is still pending.
+
+The API contract remains DRAFT. No deployed frontend/backend SHA, authenticated browser flow, or database migration state is verified here. Keep the PR Draft; local checks and CI are not deployment evidence.
