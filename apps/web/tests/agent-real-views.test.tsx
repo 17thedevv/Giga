@@ -1,6 +1,6 @@
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import fixture from '../../../packages/contracts/fixtures/agent.json';
 import { AgentLauncherView } from '../src/features/agent/AgentLauncherView.js';
 import { AgentRunView } from '../src/features/agent/AgentRunView.js';
@@ -335,5 +335,213 @@ describe('Real Agent workspace and run integration', () => {
     pending.resolve({ items: [{ ...workspace, name: 'Late real workspace' }], nextCursor: null });
     await waitFor(() => expect(screen.queryByText('Late real workspace')).toBeNull());
     expect(screen.getByRole('option', { name: 'React Task Manager' })).toBeDefined();
+  });
+
+  it('makes the URL workspace authoritative while resolving a new deep link', async () => {
+    const workspaceB = { ...workspace, id: '10000000-0000-4000-8000-000000000012', name: 'Workspace B' };
+    const runA = { ...failedRun, id: '20000000-0000-4000-8000-000000000012', task: 'Workspace A run' };
+    const pendingWorkspace = deferred<{ workspace: AgentWorkspace }>();
+    vi.spyOn(realApiClient, 'getAgentCapabilities').mockResolvedValue(capabilities);
+    vi.spyOn(realApiClient, 'listAgentWorkspaces').mockResolvedValue({ items: [workspace], nextCursor: null });
+    const listRuns = vi.spyOn(realApiClient, 'listAgentRuns').mockImplementation(async (query) => ({
+      items: query?.workspaceId === workspace.id ? [runA] : [],
+      nextCursor: null,
+    }));
+    const getWorkspace = vi.spyOn(realApiClient, 'getAgentWorkspace').mockReturnValue(pendingWorkspace.promise);
+    const createRun = vi.spyOn(realApiClient, 'createAgentRun').mockResolvedValue({ run: failedRun });
+
+    function RouteControl() {
+      const { navigate } = useRouter();
+      return <button data-testid="navigate-workspace-b" onClick={() => navigate('/agent?workspace=' + workspaceB.id)}>Workspace B</button>;
+    }
+
+    renderReal(<><RouteControl /><AgentLauncherView /></>, '/agent?workspace=' + workspace.id);
+    await waitFor(() => expect((screen.getByLabelText('Workspace') as HTMLSelectElement).value).toBe(workspace.id));
+    expect(await screen.findByText('Workspace A run')).toBeDefined();
+
+    fireEvent.click(screen.getByTestId('navigate-workspace-b'));
+    await waitFor(() => expect(getWorkspace).toHaveBeenCalledWith(workspaceB.id));
+    expect(screen.getByTestId('workspace-selection-pending')).toBeDefined();
+    expect((screen.getByLabelText('Workspace') as HTMLSelectElement).value).toBe('');
+    expect((screen.getByTestId('workspace-card-' + workspace.id) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByText('Workspace A run')).toBeNull();
+    expect((screen.getByTestId('launch-agent-btn') as HTMLButtonElement).disabled).toBe(true);
+    expect(listRuns).toHaveBeenLastCalledWith({ limit: 20, workspaceId: workspaceB.id });
+    fireEvent.click(screen.getByTestId('launch-agent-btn'));
+    expect(createRun).not.toHaveBeenCalled();
+
+    await act(async () => { pendingWorkspace.resolve({ workspace: workspaceB }); });
+    await waitFor(() => expect((screen.getByLabelText('Workspace') as HTMLSelectElement).value).toBe(workspaceB.id));
+    fireEvent.change(screen.getByTestId('agent-task-input'), { target: { value: 'Run only in B' } });
+    fireEvent.click(screen.getByTestId('launch-agent-btn'));
+    await waitFor(() => expect(createRun).toHaveBeenCalledWith(
+      { workspaceId: workspaceB.id, task: 'Run only in B' },
+      expect.objectContaining({ idempotencyKey: expect.any(String) })
+    ));
+  });
+
+  it('ignores stale workspace detail responses and rejects mismatched or unavailable IDs', async () => {
+    const workspaceB = { ...workspace, id: '10000000-0000-4000-8000-000000000013', name: 'Workspace B' };
+    const workspaceC = { ...workspace, id: '10000000-0000-4000-8000-000000000014', name: 'Workspace C' };
+    const workspaceDId = '10000000-0000-4000-8000-000000000015';
+    const workspaceEId = '10000000-0000-4000-8000-000000000025';
+    const pendingB = deferred<{ workspace: AgentWorkspace }>();
+    vi.spyOn(realApiClient, 'getAgentCapabilities').mockResolvedValue(capabilities);
+    vi.spyOn(realApiClient, 'listAgentWorkspaces').mockResolvedValue({ items: [workspace], nextCursor: null });
+    vi.spyOn(realApiClient, 'listAgentRuns').mockResolvedValue({ items: [], nextCursor: null });
+    const getWorkspace = vi.spyOn(realApiClient, 'getAgentWorkspace').mockImplementation((id) => {
+      if (id === workspaceB.id) return pendingB.promise;
+      if (id === workspaceDId) return Promise.resolve({ workspace: workspaceC });
+      if (id === workspaceEId) return Promise.reject(new ApiException(404, 'NOT_FOUND', 'Synthetic unavailable workspace'));
+      return Promise.resolve({ workspace: workspaceC });
+    });
+
+    function RouteControl() {
+      const { navigate } = useRouter();
+      return <>
+        <button data-testid="navigate-workspace-b" onClick={() => navigate('/agent?workspace=' + workspaceB.id)}>B</button>
+        <button data-testid="navigate-workspace-c" onClick={() => navigate('/agent?workspace=' + workspaceC.id)}>C</button>
+        <button data-testid="navigate-workspace-d" onClick={() => navigate('/agent?workspace=' + workspaceDId)}>D</button>
+        <button data-testid="navigate-workspace-e" onClick={() => navigate('/agent?workspace=' + workspaceEId)}>E</button>
+      </>;
+    }
+
+    renderReal(<><RouteControl /><AgentLauncherView /></>, '/agent?workspace=' + workspace.id);
+    await waitFor(() => expect((screen.getByLabelText('Workspace') as HTMLSelectElement).value).toBe(workspace.id));
+    fireEvent.click(screen.getByTestId('navigate-workspace-b'));
+    await waitFor(() => expect(getWorkspace).toHaveBeenCalledWith(workspaceB.id));
+    fireEvent.click(screen.getByTestId('navigate-workspace-c'));
+    await waitFor(() => expect((screen.getByLabelText('Workspace') as HTMLSelectElement).value).toBe(workspaceC.id));
+    await act(async () => { pendingB.resolve({ workspace: workspaceB }); });
+    expect((screen.getByLabelText('Workspace') as HTMLSelectElement).value).toBe(workspaceC.id);
+    expect(screen.queryByText('Workspace B')).toBeNull();
+
+    fireEvent.click(screen.getByTestId('navigate-workspace-d'));
+    await waitFor(() => expect(getWorkspace).toHaveBeenCalledWith(workspaceDId));
+    expect(await screen.findByText('Workspace not found or unavailable for this account.')).toBeDefined();
+    expect((screen.getByLabelText('Workspace') as HTMLSelectElement).value).toBe('');
+    expect((screen.getByTestId('launch-agent-btn') as HTMLButtonElement).disabled).toBe(true);
+
+    fireEvent.click(screen.getByTestId('navigate-workspace-e'));
+    await waitFor(() => expect(getWorkspace).toHaveBeenCalledWith(workspaceEId));
+    expect(await screen.findByText('Workspace not found or unavailable for this account.')).toBeDefined();
+    expect((screen.getByLabelText('Workspace') as HTMLSelectElement).value).toBe('');
+  });
+
+  it('fences run pages and cursors by workspace filter and deduplicates IDs within a page', async () => {
+    const workspaceB = { ...workspace, id: '10000000-0000-4000-8000-000000000016', name: 'Workspace B' };
+    const runA = { ...failedRun, id: '20000000-0000-4000-8000-000000000016', task: 'Workspace A first page' };
+    const staleRunA = { ...failedRun, id: '20000000-0000-4000-8000-000000000017', task: 'Workspace A stale append' };
+    const runB = { ...failedRun, id: '20000000-0000-4000-8000-000000000018', task: 'Workspace B first page' };
+    const runC = { ...failedRun, id: '20000000-0000-4000-8000-000000000019', task: 'Workspace B next page' };
+    const staleAppend = deferred<{ items: AgentRun[]; nextCursor: string | null }>();
+    const failedBPage = deferred<{ items: AgentRun[]; nextCursor: string | null }>();
+    const retryBPage = deferred<{ items: AgentRun[]; nextCursor: string | null }>();
+    vi.spyOn(realApiClient, 'getAgentCapabilities').mockResolvedValue(capabilities);
+    vi.spyOn(realApiClient, 'listAgentWorkspaces').mockResolvedValue({ items: [workspace], nextCursor: null });
+    vi.spyOn(realApiClient, 'getAgentWorkspace').mockResolvedValue({ workspace: workspaceB });
+    const listRuns = vi.spyOn(realApiClient, 'listAgentRuns').mockImplementation((query) => {
+      if (query?.workspaceId === workspace.id && query.cursor === 'cursor-a') return staleAppend.promise;
+      if (query?.workspaceId === workspaceB.id && !query.cursor) {
+        return listRuns.mock.calls.filter(([call]) => call?.workspaceId === workspaceB.id).length === 1
+          ? failedBPage.promise
+          : retryBPage.promise;
+      }
+      if (query?.workspaceId === workspaceB.id && query.cursor === 'cursor-b') {
+        return Promise.resolve({ items: [runB, runC, runC], nextCursor: null });
+      }
+      return Promise.resolve({ items: [runA], nextCursor: 'cursor-a' });
+    });
+
+    function RouteControl() {
+      const { navigate } = useRouter();
+      return <button data-testid="navigate-workspace-b" onClick={() => navigate('/agent?workspace=' + workspaceB.id)}>Workspace B</button>;
+    }
+
+    renderReal(<><RouteControl /><AgentLauncherView /></>, '/agent?workspace=' + workspace.id);
+    expect(await screen.findByText('Workspace A first page')).toBeDefined();
+    fireEvent.click(screen.getByTestId('load-more-runs-btn'));
+    await waitFor(() => expect(listRuns).toHaveBeenCalledWith({ limit: 20, cursor: 'cursor-a', workspaceId: workspace.id }));
+
+    fireEvent.click(screen.getByTestId('navigate-workspace-b'));
+    await waitFor(() => expect(listRuns).toHaveBeenCalledWith({ limit: 20, workspaceId: workspaceB.id }));
+    expect(screen.queryByText('Workspace A first page')).toBeNull();
+    expect((screen.getByTestId('load-more-runs-btn') as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByTestId('refresh-runs-btn') as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByTestId('load-more-runs-btn'));
+    expect(listRuns).toHaveBeenCalledTimes(3);
+    expect(listRuns.mock.calls.some(([query]) => query?.workspaceId === workspaceB.id && query.cursor === 'cursor-a')).toBe(false);
+
+    await act(async () => { failedBPage.reject(new TypeError('synthetic B page failure')); });
+    expect(await screen.findByText(/service or network is unavailable/i)).toBeDefined();
+    expect(screen.queryByText('Workspace A first page')).toBeNull();
+    fireEvent.click(screen.getByTestId('refresh-runs-btn'));
+    await waitFor(() => expect(listRuns).toHaveBeenCalledTimes(4));
+    await act(async () => { retryBPage.resolve({ items: [runB], nextCursor: 'cursor-b' }); });
+    expect(await screen.findByText('Workspace B first page')).toBeDefined();
+    await act(async () => { staleAppend.resolve({ items: [staleRunA], nextCursor: 'stale-cursor-a' }); });
+    expect(screen.queryByText('Workspace A stale append')).toBeNull();
+    expect(screen.getByText('Workspace B first page')).toBeDefined();
+
+    fireEvent.click(screen.getByTestId('load-more-runs-btn'));
+    await waitFor(() => expect(listRuns).toHaveBeenCalledWith({ limit: 20, cursor: 'cursor-b', workspaceId: workspaceB.id }));
+    expect(await screen.findByText('Workspace B next page')).toBeDefined();
+    expect(screen.getAllByText('Workspace B first page')).toHaveLength(1);
+    expect(screen.getAllByText('Workspace B next page')).toHaveLength(1);
+  });
+
+  it('prevents refresh and load-more overlap, clears pages on refresh, and clears filters for All Workspaces', async () => {
+    const workspaceB = { ...workspace, id: '10000000-0000-4000-8000-000000000020', name: 'Workspace B' };
+    const firstRun = { ...failedRun, id: '20000000-0000-4000-8000-000000000020', task: 'Before refresh' };
+    const appendedRun = { ...failedRun, id: '20000000-0000-4000-8000-000000000021', task: 'Appended once' };
+    const refreshedRun = { ...failedRun, id: '20000000-0000-4000-8000-000000000022', task: 'After refresh' };
+    const allRun = { ...failedRun, id: '20000000-0000-4000-8000-000000000023', task: 'All workspace run' };
+    const appendPage = deferred<{ items: AgentRun[]; nextCursor: string | null }>();
+    const refreshedPage = deferred<{ items: AgentRun[]; nextCursor: string | null }>();
+    vi.spyOn(realApiClient, 'getAgentCapabilities').mockResolvedValue(capabilities);
+    vi.spyOn(realApiClient, 'listAgentWorkspaces').mockResolvedValue({ items: [workspace, workspaceB], nextCursor: null });
+    const listRuns = vi.spyOn(realApiClient, 'listAgentRuns').mockImplementation((query) => {
+      if (query?.cursor === 'cursor-before') return appendPage.promise;
+      if (query?.workspaceId === workspace.id && query.cursor === undefined) {
+        const matchingCalls = listRuns.mock.calls.filter(([call]) => call?.workspaceId === workspace.id).length;
+        if (matchingCalls === 1) return Promise.resolve({ items: [firstRun], nextCursor: 'cursor-before' });
+        return refreshedPage.promise;
+      }
+      if (!query?.workspaceId) return Promise.resolve({ items: [allRun], nextCursor: null });
+      return Promise.resolve({ items: [], nextCursor: null });
+    });
+
+    function RouteControl() {
+      const { navigate } = useRouter();
+      return <>
+        <button data-testid="clear-workspace-filter" onClick={() => navigate('/agent')}>All workspaces</button>
+        <button data-testid="navigate-workspace-b" onClick={() => navigate('/agent?workspace=' + workspaceB.id)}>Workspace B</button>
+      </>;
+    }
+
+    renderReal(<><RouteControl /><AgentLauncherView /></>, '/agent?workspace=' + workspace.id);
+    expect(await screen.findByText('Before refresh')).toBeDefined();
+    fireEvent.click(screen.getByTestId('load-more-runs-btn'));
+    await waitFor(() => expect(listRuns).toHaveBeenCalledTimes(2));
+    expect((screen.getByTestId('refresh-runs-btn') as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByTestId('refresh-runs-btn'));
+    expect(listRuns).toHaveBeenCalledTimes(2);
+
+    await act(async () => { appendPage.resolve({ items: [appendedRun], nextCursor: 'cursor-after' }); });
+    expect(await screen.findByText('Appended once')).toBeDefined();
+    fireEvent.click(screen.getByTestId('refresh-runs-btn'));
+    await waitFor(() => expect(listRuns).toHaveBeenCalledTimes(3));
+    expect(screen.queryByText('Before refresh')).toBeNull();
+    expect(screen.queryByText('Appended once')).toBeNull();
+    expect((screen.getByTestId('load-more-runs-btn') as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => { refreshedPage.resolve({ items: [refreshedRun], nextCursor: null }); });
+    expect(await screen.findByText('After refresh')).toBeDefined();
+
+    fireEvent.click(screen.getByTestId('navigate-workspace-b'));
+    await waitFor(() => expect(listRuns).toHaveBeenLastCalledWith({ limit: 20, workspaceId: workspaceB.id }));
+    fireEvent.click(screen.getByTestId('clear-workspace-filter'));
+    await waitFor(() => expect(listRuns).toHaveBeenLastCalledWith({ limit: 20 }));
+    expect(await screen.findByText('All workspace run')).toBeDefined();
+    expect(screen.queryByText('After refresh')).toBeNull();
   });
 });

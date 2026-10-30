@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useRouter } from '../../app/router.js';
 import { realApiClient, ApiException } from '../../lib/api/client.js';
 import {
@@ -55,6 +55,8 @@ function capabilityReason(capabilities: AgentCapabilities, name: 'workspaceManag
 
 export const AgentRealLauncherView: React.FC = () => {
   const { path, params, navigate } = useRouter();
+  const linkedWorkspaceId = params.workspaceId ||
+    new URLSearchParams(path.includes('?') ? path.slice(path.indexOf('?') + 1) : '').get('workspace') || '';
   const [capabilities, setCapabilities] = useState<AgentCapabilities | null>(null);
   const [capabilityError, setCapabilityError] = useState<string | null>(null);
   const [workspaces, setWorkspaces] = useState<AgentWorkspace[]>([]);
@@ -68,7 +70,6 @@ export const AgentRealLauncherView: React.FC = () => {
   const [isLoadingRuns, setIsLoadingRuns] = useState(false);
   const [isLoadingMoreRuns, setIsLoadingMoreRuns] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
-  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState('');
   const [selectedMode, setSelectedMode] = useState<AgentMode | null>(null);
   const [task, setTask] = useState('');
   const [actionError, setActionError] = useState<string | null>(null);
@@ -83,7 +84,11 @@ export const AgentRealLauncherView: React.FC = () => {
   const workspaceDetailRequestRef = useRef(0);
   const hasLoadedWorkspacesRef = useRef(false);
   const resolvingWorkspaceRef = useRef<string | null>(null);
-  const runWorkspaceFilterRef = useRef<string | undefined>(undefined);
+  const workspaceRouteRef = useRef(linkedWorkspaceId);
+  const activeRunFilterRef = useRef(linkedWorkspaceId);
+  const runFirstPagePendingRef = useRef(false);
+  const runMorePendingRef = useRef(false);
+  const [runsForQuery, setRunsForQuery] = useState<string | null>(null);
   const submittingRef = useRef(false);
   const createWorkspaceRef = useRef(false);
   const pendingAdmissionRef = useRef<{ fingerprint: string; key: string } | null>(null);
@@ -119,14 +124,28 @@ export const AgentRealLauncherView: React.FC = () => {
   const fetchRuns = useCallback(async (
     cursor?: string,
     append = false,
-    workspaceId = runWorkspaceFilterRef.current
+    workspaceId = activeRunFilterRef.current || undefined
   ) => {
-    runWorkspaceFilterRef.current = workspaceId;
+    const filterKey = workspaceId ?? '';
+    if (filterKey !== activeRunFilterRef.current) return;
+    if (append && (runFirstPagePendingRef.current || runMorePendingRef.current || !cursor)) return;
+    if (!append && runFirstPagePendingRef.current) return;
+
     const requestId = ++runRequestRef.current;
-    if (append) setIsLoadingMoreRuns(true);
-    else {
+    if (append) {
+      runMorePendingRef.current = true;
+      setIsLoadingMoreRuns(true);
+    } else {
+      // A refresh supersedes any append already in flight. Its response is
+      // fenced by requestId and cannot be joined to this first page.
+      runMorePendingRef.current = false;
+      runFirstPagePendingRef.current = true;
+      setRunsForQuery(filterKey);
+      setRuns([]);
+      setRunCursor(null);
       setIsLoadingRuns(true);
       setRunError(null);
+      setIsLoadingMoreRuns(false);
     }
     try {
       const page = await realApiClient.listAgentRuns({
@@ -134,18 +153,27 @@ export const AgentRealLauncherView: React.FC = () => {
         ...(cursor ? { cursor } : {}),
         ...(workspaceId ? { workspaceId } : {}),
       });
-      if (runRequestRef.current !== requestId) return;
+      if (runRequestRef.current !== requestId || activeRunFilterRef.current !== filterKey) return;
       setRuns((current) => {
         if (!append) return [...page.items];
         const known = new Set(current.map((run) => run.id));
-        return [...current, ...page.items.filter((run) => !known.has(run.id))];
+        const additions: AgentRun[] = [];
+        for (const run of page.items) {
+          if (known.has(run.id)) continue;
+          known.add(run.id);
+          additions.push(run);
+        }
+        return [...current, ...additions];
       });
       setRunCursor(page.nextCursor);
+      setRunsForQuery(filterKey);
     } catch (error) {
-      if (runRequestRef.current !== requestId) return;
+      if (runRequestRef.current !== requestId || activeRunFilterRef.current !== filterKey) return;
       setRunError(safeAgentError(error, 'run'));
     } finally {
-      if (runRequestRef.current === requestId) {
+      if (runRequestRef.current === requestId && activeRunFilterRef.current === filterKey) {
+        if (append) runMorePendingRef.current = false;
+        else runFirstPagePendingRef.current = false;
         setIsLoadingRuns(false);
         setIsLoadingMoreRuns(false);
       }
@@ -160,7 +188,6 @@ export const AgentRealLauncherView: React.FC = () => {
     setIsLoadingCapabilities(true);
     setWorkspaces([]);
     setRuns([]);
-    setSelectedWorkspaceId('');
     setWorkspaceCursor(null);
     setRunCursor(null);
     hasLoadedWorkspacesRef.current = false;
@@ -185,6 +212,8 @@ export const AgentRealLauncherView: React.FC = () => {
       workspaceRequestRef.current++;
       runRequestRef.current++;
       workspaceDetailRequestRef.current++;
+      runFirstPagePendingRef.current = false;
+      runMorePendingRef.current = false;
     };
   }, []);
 
@@ -202,33 +231,49 @@ export const AgentRealLauncherView: React.FC = () => {
     }
   }, [capabilities, canManageWorkspaces, fetchWorkspaces]);
 
+  useLayoutEffect(() => {
+    if (activeRunFilterRef.current !== linkedWorkspaceId) {
+      activeRunFilterRef.current = linkedWorkspaceId;
+      runRequestRef.current++;
+      runFirstPagePendingRef.current = false;
+      runMorePendingRef.current = false;
+      setRunsForQuery(linkedWorkspaceId);
+      setRuns([]);
+      setRunCursor(null);
+      setRunError(null);
+      setIsLoadingRuns(false);
+      setIsLoadingMoreRuns(false);
+    }
+    if (workspaceRouteRef.current !== linkedWorkspaceId) {
+      workspaceRouteRef.current = linkedWorkspaceId;
+      workspaceDetailRequestRef.current++;
+      resolvingWorkspaceRef.current = null;
+      setWorkspaceError(null);
+    }
+  }, [linkedWorkspaceId]);
+
   useEffect(() => {
     if (!capabilities) return;
-    if (canReadRuns) void fetchRuns(undefined, false, selectedWorkspaceId || undefined);
+    if (canReadRuns) void fetchRuns(undefined, false, linkedWorkspaceId || undefined);
     else {
       setRuns([]);
       setRunCursor(null);
       setIsLoadingRuns(false);
     }
-  }, [capabilities, canReadRuns, selectedWorkspaceId, fetchRuns]);
+  }, [capabilities, canReadRuns, linkedWorkspaceId, fetchRuns]);
 
   useEffect(() => {
     if (selectedMode && !availableModes.some((mode) => mode.value === selectedMode)) setSelectedMode(null);
   }, [availableModes, selectedMode]);
 
-  const linkedWorkspaceId = params.workspaceId ||
-    new URLSearchParams(path.includes('?') ? path.slice(path.indexOf('?') + 1) : '').get('workspace') || '';
-
   useEffect(() => {
     if (!linkedWorkspaceId) {
-      setSelectedWorkspaceId('');
       setWorkspaceError(null);
       resolvingWorkspaceRef.current = null;
       return;
     }
 
     if (workspaces.some((workspace) => workspace.id === linkedWorkspaceId)) {
-      setSelectedWorkspaceId(linkedWorkspaceId);
       setWorkspaceError(null);
       resolvingWorkspaceRef.current = null;
       return;
@@ -242,21 +287,23 @@ export const AgentRealLauncherView: React.FC = () => {
     realApiClient.getAgentWorkspace(linkedWorkspaceId)
       .then(({ workspace }) => {
         if (workspaceDetailRequestRef.current !== requestId || resolvingWorkspaceRef.current !== linkedWorkspaceId) return;
+        if (workspace.id !== linkedWorkspaceId) {
+          setWorkspaceError('Workspace not found or unavailable for this account.');
+          resolvingWorkspaceRef.current = null;
+          return;
+        }
         setWorkspaces((current) => current.some((item) => item.id === workspace.id) ? current : [workspace, ...current]);
-        setSelectedWorkspaceId(workspace.id);
         setWorkspaceError(null);
         resolvingWorkspaceRef.current = null;
       })
       .catch((error) => {
         if (workspaceDetailRequestRef.current !== requestId || resolvingWorkspaceRef.current !== linkedWorkspaceId) return;
-        setSelectedWorkspaceId('');
         setWorkspaceError(safeAgentError(error, 'workspace'));
         resolvingWorkspaceRef.current = null;
       });
   }, [linkedWorkspaceId, workspaces, canManageWorkspaces, isLoadingWorkspaces]);
 
   const selectWorkspace = (workspaceId: string) => {
-    setSelectedWorkspaceId(workspaceId);
     setWorkspaceError(null);
     navigate(workspaceId ? '/agent?workspace=' + encodeURIComponent(workspaceId) : '/agent');
   };
@@ -297,7 +344,10 @@ export const AgentRealLauncherView: React.FC = () => {
       setActionError('Enter a task before admitting a run.');
       return;
     }
-    if (!selectedWorkspaceId) {
+    const workspaceId = linkedWorkspaceId && workspaces.some((item) => item.id === linkedWorkspaceId)
+      ? linkedWorkspaceId
+      : '';
+    if (!workspaceId) {
       setActionError('Select or create an owned workspace first.');
       return;
     }
@@ -315,7 +365,7 @@ export const AgentRealLauncherView: React.FC = () => {
     setIsSubmitting(true);
     setActionError(null);
     const input: CreateAgentRun = {
-      workspaceId: selectedWorkspaceId,
+      workspaceId,
       task: normalizedTask,
       ...(selectedMode ? { mode: selectedMode } : {}),
     };
@@ -347,9 +397,17 @@ export const AgentRealLauncherView: React.FC = () => {
     }
   };
 
-  const selectedWorkspace = workspaces.find((workspace) => workspace.id === selectedWorkspaceId) ?? null;
+  const activeWorkspaceId = linkedWorkspaceId && workspaces.some((workspace) => workspace.id === linkedWorkspaceId)
+    ? linkedWorkspaceId
+    : '';
+  const selectedWorkspace = workspaces.find((workspace) => workspace.id === activeWorkspaceId) ?? null;
+  const isResolvingLinkedWorkspace = Boolean(linkedWorkspaceId && canManageWorkspaces && !activeWorkspaceId && !workspaceError);
+  const runFilterKey = linkedWorkspaceId;
+  const visibleRuns = runsForQuery === runFilterKey ? runs : [];
+  const visibleRunCursor = runsForQuery === runFilterKey ? runCursor : null;
+  const visibleRunError = runsForQuery === runFilterKey ? runError : null;
   const runtimeAvailable = Boolean(capabilities && isAgentCapabilityAvailable(capabilities, 'runExecution'));
-  const cannotSubmit = isLoadingCapabilities || !canAdmitRuns || !selectedWorkspaceId ||
+  const cannotSubmit = isLoadingCapabilities || !canAdmitRuns || !activeWorkspaceId || isResolvingLinkedWorkspace ||
     isSubmitting || (availableModes.length > 0 && selectedMode === null);
 
   return (
@@ -410,6 +468,7 @@ export const AgentRealLauncherView: React.FC = () => {
             </Button>
           </div>
 
+          {isResolvingLinkedWorkspace && <p role="status" aria-live="polite" data-testid="workspace-selection-pending">Resolving linked workspace…</p>}
           {isLoadingWorkspaces && <p role="status" aria-live="polite" data-testid="workspaces-loading">Loading workspaces…</p>}
           {!isLoadingWorkspaces && canManageWorkspaces && workspaces.length === 0 && (
             <p data-testid="workspaces-empty" style={{ color: 'var(--giga-text-secondary, #94A3B8)' }}>No workspaces yet. Create a blank workspace to admit a task.</p>
@@ -421,14 +480,15 @@ export const AgentRealLauncherView: React.FC = () => {
                   key={workspace.id}
                   type="button"
                   onClick={() => selectWorkspace(workspace.id)}
-                  aria-pressed={workspace.id === selectedWorkspaceId}
+                  aria-pressed={workspace.id === activeWorkspaceId}
+                  disabled={isResolvingLinkedWorkspace}
                   data-testid={'workspace-card-' + workspace.id}
                   style={{
                     textAlign: 'left',
                     padding: 14,
                     borderRadius: 8,
-                    border: '1px solid ' + (workspace.id === selectedWorkspaceId ? 'var(--giga-primary, #3B82F6)' : 'var(--giga-border, #1E293B)'),
-                    background: workspace.id === selectedWorkspaceId ? 'rgba(59, 130, 246, 0.10)' : 'var(--giga-surface-muted, #18263A)',
+                    border: '1px solid ' + (workspace.id === activeWorkspaceId ? 'var(--giga-primary, #3B82F6)' : 'var(--giga-border, #1E293B)'),
+                    background: workspace.id === activeWorkspaceId ? 'rgba(59, 130, 246, 0.10)' : 'var(--giga-surface-muted, #18263A)',
                     color: 'var(--giga-text, #F8FAFC)',
                     cursor: 'pointer',
                   }}
@@ -466,9 +526,9 @@ export const AgentRealLauncherView: React.FC = () => {
           <select
             id="real-agent-workspace"
             aria-label="Workspace"
-            value={selectedWorkspaceId}
+            value={activeWorkspaceId}
             onChange={(event) => selectWorkspace(event.target.value)}
-            disabled={!canManageWorkspaces || isLoadingWorkspaces || isSubmitting}
+            disabled={!canManageWorkspaces || isLoadingWorkspaces || isSubmitting || isResolvingLinkedWorkspace}
             data-testid="active-workspace-select"
             style={{ width: '100%', minHeight: 40, marginBottom: 8, padding: '8px 10px', borderRadius: 6 }}
           >
@@ -529,7 +589,7 @@ export const AgentRealLauncherView: React.FC = () => {
             <Button type="submit" disabled={cannotSubmit} loading={isSubmitting} data-testid="launch-agent-btn">
               {runtimeAvailable ? 'Launch Agent Task' : 'Admit Run (Execution Unavailable)'}
             </Button>
-            {!selectedWorkspaceId && <span style={{ fontSize: 12, color: 'var(--giga-text-secondary, #94A3B8)' }}>Choose or create a workspace first.</span>}
+            {!activeWorkspaceId && <span style={{ fontSize: 12, color: 'var(--giga-text-secondary, #94A3B8)' }}>Choose or create a workspace first.</span>}
           </div>
         </form>
 
@@ -541,17 +601,17 @@ export const AgentRealLauncherView: React.FC = () => {
                 {selectedWorkspace ? 'Filtered to ' + selectedWorkspace.name : 'Owned runs from the backend.'}
               </p>
             </div>
-            <Button variant="outline" size="sm" onClick={() => void fetchRuns(undefined, false, selectedWorkspaceId || undefined)} disabled={!canReadRuns || isLoadingRuns} data-testid="refresh-runs-btn">
+            <Button variant="outline" size="sm" onClick={() => void fetchRuns(undefined, false, runFilterKey || undefined)} disabled={!canReadRuns || isLoadingRuns || isLoadingMoreRuns} data-testid="refresh-runs-btn">
               Refresh
             </Button>
           </div>
           {capabilities && !canReadRuns && <p data-testid="run-history-unavailable">{capabilityReason(capabilities, 'runHistory')}</p>}
           {isLoadingRuns && <p role="status" aria-live="polite" data-testid="runs-loading">Loading runs…</p>}
-          {runError && <div style={{ marginTop: 12 }}><Alert type="error" message={runError} /></div>}
-          {!isLoadingRuns && canReadRuns && runs.length === 0 && <p data-testid="runs-empty" style={{ color: 'var(--giga-text-secondary, #94A3B8)' }}>No runs for this view yet.</p>}
-          {runs.length > 0 && (
+          {visibleRunError && <div style={{ marginTop: 12 }}><Alert type="error" message={visibleRunError} /></div>}
+          {!isLoadingRuns && canReadRuns && visibleRuns.length === 0 && <p data-testid="runs-empty" style={{ color: 'var(--giga-text-secondary, #94A3B8)' }}>No runs for this view yet.</p>}
+          {visibleRuns.length > 0 && (
             <ul data-testid="real-runs-list" style={{ listStyle: 'none', padding: 0, margin: '14px 0 0', display: 'grid', gap: 10 }}>
-              {runs.map((run) => (
+              {visibleRuns.map((run) => (
                 <li key={run.id} style={{ border: '1px solid var(--giga-border, #1E293B)', borderRadius: 8, padding: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, flexWrap: 'wrap' }}>
                   <div style={{ minWidth: 0, flex: 1 }}>
                     <button type="button" onClick={() => navigate('/agent/runs/' + encodeURIComponent(run.id))} style={{ padding: 0, border: 0, background: 'transparent', color: 'var(--giga-primary, #60A5FA)', textAlign: 'left', cursor: 'pointer', font: 'inherit' }}>
@@ -566,9 +626,16 @@ export const AgentRealLauncherView: React.FC = () => {
               ))}
             </ul>
           )}
-          {runCursor && (
+          {(visibleRunCursor || (runsForQuery === runFilterKey && isLoadingRuns)) && (
             <div style={{ marginTop: 14 }}>
-              <Button variant="outline" size="sm" onClick={() => void fetchRuns(runCursor, true, runWorkspaceFilterRef.current)} loading={isLoadingMoreRuns} data-testid="load-more-runs-btn">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => { if (visibleRunCursor) void fetchRuns(visibleRunCursor, true, runFilterKey || undefined); }}
+                disabled={isLoadingRuns || isLoadingMoreRuns || !visibleRunCursor}
+                loading={isLoadingMoreRuns}
+                data-testid="load-more-runs-btn"
+              >
                 Load more runs
               </Button>
             </div>
