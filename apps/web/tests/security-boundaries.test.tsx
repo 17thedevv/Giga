@@ -331,7 +331,10 @@ describe('untrusted content and API boundary', () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(json()).mockResolvedValueOnce(json()).mockResolvedValueOnce(json()).mockResolvedValueOnce(json());
     vi.stubGlobal('fetch', fetchMock);
 
-    const created = await client.createAgentRun('A task', 'org/repo');
+    const created = await client.createAgentRun(
+      { workspaceId: run.workspaceId, task: 'A task', mode: 'execute' },
+      { idempotencyKey: 'agent-test-key' }
+    );
     const fetched = await client.getAgentRun(run.id);
     const decided = await client.submitDecision(run.id, 'proposal-id', 'reject');
     const cancelled = await client.cancelAgentRun(run.id);
@@ -341,6 +344,7 @@ describe('untrusted content and API boundary', () => {
       expect(Object.keys(response.run)).toEqual(expect.arrayContaining(['id', 'workspaceId', 'task', 'mode', 'runtime', 'modelId', 'status', 'createdAt', 'updatedAt']));
     }
     expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get('Idempotency-Key')).toBe('agent-test-key');
   });
 
   it('rejects malformed auth, chat, model, preference, Skills and Agent response shapes', async () => {

@@ -19,6 +19,7 @@ import {
 } from '../src/features/agent/workspace-fixtures.js';
 import { mockDataAdapter, MOCK_USER } from '../src/lib/api/mock-adapter.js';
 import { realApiClient, ApiException } from '../src/lib/api/client.js';
+import fixture from '../../../packages/contracts/fixtures/agent.json';
 
 function renderWithProviders(ui: React.ReactElement, initialPath = '/agent', mode: 'mock' | 'real' = 'mock') {
   return render(
@@ -41,6 +42,10 @@ describe('Workspace-First GigaAgent UX (17T-40)', () => {
     mockDataAdapter.setMockSession(MOCK_USER);
     workspaceFixtureStore.resetToDefaults();
     vi.restoreAllMocks();
+    vi.spyOn(realApiClient, 'getAgentCapabilities').mockResolvedValue(fixture.capabilities as any);
+    vi.spyOn(realApiClient, 'listAgentWorkspaces').mockResolvedValue({ items: [], nextCursor: null });
+    vi.spyOn(realApiClient, 'listAgentRuns').mockResolvedValue({ items: [], nextCursor: null });
+    vi.spyOn(realApiClient, 'getAgentWorkspace').mockRejectedValue(new ApiException(404, 'NOT_FOUND', 'Not found'));
   });
 
   describe('Agent Launcher & Workspace Configuration', () => {
@@ -493,22 +498,13 @@ describe('Workspace-First GigaAgent UX (17T-40)', () => {
   });
 
   describe('Truthful Real Mode Handling', () => {
-    it('Scenario 17: Real Mode disables execution launch and truthfully reports runtime unavailable without fallback', async () => {
-      // Mock realApiClient.getAgentCapabilities to return runExecution = false
-      vi.spyOn(realApiClient, 'getAgentCapabilities').mockResolvedValue({
-        capabilities: {
-          chat: { enabled: true },
-          agent: {
-            enabled: true,
-            features: {
-              runAdmission: true,
-              runExecution: false,
-              workspaceFileChanges: false,
-              verificationEvidence: false,
-            },
-          },
-        },
-      } as any);
+    it('Scenario 17: Real Mode uses workspace/run admission while keeping unavailable execution modes disabled', async () => {
+      vi.spyOn(realApiClient, 'getAgentCapabilities').mockResolvedValue(fixture.capabilities as any);
+      vi.spyOn(realApiClient, 'listAgentWorkspaces').mockResolvedValue({
+        items: [fixture.workspace as any],
+        nextCursor: null,
+      });
+      vi.spyOn(realApiClient, 'listAgentRuns').mockResolvedValue({ items: [], nextCursor: null });
 
       renderWithProviders(<AgentLauncherView />, '/agent', 'real');
 
@@ -516,16 +512,17 @@ describe('Workspace-First GigaAgent UX (17T-40)', () => {
         expect(screen.getByTestId('real-mode-runtime-warning')).toBeDefined();
       });
 
-      expect(screen.getByTestId('agent-runtime-badge').textContent).toContain('Real API Mode (Unavailable)');
-      expect(screen.getByTestId('real-mode-runtime-warning').textContent).toContain('Cloud Execution Runtime Unavailable in Real Mode');
+      expect(screen.getByTestId('agent-runtime-badge').textContent).toContain('Real API');
+      expect(screen.getByTestId('real-mode-runtime-warning').textContent).toContain('does not advertise execution');
 
-      // Launch button is disabled and labeled clearly
+      // No unsupported mode is selectable. Admission requires a real owned workspace.
       const launchBtn = screen.getByTestId('launch-agent-btn') as HTMLButtonElement;
       expect(launchBtn.disabled).toBe(true);
-      expect(launchBtn.textContent).toContain('Execution Unavailable (Real Mode)');
+      expect(launchBtn.textContent).toContain('Admit Run');
+      expect((screen.getByLabelText(/Ask/) as HTMLInputElement).disabled).toBe(true);
 
       // Verify no fake mock workspaces or runs are populated in Real mode
-      expect(screen.queryByText('ws-react')).toBeNull();
+      expect(screen.queryByRole('option', { name: 'React Task Manager' })).toBeNull();
       expect(screen.queryByText('ws-csv')).toBeNull();
     });
 
@@ -555,17 +552,11 @@ describe('Workspace-First GigaAgent UX (17T-40)', () => {
       expect(screen.getByTestId('run-status-badge').textContent?.toLowerCase()).toContain('failed');
       expect(screen.getByTestId('run-error-message').textContent).toContain('RUNTIME_UNAVAILABLE');
 
-      // File changes tab shows empty without fake mock files
-      fireEvent.click(screen.getByTestId('tab-changes'));
-      await waitFor(() => {
-        expect(screen.getByTestId('empty-changes-message')).toBeDefined();
-      });
-
-      // Artifacts tab shows empty without fake artifacts
-      fireEvent.click(screen.getByTestId('tab-artifacts'));
-      await waitFor(() => {
-        expect(screen.getByTestId('empty-artifacts-message')).toBeDefined();
-      });
+      expect(screen.getByTestId('runtime-unavailable-state').textContent).toContain('no Cloud execution was performed');
+      expect(screen.queryByTestId('tab-changes')).toBeNull();
+      expect(screen.queryByTestId('tab-artifacts')).toBeNull();
+      expect(screen.queryByText(/src\/App\.tsx/)).toBeNull();
+      expect(screen.queryByText(/Production Build/)).toBeNull();
     });
   });
 
@@ -684,7 +675,7 @@ describe('Workspace-First GigaAgent UX (17T-40)', () => {
 
       // Assert mock workspaces are immediately cleared WITHOUT waiting for deferredCaps to resolve
       expect(screen.queryByRole('option', { name: 'React Task Manager' })).toBeNull();
-      expect(screen.queryByTestId('active-workspace-select')).toBeNull();
+      expect(screen.queryByRole('option', { name: 'React Task Manager' })).toBeNull();
 
       // Now resolve deferredCaps
       deferredCaps.resolve(defaultUnavailableCaps);
@@ -694,7 +685,7 @@ describe('Workspace-First GigaAgent UX (17T-40)', () => {
       });
       // Mock data was never leaked back
       expect(screen.queryByRole('option', { name: 'React Task Manager' })).toBeNull();
-      expect(screen.queryByTestId('active-workspace-select')).toBeNull();
+      expect(screen.queryByRole('option', { name: 'React Task Manager' })).toBeNull();
     });
 
     it('P1 Launcher: Real -> Mock before old Real request resolves prevents late Real response from clearing newly loaded Mock state', async () => {
@@ -713,7 +704,8 @@ describe('Workspace-First GigaAgent UX (17T-40)', () => {
       // In Real mode, initial capability request is pending
       expect(screen.getByTestId('current-api-mode').textContent).toBe('real');
       expect(screen.queryByRole('option', { name: 'React Task Manager' })).toBeNull();
-      expect(screen.queryByTestId('active-workspace-select')).toBeNull();
+      expect(screen.getByTestId('active-workspace-select')).toBeDefined();
+      expect(screen.queryByRole('option', { name: 'React Task Manager' })).toBeNull();
 
       // Switch to Mock mode before deferredCaps1 resolves
       fireEvent.click(screen.getByTestId('switch-to-mock-btn'));
@@ -742,18 +734,16 @@ describe('Workspace-First GigaAgent UX (17T-40)', () => {
         'real'
       );
 
-      await waitFor(() => {
-        expect(screen.getByTestId('real-mode-runtime-warning')).toBeDefined();
-      });
+      await waitFor(() => expect(screen.getByTestId('agent-capabilities-loading')).toBeDefined());
+      await waitFor(() => expect(screen.getByText(/Agent API unavailable/i)).toBeDefined());
 
-      // Execution button disabled
+      // Admission is disabled without confirmed capabilities.
       const launchBtn = screen.getByTestId('launch-agent-btn') as HTMLButtonElement;
       expect(launchBtn.disabled).toBe(true);
-      expect(launchBtn.textContent).toContain('Execution Unavailable (Real Mode)');
 
       // No mock data leak
       expect(screen.queryByRole('option', { name: 'React Task Manager' })).toBeNull();
-      expect(screen.queryByTestId('active-workspace-select')).toBeNull();
+      expect(screen.queryByRole('option', { name: 'React Task Manager' })).toBeNull();
     });
 
     it('P1 Launcher: unmount during pending capability request is safely ignored by request fencing', async () => {
@@ -930,7 +920,7 @@ describe('Workspace-First GigaAgent UX (17T-40)', () => {
       await waitFor(() => {
         expect(screen.getByTestId('agent-run-not-found')).toBeDefined();
       });
-      expect(screen.getByText('Run not found on real backend.')).toBeDefined();
+      expect(screen.getByText('Run not found or unavailable for this account.')).toBeDefined();
       expect(screen.queryByTestId('demo-run-badge')).toBeNull();
       firstMount.unmount();
 
@@ -942,7 +932,7 @@ describe('Workspace-First GigaAgent UX (17T-40)', () => {
       await waitFor(() => {
         expect(screen.getByTestId('agent-run-not-found')).toBeDefined();
       });
-      expect(screen.getByText(/Real Cloud execution runtime is unavailable/)).toBeDefined();
+      expect(screen.getByText('The Agent service or network is unavailable. Try again shortly.')).toBeDefined();
       expect(screen.queryByTestId('demo-run-badge')).toBeNull();
       secondMount.unmount();
     });
@@ -973,11 +963,11 @@ describe('Workspace-First GigaAgent UX (17T-40)', () => {
       }).not.toThrow();
     });
 
-    it('P1 RunView: Real mode disables Cancel and omits uncontracted Approval controls', async () => {
+    it('P1 RunView: Real mode omits unsupported cancellation and approval controls', async () => {
       // Mock capabilities with cancellation: false and externalApproval: false
       vi.spyOn(realApiClient, 'getAgentCapabilities').mockResolvedValue(defaultUnavailableCaps as any);
 
-      // 1. Running status -> Cancel button disabled
+      // 1. Running status -> no unsupported cancellation action is rendered.
       vi.spyOn(realApiClient, 'getAgentRun').mockResolvedValue({
         run: {
           id: 'real-run-active',
@@ -990,13 +980,8 @@ describe('Workspace-First GigaAgent UX (17T-40)', () => {
 
       const firstMount = renderWithProviders(<AgentRunView />, '/agent/runs/real-run-active', 'real');
 
-      await waitFor(() => {
-        expect(screen.getByTestId('cancel-run-btn')).toBeDefined();
-      });
-
-      const cancelBtn = screen.getByTestId('cancel-run-btn') as HTMLButtonElement;
-      expect(cancelBtn.disabled).toBe(true);
-      expect(cancelBtn.title).toBe('Run cancellation is unavailable in Real Mode');
+      await waitFor(() => expect(screen.getByTestId('agent-run-view')).toBeDefined());
+      expect(screen.queryByTestId('cancel-run-btn')).toBeNull();
       firstMount.unmount();
 
       // 2. The public AgentRun DTO has no approvalRequest. Ignore the legacy fixture field
@@ -1079,8 +1064,8 @@ describe('Workspace-First GigaAgent UX (17T-40)', () => {
       });
 
       const warningText = screen.getByTestId('real-mode-runtime-warning').textContent;
-      expect(warningText).toContain('Frontend control-plane integration is tracked under Linear 17T-48');
-      expect(warningText).toContain('Cloud sandbox execution runtime requires separate backend infrastructure readiness');
+      expect(warningText).toContain('The backend accepts durable run admissions');
+      expect(warningText).toContain('will not simulate a run');
     });
   });
 
@@ -1197,8 +1182,8 @@ describe('Workspace-First GigaAgent UX (17T-40)', () => {
       // Must never see demo workspaces or runs in Real mode
       expect(screen.queryByText('Secret Demo Staging Workspace')).toBeNull();
       expect(screen.queryByText('Top secret demo execution that must never leak into Real mode')).toBeNull();
-      expect(screen.getByTestId('no-runs-state')).toBeDefined();
-      expect(screen.getByTestId('no-runs-state').textContent).toContain('No past runs recorded');
+      expect(screen.getByTestId('runs-empty')).toBeDefined();
+      expect(screen.getByTestId('runs-empty').textContent).toContain('No runs for this view yet');
     });
 
     it('resiliently handles corrupted or malformed localStorage without crashing', async () => {

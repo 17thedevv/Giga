@@ -26,7 +26,17 @@ import type {
   SetCredentialPreferenceDto,
 } from './types.js';
 import { SseStreamParser, validateChatStreamEvent } from './sse-parser.js';
-import { agentRunSchema, readAgentCapabilities, type AgentCapabilities, type AgentRun as WorkspaceAgentRun } from './agent-contract.js';
+import {
+  agentRunSchema,
+  agentWorkspaceSchema,
+  readAgentCapabilities,
+  type AgentCapabilities,
+  type AgentRun,
+  type AgentWorkspace,
+  type CreateAgentRun,
+  type CreateAgentWorkspace,
+  type Page,
+} from './agent-contract.js';
 import { extractSensitiveRequestValues, sanitizeUntrustedText, sanitizeUntrustedValue } from '../security/untrusted-content.js';
 
 export const SESSION_EXPIRED_EVENT = 'giga:session-expired';
@@ -291,31 +301,66 @@ function projectChatTurnVariants(value: unknown): ChatTurnVariants {
   return { userMessageId: value.userMessageId, selectedGenerationId: value.selectedGenerationId, items };
 }
 
-function projectWorkspaceAgentRunEnvelope(value: unknown): { run: WorkspaceAgentRun } {
-  if (!isRecord(value)) throw invalidDto();
+function projectAgentWorkspace(value: unknown): AgentWorkspace {
   try {
-    const parsed = agentRunSchema.parse(value.run);
+    const workspace = agentWorkspaceSchema.parse(value);
+    return { ...workspace, name: sanitizeUntrustedText(workspace.name) };
+  } catch {
+    throw invalidDto();
+  }
+}
+
+function projectAgentWorkspaceEnvelope(value: unknown): { workspace: AgentWorkspace } {
+  if (!isRecord(value)) throw invalidDto();
+  return { workspace: projectAgentWorkspace(value.workspace) };
+}
+
+function projectAgentPage<T>(value: unknown, project: (item: unknown) => T): Page<T> {
+  if (!isRecord(value) || !Array.isArray(value.items) ||
+      (value.nextCursor !== null && (typeof value.nextCursor !== 'string' || value.nextCursor.length > 1024))) {
+    throw invalidDto();
+  }
+  return { items: value.items.map(project), nextCursor: value.nextCursor as string | null };
+}
+
+function projectAgentRun(value: unknown): AgentRun {
+  try {
+    const parsed = agentRunSchema.parse(value);
     return {
-      run: {
-        ...parsed,
-        task: sanitizeUntrustedText(parsed.task),
-        ...(parsed.error ? { error: { code: safeApiErrorCode(parsed.error.code, 502), message: sanitizeUntrustedText(parsed.error.message).slice(0, 500) } } : {}),
-        ...(parsed.result ? {
-          result: {
-            summary: sanitizeUntrustedText(parsed.result.summary),
-            artifactIds: [...parsed.result.artifactIds],
-            verifiedChecks: parsed.result.verifiedChecks.map(check => ({
-              name: sanitizeUntrustedText(check.name),
-              outcome: check.outcome,
-              ...(check.summary !== undefined ? { summary: sanitizeUntrustedText(check.summary) } : {}),
-            })),
-          },
-        } : {}),
-      },
+      ...parsed,
+      task: sanitizeUntrustedText(parsed.task),
+      ...(parsed.error ? { error: { code: safeApiErrorCode(parsed.error.code, 502), message: sanitizeUntrustedText(parsed.error.message).slice(0, 500) } } : {}),
+      ...(parsed.result ? {
+        result: {
+          summary: sanitizeUntrustedText(parsed.result.summary),
+          artifactIds: [...parsed.result.artifactIds],
+          verifiedChecks: parsed.result.verifiedChecks.map(check => ({
+            name: sanitizeUntrustedText(check.name),
+            outcome: check.outcome,
+            ...(check.summary !== undefined ? { summary: sanitizeUntrustedText(check.summary) } : {}),
+          })),
+        },
+      } : {}),
     };
   } catch {
     throw invalidDto();
   }
+}
+
+function projectAgentRunEnvelope(value: unknown): { run: AgentRun } {
+  if (!isRecord(value)) throw invalidDto();
+  return { run: projectAgentRun(value.run) };
+}
+
+function generateAgentIdempotencyKey(): string {
+  const randomId = typeof crypto !== 'undefined' && crypto.randomUUID
+    ? crypto.randomUUID()
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+  return `agent-${randomId}`;
+}
+
+function isUncertainAdmissionFailure(error: unknown): boolean {
+  return !(error instanceof ApiException) || error.status >= 500;
 }
 
 function projectChangeProposalEnvelope(value: unknown): { proposal: ChangeProposal } {
@@ -956,20 +1001,84 @@ export class RealApiClient {
     return readAgentCapabilities(await this.request('/api/v1/agent/capabilities'));
   }
 
-  async createAgentRun(task: string, repository: string, baseRef?: string): Promise<{ run: WorkspaceAgentRun }> {
-    return projectWorkspaceAgentRunEnvelope(await this.request('/api/v1/agent/runs', {
+  async createAgentWorkspace(input: CreateAgentWorkspace): Promise<{ workspace: AgentWorkspace }> {
+    return projectAgentWorkspaceEnvelope(await this.request('/api/v1/agent/workspaces', {
       method: 'POST',
-      body: JSON.stringify({ task, repository, baseRef }),
+      body: JSON.stringify(input),
     }));
   }
 
-  async getAgentRun(id: string): Promise<{ run: WorkspaceAgentRun }> {
-    return projectWorkspaceAgentRunEnvelope(await this.request(`/api/v1/agent/runs/${encodeURIComponent(id)}`, {
+  async listAgentWorkspaces(options?: { limit?: number; cursor?: string }): Promise<Page<AgentWorkspace>> {
+    const params = new URLSearchParams();
+    if (options?.limit !== undefined) params.set('limit', String(options.limit));
+    if (options?.cursor !== undefined) params.set('cursor', options.cursor);
+    const query = params.toString();
+    return projectAgentPage(await this.request(`/api/v1/agent/workspaces${query ? `?${query}` : ''}`), projectAgentWorkspace);
+  }
+
+  async getAgentWorkspace(id: string): Promise<{ workspace: AgentWorkspace }> {
+    return projectAgentWorkspaceEnvelope(await this.request(`/api/v1/agent/workspaces/${encodeURIComponent(id)}`));
+  }
+
+  async createAgentRun(
+    input: CreateAgentRun,
+    options?: { idempotencyKey?: string }
+  ): Promise<{ run: AgentRun }> {
+    const key = options?.idempotencyKey ?? generateAgentIdempotencyKey();
+    const headers = new Headers();
+    headers.set('Idempotency-Key', key);
+    const requestOptions: RequestInit = {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(input),
+    };
+    try {
+      return projectAgentRunEnvelope(await this.request('/api/v1/agent/runs', requestOptions));
+    } catch (error) {
+      if (!isUncertainAdmissionFailure(error)) throw error;
+
+      // Admission can commit before a transport/5xx failure reaches the browser.
+      // Replay the exact request with the same key: the backend returns the
+      // durable run for an exact duplicate, or creates it if the first request
+      // never committed. Never guess from a task/workspace tuple in run history.
+      let replay: { run: AgentRun };
+      try {
+        replay = projectAgentRunEnvelope(await this.request('/api/v1/agent/runs', requestOptions));
+      } catch (reconciliationError) {
+        // A definite response (especially session expiry or a key conflict) is
+        // more actionable than the original uncertain transport/5xx failure.
+        if (reconciliationError instanceof ApiException && reconciliationError.status < 500) throw reconciliationError;
+        throw error;
+      }
+
+      const authoritative = await this.getAgentRun(replay.run.id);
+      const expectedMode = input.mode ?? 'ask';
+      if (authoritative.run.id !== replay.run.id || authoritative.run.workspaceId !== input.workspaceId ||
+          authoritative.run.task !== input.task.trim() || authoritative.run.mode !== expectedMode ||
+          authoritative.run.runtime !== (input.runtime ?? 'cloud') ||
+          authoritative.run.modelId !== (input.modelId ?? 'giga-agent-default')) {
+        throw invalidDto();
+      }
+      return authoritative;
+    }
+  }
+
+  async listAgentRuns(options?: { limit?: number; cursor?: string; workspaceId?: string }): Promise<Page<AgentRun>> {
+    const params = new URLSearchParams();
+    if (options?.limit !== undefined) params.set('limit', String(options.limit));
+    if (options?.cursor !== undefined) params.set('cursor', options.cursor);
+    if (options?.workspaceId !== undefined) params.set('workspaceId', options.workspaceId);
+    const query = params.toString();
+    return projectAgentPage(await this.request(`/api/v1/agent/runs${query ? `?${query}` : ''}`), projectAgentRun);
+  }
+
+  async getAgentRun(id: string): Promise<{ run: AgentRun }> {
+    return projectAgentRunEnvelope(await this.request(`/api/v1/agent/runs/${encodeURIComponent(id)}`, {
       method: 'GET',
     }));
   }
 
-  async getRun(id: string): Promise<{ run: WorkspaceAgentRun }> {
+  async getRun(id: string): Promise<{ run: AgentRun }> {
     return this.getAgentRun(id);
   }
 
@@ -979,15 +1088,15 @@ export class RealApiClient {
     }));
   }
 
-  async submitDecision(runId: string, proposalId: string, decision: 'approve' | 'reject'): Promise<{ run: WorkspaceAgentRun }> {
-    return projectWorkspaceAgentRunEnvelope(await this.request(`/api/v1/agent/runs/${encodeURIComponent(runId)}/decision`, {
+  async submitDecision(runId: string, proposalId: string, decision: 'approve' | 'reject'): Promise<{ run: AgentRun }> {
+    return projectAgentRunEnvelope(await this.request(`/api/v1/agent/runs/${encodeURIComponent(runId)}/decision`, {
       method: 'POST',
       body: JSON.stringify({ proposalId, decision }),
     }));
   }
 
-  async cancelAgentRun(runId: string): Promise<{ run: WorkspaceAgentRun }> {
-    return projectWorkspaceAgentRunEnvelope(await this.request(`/api/v1/agent/runs/${encodeURIComponent(runId)}/cancel`, {
+  async cancelAgentRun(runId: string): Promise<{ run: AgentRun }> {
+    return projectAgentRunEnvelope(await this.request(`/api/v1/agent/runs/${encodeURIComponent(runId)}/cancel`, {
       method: 'POST',
     }));
   }

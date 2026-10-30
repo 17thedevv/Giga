@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter } from '../../app/router.js';
 import { useApiMode } from '../../app/context/ApiModeContext.js';
+import { AgentRealLauncherView } from './AgentRealViews.js';
 import { realApiClient } from '../../lib/api/client.js';
 import { isAgentCapabilityAvailable } from '../../lib/api/agent-contract.js';
 import type { AgentMode, AgentWorkspace } from '../../lib/api/agent-contract.js';
@@ -27,7 +28,7 @@ const PROMPT_EXAMPLES = [
   'Review a codebase and suggest improvements for performance and error handling.',
 ];
 
-export const AgentLauncherView: React.FC = () => {
+const DemoAgentLauncherView: React.FC = () => {
   const { params, navigate } = useRouter();
   const { mode: apiMode } = useApiMode();
 
@@ -812,4 +813,9 @@ export const AgentLauncherView: React.FC = () => {
       </Modal>
     </div>
   );
+};
+
+export const AgentLauncherView: React.FC = () => {
+  const { mode } = useApiMode();
+  return mode === 'real' ? <AgentRealLauncherView /> : <DemoAgentLauncherView />;
 };

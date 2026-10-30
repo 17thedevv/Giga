@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter } from '../../app/router.js';
 import { useApiMode } from '../../app/context/ApiModeContext.js';
+import { AgentRealRunView } from './AgentRealViews.js';
 import { realApiClient, ApiException } from '../../lib/api/client.js';
 import { isAgentCapabilityAvailable } from '../../lib/api/agent-contract.js';
 import {
@@ -21,7 +22,7 @@ import {
   ChevronRightIcon,
 } from '../../components/Icons.js';
 
-export const AgentRunView: React.FC = () => {
+const DemoAgentRunView: React.FC = () => {
   const { params, navigate } = useRouter();
   const { mode: apiMode } = useApiMode();
   const runId = params.runId;
@@ -1000,4 +1001,9 @@ export const AgentRunView: React.FC = () => {
       </div>
     </div>
   );
+};
+
+export const AgentRunView: React.FC = () => {
+  const { mode } = useApiMode();
+  return mode === 'real' ? <AgentRealRunView /> : <DemoAgentRunView />;
 };
