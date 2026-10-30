@@ -36,11 +36,11 @@ Every API response is parsed through the canonical workspace/run/capability sche
 | Test file | Coverage |
 |---|---|
 | `apps/web/tests/agent-api-client.test.ts` (7 tests) | Create/list/get workspace DTO projection; independent opaque cursor encoding; run DTO projection; generated/custom idempotency key and 200 replay; 409 conflict preservation; uncertain timeout replay with the same key followed by authoritative GET; replay failure remains unresolved without history-based guessing; malformed DTO rejection; GET restoration and 401/404 preservation. |
-| `apps/web/tests/agent-real-views.test.tsx` (14 tests) | Independent workspace/run pagination; blank workspace creation and URL selection; real run admission and authoritative `RUNTIME_UNAVAILABLE`; capability-gated modes; same-key retry after uncertainty; synchronous double-submit lock; definite 409 conflict followed by a new key; safe 401/403 handling; deep-link workspace restoration; no Real-to-Demo fallback; authoritative refreshed run detail; owner-scoped 404; stale route fencing; Real/Demo in-flight isolation. |
+| `apps/web/tests/agent-real-views.test.tsx` (18 tests) | Existing Real workspace/run flows plus deterministic workspace deep-link resolution, stale B response after C, mismatched/404 workspace response rejection, filter-bound run cursors, deferred stale run pages, first-page Load More disabling, refresh/load-more exclusion, retry after error, all-workspaces reset, and in-page ID deduplication. |
 | `apps/web/tests/agent-workspace-ux.test.tsx` (43 tests) | Existing workspace-first and Demo behavior retained; Real-specific expectations now assert separate API state, unavailable execution, safe errors and absence of fixture data. |
 | `apps/web/tests/security-boundaries.test.tsx` | Canonical Agent create request carries an `Idempotency-Key`; existing public DTO security projection tests remain in the full suite. |
 
-Run totals after clean install: 19 files, 284 tests passed, 0 failed. React Testing Library emitted existing `act(...)` warnings in older asynchronous Chat/Auth tests; they did not fail tests.
+Initial PR baseline after clean install: 19 files, 284 tests passed, 0 failed. The review follow-up below raises the total to 288 tests. React Testing Library emitted existing `act(...)` warnings in older asynchronous Chat/Auth tests; they did not fail tests.
 
 ## Browser and backend verification limits
 
@@ -68,3 +68,51 @@ The checked-in backend routes, schemas, and capability configuration were inspec
 ## Review and gate
 
 Frontend implementation is ready for independent review after CI confirms the pushed HEAD. Browser acceptance is not evidenced locally. No PR was merged and no deployment was performed. Agent API compatibility review remains with Trà; runtime execution remains an existing backend limitation, outside this frontend change.
+
+## Review follow-up — GitHub review 5709205529
+
+**Reviewed starting head:** `2da3e29cfe8c87c7d26bfea94e489fe901b7a1d8`
+**Validated code/test head:** `466c31de3d1feb8bb41ca466caeb90c7aaa6a4a8`
+**Implementation code commit:** `c8826f697ed08dd21abedfdf78ad90add8bc23e1`
+**Branch:** `feat/17t-48-agent-workspaces-real-ui`
+**Base:** `origin/main` at `e5b429593f126857a2a3a4213b2ab04a629d41a2`; no rebase was needed.
+
+### P1 — REAL-WS-01: stale selected workspace during deep-link resolution
+
+**Root cause:** the Real launcher kept `selectedWorkspaceId` from workspace A while an unknown URL-linked workspace B was being fetched. The form only checked whether any workspace ID was selected, so it could admit into A while the route pointed to B. The detail response also was not checked against the requested ID.
+
+**Fix:** the URL workspace ID now defines the active selection. A workspace is actionable only after that exact ID is present in the validated workspace list. During resolution, the UI announces a pending status, disables workspace selection controls and run admission, and the submit handler independently checks the current route ID. Route changes fence earlier detail requests, and a mismatched response is rejected without adding or selecting it. 401/403/404/network errors leave no previous workspace selected; Real mode still does not fall back to Demo.
+
+**Regression tests:** `makes the URL workspace authoritative while resolving a new deep link` uses a deferred B response and verifies A is disabled, no POST occurs while pending, and the admitted run targets B after resolution. `ignores stale workspace detail responses and rejects mismatched or unavailable IDs` resolves B after navigating to C, returns a wrong ID for D, and returns a 404 for E while A remains in the loaded list. The existing `restores a workspace from a direct route after refreshing the launcher` test continues to cover deep-link restoration.
+
+### P2 — REAL-RUNS-02: stale run history and cursor after workspace filter changes
+
+**Root cause:** first-page fetches changed the filter but left the old `runs` and `runCursor` visible until a response arrived. Request IDs prevented some stale responses, but the rendered cursor was not tied to its workspace query, and duplicate IDs inside one page were not removed.
+
+**Fix:** run history is keyed to the URL workspace filter. A layout-phase route fence synchronously invalidates older requests and resets rows, cursor, errors and loading flags. First-page fetches clear rows/cursor immediately; request and filter checks guard every result; Load More is disabled while the first page is loading and uses only the current query's cursor. Refresh and Load More cannot overlap in the UI, and page append deduplication now updates its ID set as each item is added.
+
+**Regression tests:** `fences run pages and cursors by workspace filter and deduplicates IDs within a page` holds A's append and B's first page, confirms A rows/cursor are unavailable, rejects B then retries it, resolves stale A, and verifies B's cursor and duplicate IDs. `prevents refresh and load-more overlap, clears pages on refresh, and clears filters for All Workspaces` confirms refresh is disabled during append, refresh clears the prior page, and the all-workspaces query has no workspace filter.
+
+### Changed files and verification
+
+| File | Change |
+|---|---|
+| `apps/web/src/features/agent/AgentRealViews.tsx` | URL-authoritative workspace selection; fenced detail lookups; query-keyed run rows/cursors; loading locks and within-page deduplication. |
+| `apps/web/tests/agent-real-views.test.tsx` | Four deterministic deferred-promise regression tests for REAL-WS-01 and REAL-RUNS-02; test file now has 18 tests. |
+| `apps/web/package-lock.json` | Patched the compatible Vite minor release after the required dependency audit found one moderate advisory; `apps/web/package.json` is unchanged. |
+
+| Command / check | Result |
+|---|---|
+| `npm ci --prefix apps/web` | Pass; 148 packages installed from the lockfile; 0 vulnerabilities. The existing `whatwg-encoding` deprecation notice remains. |
+| `npm run typecheck --prefix apps/web` | Pass. |
+| `npm test --prefix apps/web -- --reporter=dot` | Pass: 288 tests across 19 files, 0 failed. Existing React `act(...)` warnings in older Chat/Auth tests remain non-failing. |
+| `npm run build --prefix apps/web` | Pass; Vite 6.4.5 built 73 modules. |
+| `npm run test:production-security --prefix apps/web` | Pass; one production JavaScript asset scanned. |
+| `npm audit --prefix apps/web --audit-level=moderate` | Pass; 0 vulnerabilities after updating locked `vite` from 6.4.4 to 6.4.5. Before the patch, audit identified `GHSA-8g5g-mxqh-grgj` (moderate, dev/build dependency, affected exact version 6.4.4). `npm audit fix` was run without `--force`; no major upgrade or package manifest change. |
+| `node --test .agents/scripts/validate-git-workflow.test.mjs` | Pass: 6/6. |
+| `node .agents/scripts/validate-skills.mjs` | Pass. |
+| Repository Git workflow validator | The repository check passed on validated code/test head `466c31de3d1feb8bb41ca466caeb90c7aaa6a4a8`; GitHub Workflow run #209 also passed on that head. The evidence-only documentation commit is checked by its own PR workflow run after push. |
+| `git diff --check` | Pass after the review follow-up evidence changes. |
+| GitHub Frontend CI / Validate Git Workflow | Runs [#63](https://github.com/17thedevv/Giga/actions/runs/41021643172) and [#209](https://github.com/17thedevv/Giga/actions/runs/41021643174) passed on validated code/test head `466c31de3d1feb8bb41ca466caeb90c7aaa6a4a8`. Earlier implementation runs [#62](https://github.com/17thedevv/Giga/actions/runs/41021393597) and [#208](https://github.com/17thedevv/Giga/actions/runs/41021393674) also passed on `c8826f697ed08dd21abedfdf78ad90add8bc23e1`. |
+
+No browser runner or browser-control tool was available in this session. No browser E2E, deployed Real API check, or live environment claim is made. The implementation and regression tests use local mocked API methods. Existing PR #46 stays Draft; no backend change, merge, or deployment was performed. The exact duplicate/409 idempotency behavior was not changed; 409 remains a definite key/payload conflict with no guessed run ID.
