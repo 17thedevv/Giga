@@ -12,7 +12,7 @@ export async function browserSmoke({ base, email, password, conversationId }) {
     '--headless=new', '--no-sandbox', '--disable-dev-shm-usage',
     '--no-first-run', '--disable-background-networking',
     '--remote-debugging-port=0', '--user-data-dir=' + profile, 'about:blank',
-  ], { stdio: ['ignore', 'ignore', 'pipe'] });
+  ], { stdio: ['ignore', 'ignore', 'pipe'], detached: process.platform !== 'win32' });
   let socket;
   try {
     const endpoint = await new Promise((resolve, reject) => {
@@ -89,9 +89,19 @@ export async function browserSmoke({ base, email, password, conversationId }) {
     return { checks: ['real-mode default', 'protected deep link', 'form login', 'HttpOnly cookie', 'authenticated reload', 'logout'] };
   } finally {
     socket?.close();
-    chrome.kill('SIGTERM');
-    await Promise.race([new Promise(resolve => chrome.once('exit', resolve)), delay(5000)]);
-    if (chrome.exitCode === null) chrome.kill('SIGKILL');
-    await rm(profile, { recursive: true, force: true });
+    const exited = chrome.exitCode !== null || chrome.signalCode !== null
+      ? Promise.resolve()
+      : new Promise(resolve => chrome.once('exit', resolve));
+    const signalChrome = signal => {
+      try {
+        if (process.platform !== 'win32' && chrome.pid) process.kill(-chrome.pid, signal);
+        else chrome.kill(signal);
+      } catch {}
+    };
+    if (chrome.exitCode === null && chrome.signalCode === null) signalChrome('SIGTERM');
+    await Promise.race([exited, delay(5000)]);
+    if (chrome.exitCode === null && chrome.signalCode === null) signalChrome('SIGKILL');
+    await Promise.race([exited, delay(5000)]);
+    await rm(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
   }
 }
