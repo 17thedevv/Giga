@@ -1,24 +1,34 @@
 # 17T-50 — Durable Agent Live Timeline and SSE Replay
 
-**Status:** PR #48 was merged externally on 2026-11-02 at `41db8937f2b94d577c3300aeb72e672449e7e68a`. This document records a local follow-up to review `5733317585` against pre-merge HEAD `7c3002b8e2779b4e91f247abc51d602b32b971df`; the follow-up is not part of the merged commit. API contract v0.2 remains DRAFT.
-**Branch:** `feat/17t-50-agent-live-timeline`
-**Baseline:** `463646a44244b1aabfc0c597612f2c102d67f5b9` (`origin/main`, includes merged PR #47).
-**Implementation commit:** `733ad11fdc3d83e2c4f8ca08b1a7c12a1f228460`.
-**Review-fix commit:** `e2ce0aeac8b13bf884e5cedbca498d984aca7dcf` (local only; not pushed because PR #48 is already merged).
+**Status:** Follow-up PR in progress. PR #48 was merged on 2026-11-02 at `41db8937f2b94d577c3300aeb72e672449e7e68a` before review `5733317585` was remediated. The merged PR remains unchanged. API contract v0.2 remains DRAFT.
+**Branch:** `fix/17t-50-timeline-review-followup`
+**Base:** `e059b09c7d979c52ad71ec57168b928c055913e7` (`origin/main` at follow-up branch creation).
+**Original PR #48 implementation commit:** `733ad11fdc3d83e2c4f8ca08b1a7c12a1f228460`.
+**Original remediation commits:** `e2ce0aeac8b13bf884e5cedbca498d984aca7dcf`, `2b6c6d9de6ba22866834c8b9483bba5a5a444f93`.
+**Cherry-picks:** `e2ce0ae` → `a01671b`; `2b6c6d9` → `17ef3b3`, both with `-x`. No conflicts.
+**Follow-up implementation commit:** `55622eacc2bad63c03af127217bce5cdcfb6a290` (route-scoped capability fencing and A→B→C observer regression).
 **Linear:** [17T-50](https://linear.app/17thedev/issue/17T-50).
 **Scope:** Real Agent run detail, typed frontend SSE observation, replay projection and UI. No backend changes, API contract edits, Demo behavior changes, run admission/control, or deployment.
 
-## Review `5733317585` follow-up
+## Follow-up PR after premature merge of PR #48
 
-The requested fixes are implemented locally on the existing feature branch. The PR has already merged, so its head cannot be updated for re-review; no new PR was created. These changes do not modify the backend or shared contract.
+PR #48 ([original PR](https://github.com/17thedevv/Giga/pull/48)) merged as `41db8937f2b94d577c3300aeb72e672449e7e68a` with review findings still unresolved. Review `5733317585` is [the original review](https://github.com/17thedevv/Giga/pull/48#pullrequestreview-5733317585). The follow-up branch was created from latest fetched `origin/main` (`e059b09c7d979c52ad71ec57168b928c055913e7`), which contained only unrelated 17T-80 changes after the merge. Inspection confirmed that main still had the original `streamEnded` completion rule and fixed five-value phase enum. Only the two local remediation commits were cherry-picked; the original 17T-50 feature implementation was not replayed. The cherry-picks applied cleanly. PR #48 was not edited, reopened, or rewritten.
+
+The follow-up is scoped to frontend replay projection/UI/tests and this evidence document. No backend, shared contract, or dependency changes are included.
 
 | Finding | Remediation | Regression coverage |
 | --- | --- | --- |
 | P1 `TL-REPLAY-01` | EOF is no longer replay-completion evidence. Completion requires a contiguous terminal event marker (`run.completed`, `run.failed`, or terminal `run.status`) matching the owner-scoped authoritative run GET, with no unresolved gap/conflict. Empty/partial history preserves GET status, shows an incomplete warning, and retries from the last contiguous cursor with bounded backoff and manual retry. | `does not treat an empty clean EOF as complete for a terminal run and bounds retries`; `does not treat a silent observer error as terminal replay evidence`; `resumes a partial terminal replay from the last contiguous cursor`; `accepts a contiguous terminal marker even when the observer then errors`; existing gap and session-fence regressions. |
 | P2 `TL-PHASE-02` | `run.status.phase` accepts any contract string up to 120 characters, including empty and unfamiliar future values. Non-strings, control characters, and excessive values are rejected; text is sanitized and React renders it as text. Status, run ID, sequence and cursor validation are unchanged. | `accepts bounded contract-valid phases, including empty and unfamiliar values`; `preserves future phase strings through SSE and continues parsing later events`; `accepts an unfamiliar phase over SSE and renders HTML-like text without creating markup`. |
-| Recovery warning | A transport warning clears only after a valid replay event/duplicate confirms recovery. Sequence gaps stay visible through no-progress retries and manual retry; incomplete terminal history remains visible until its terminal marker is confirmed. Run changes clear prior run events and warnings. | `clears a transient disconnect warning only after a replay event confirms recovery`; `keeps a sequence-gap integrity warning through repeated no-progress replay and manual retry`; `keeps a nonterminal run incomplete after a clean stream close`; `isolates replay warnings and events when navigating to another run`. |
+| Recovery warning and observer lifecycle | A transport warning clears only after a valid replay event/duplicate confirms recovery. Sequence gaps stay visible through no-progress retries and manual retry; incomplete terminal history remains visible until its terminal marker is confirmed. Run changes clear prior run events/warnings, fence old callbacks, and keep at most one active observer. Capability results are scoped to the route run ID so a route change does not briefly launch observers using stale capability state. | `clears a transient disconnect warning only after a replay event confirms recovery`; `keeps a sequence-gap integrity warning through repeated no-progress replay and manual retry`; `keeps a nonterminal run incomplete after a clean stream close`; `isolates replay warnings and events when navigating to another run`; `keeps one active observer and an independent cursor across run A to B to C`. |
 
-**Frontend/backend limit:** GET run status does not expose an authoritative event high-watermark. The frontend can prove continuity only from sequence 1 through a terminal marker that matches GET. If the marker never arrives, the UI deliberately remains incomplete and retries; it cannot distinguish a permanently failing backend observer from an empty event history using the current API. The backend's silent close behavior and replay persistence were inspected previously but were not changed. No deployment, authenticated browser run, or runtime behavior is claimed by these local changes.
+### Terminal status versus replay completeness
+
+The status GET remains authoritative for the current run status. The frontend's replay-complete state is separate: it starts at cursor 0 and requires a contiguous event sequence through a terminal marker whose status matches the GET. A matching marker cannot arrive after an earlier gap without that gap first being filled.
+
+The current API does not expose a run event high-watermark through GET. Inspection of the actual backend implementation supports the terminal-marker rule: `AgentRepository.finalizeRun()` updates terminal status, increments `last_event_id`, and inserts the matching `run.completed`, `run.failed`, or cancelled `run.status` event in the same transaction. Admission failure similarly commits `queued` sequence 1 and `run.failed` sequence 2 together. The migrations enforce consecutive event sequences matching the run's `last_event_id`, reject event updates, and prevent updates to terminal runs; no event-delete path exists in the repository/API. The SSE observer drains bounded pages and normally closes only when terminal status is reached and its cursor covers `lastEventId`; it also silently closes on repository errors and at its connection time limit. Thus a contiguous replay from sequence 1 through the matching terminal marker is the strongest completeness proof available under the current API write path, without a new endpoint.
+
+**Remaining protocol limitations:** the frontend cannot distinguish an empty event log from a persistent observer/database failure when GET reports terminal status but SSE supplies no marker. It remains incomplete, retries with bounded backoff, and then offers manual retry. The current API exposes no separate completeness/high-watermark field; no frontend test can prove deployed persistence, replay retention, owner isolation, or live database health. Direct privileged database deletion is outside the normal repository write path and cannot be excluded by the UI. No new backend endpoint or event semantics were introduced.
 
 ## Trust boundaries and contract
 
@@ -54,9 +64,9 @@ The requested fixes are implemented locally on the existing feature branch. The 
 ## Regression coverage
 
 - `tests/agent-events.test.ts`: sensitive/internal DTO fields are excluded; provider credentials are redacted; heartbeat and unknown additive events are handled without retaining raw payload; malformed cursor, wrong run ID, and invalid event data fail closed.
-- `tests/agent-api-client.test.ts`: cookie-authenticated same-origin GET, `Last-Event-ID` header rather than query, frame-local heartbeat behavior, public event projection, and aborting the observation reader.
+- `tests/agent-api-client.test.ts`: cookie-authenticated same-origin GET, `Last-Event-ID` header rather than query, frame-local heartbeat behavior, public event projection including future phases, and aborting the observation reader.
 - `tests/sse-parser.test.ts`: Agent frame-local ID reset is opt-in and existing Chat ID persistence remains unchanged.
-- `tests/agent-run-timeline.test.tsx`: exact replay dedupe, cursor-gap recovery from the last contiguous cursor, terminal GET reconciliation, capability fail-closed behavior, and session invalidation clearing/aborting.
+- `tests/agent-run-timeline.test.tsx`: exact replay dedupe, empty/partial EOF, silent observer close, terminal marker reconciliation, bounded retries/manual retry, gap recovery, reconnect warning recovery, A→B→C cursor/session isolation with one active observer, capability fail-closed behavior, and session invalidation clearing/aborting.
 - `tests/agent-real-views.test.tsx`: Real run detail mounts the timeline while preserving all existing message-thread and run-detail regressions.
 
 ## Verification and delivery evidence
@@ -83,26 +93,26 @@ The requested fixes are implemented locally on the existing feature branch. The 
 | GitHub Validate Git Workflow on evidence update `de2ca84f3da05d3d50c5d9f06f0fe25b20ba1b24` | PASS — [run 226](https://github.com/17thedevv/Giga/actions/runs/41406649199) |
 | Live status for subsequent documentation-only updates | See [PR #48 checks](https://github.com/17thedevv/Giga/pull/48/checks) |
 
-### Follow-up verification for review `5733317585`
+### Follow-up PR verification
 
-These results apply to the local follow-up changes on `feat/17t-50-agent-live-timeline`, not to the already-merged PR commit. No files outside the frontend and this evidence document were changed.
+These results apply to the new branch `fix/17t-50-timeline-review-followup`, based on `origin/main` `e059b09c7d979c52ad71ec57168b928c055913e7`. Scope is frontend replay behavior/tests plus this evidence document. No backend, API contract, or dependency changes are included.
 
 | Check | Result |
 | --- | --- |
 | `npm ci --prefix apps/web` | PASS — lockfile install; zero vulnerabilities |
 | `npm run typecheck --prefix apps/web` | PASS |
-| `npm test --prefix apps/web -- --reporter=dot` | PASS — 337 tests across 21 files |
-| Focused Agent event, API client, and timeline tests | PASS — 32 tests across 3 files |
+| `npm test --prefix apps/web -- --reporter=dot` | PASS — 338 tests across 21 files |
+| Focused Agent event, API client, and timeline tests | PASS — 33 tests across 3 files |
 | `npm run build --prefix apps/web` | PASS — production Vite bundle generated |
 | `npm run test:production-security --prefix apps/web` | PASS — one JavaScript asset scanned |
 | `npm audit --prefix apps/web --audit-level=moderate` | PASS — zero vulnerabilities |
 | Agent API replay test file (`npx tsx --test --test-concurrency=1 tests/agent/agent-api.test.ts`) | PASS — 14 pass, 2 skipped for PostgreSQL-specific semantics unavailable in pg-mem |
 | `node --test .agents/scripts/validate-git-workflow.test.mjs` | PASS — 6 tests |
 | `node .agents/scripts/validate-skills.mjs` | PASS — 8 skill manifests |
-| `git diff --check` | PASS |
-| Git workflow validator on follow-up commit `e2ce0aeac8b13bf884e5cedbca498d984aca7dcf` | PASS — exact branch/title/body and base/head SHAs |
-| GitHub CI on follow-up HEAD | Not available: PR #48 was merged before these changes; the follow-up commit is local and no follow-up PR exists. Existing CI results above are for the earlier PR commits only. |
-| Authenticated browser against a deployed follow-up SHA | Not run: no deployed follow-up SHA or configured Playwright runner was available. |
+| `git diff --check` | PASS — source/test changes committed; evidence update checked before commit |
+| Git workflow validator on final PR HEAD | Pending final evidence commit with `fix(web): resolve Agent timeline replay review findings` and body referencing 17T-50 |
+| GitHub Frontend CI and Git Workflow CI | Pending push and Draft PR creation; verify both on the exact final PR head. |
+| Authenticated browser against a deployed follow-up SHA | Not run: no deployed follow-up SHA or configured Playwright runner is available; no deployment is in scope. |
 
 ### Dependency audit scope note
 
@@ -120,4 +130,4 @@ The API `npm audit` exits 1 with four moderate findings; this is an existing bac
 - This evidence is local frontend test evidence, not production or deployed API/browser evidence. Do not claim that deployed cookies, CORS, owner checks, SSE proxy buffering, replay persistence, or session expiry have passed based on these tests.
 - Backend event replay route and event persistence are existing behavior and were not modified. Backend reviewer Trà should confirm event field compatibility, owner scoping, and the interpretation of connection close/high-watermark replay.
 - Cloud execution, cancellation, approvals, sandbox files and artifact downloads remain capability-gated/unavailable according to the current API metadata. Timeline entries do not imply that a tool executed or that an artifact is downloadable.
-- PR #48 was merged while review `5733317585` still required changes. This local follow-up does not alter that merge and is not yet independently reviewed. Linear 17T-50 was marked Done by the external merge automation; the follow-up should remain In Review until these changes receive review and an integration path is agreed. Do not claim the post-review fixes are merged, and do not deploy them.
+- PR #48 was merged while review `5733317585` still required changes and remains untouched. The follow-up Draft PR is the integration/re-review path; Linear 17T-50 remains In Review. Do not claim the post-review fixes are merged, and do not deploy them.
