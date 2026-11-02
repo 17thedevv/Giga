@@ -4,5 +4,10 @@ services:
     command: ["node", "infra/docker/tests/fixture-server.mjs"]
     environment:
       GIGA_DOCKER_FIXTURE: deterministic-sse-only
+      # Exercise Chat-on independently from disabled Agent execution. Synthetic
+      # configuration only; fixture-server blocks every external provider call.
+      CHAT_ENABLED: 'true'
+      GEMINI_API_KEY: fixture-only-not-a-live-provider-key
+      CHAT_MODEL_ID: gemini-3.1-flash-lite
     volumes:
       - ./infra/docker/tests/fixture-server.mjs:/app/infra/docker/tests/fixture-server.mjs:ro

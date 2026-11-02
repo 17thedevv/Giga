@@ -27,4 +27,7 @@ registry.registerAlias({
   maxOutputTokensLimit: 2048,
 });
 registry.validate();
-await start({ llmEngine: new LLMEngine(registry) });
+await start({
+  llmEngine: new LLMEngine(registry),
+  providerTransport: async () => { throw new Error('External provider calls are forbidden in the Docker fixture'); },
+});

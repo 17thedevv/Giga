@@ -302,7 +302,10 @@ UI and HTTP API, while its provider is a deterministic fixture.
 
 The SSE fixture injects a deterministic provider into a test-only server and
 mounts test files only for the smoke test. It exercises the actual API storage
-and Nginx transport, not Gemini or E2B. The normal image must not contain the
+and Nginx transport, not Gemini or E2B. Its test-only Chat-on configuration uses
+a synthetic key, injects the deterministic engine and blocks external provider
+transport; this also verifies that enabling Chat cannot enable Agent execution.
+The normal image must not contain the
 fixture server. **No live AI streaming, provider quota or sandbox-isolation
 claim follows from this test.** Live provider tests require a separately
 configured, bounded authorized run and must be identified as live in evidence.
