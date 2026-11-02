@@ -110,8 +110,9 @@ These results apply to the new branch `fix/17t-50-timeline-review-followup`, bas
 | `node --test .agents/scripts/validate-git-workflow.test.mjs` | PASS — 6 tests |
 | `node .agents/scripts/validate-skills.mjs` | PASS — 8 skill manifests |
 | `git diff --check` | PASS — source/test changes committed; evidence update checked before commit |
-| Git workflow validator on initial PR HEAD `f1b22db0c745d28eda009e05cbc7c6d157221cc2` | PASS — exact branch, title, issue reference, commit subjects, base and head |
-| GitHub Frontend CI and Git Workflow CI | Check the exact current PR #51 head; record final results after the evidence-link commit. |
+| Git workflow validator on PR HEAD `dd276c6d97f6376e26921476122ae80f9b2bf075` | PASS — exact branch, title, issue reference, commit subjects, base and head |
+| GitHub Frontend CI on PR HEAD `dd276c6d97f6376e26921476122ae80f9b2bf075` | PASS — [run 41413124606](https://github.com/17thedevv/Giga/actions/runs/41413124606) |
+| GitHub Git Workflow CI on PR HEAD `dd276c6d97f6376e26921476122ae80f9b2bf075` | PASS — [run 41413124611](https://github.com/17thedevv/Giga/actions/runs/41413124611) |
 | Authenticated browser against a deployed follow-up SHA | Not run: no deployed follow-up SHA or configured Playwright runner is available; no deployment is in scope. |
 
 ### Dependency audit scope note
