@@ -28,11 +28,14 @@ import type {
 import { SseStreamParser, validateChatStreamEvent } from './sse-parser.js';
 import {
   agentRunSchema,
+  agentMessageSchema,
   agentWorkspaceSchema,
   readAgentCapabilities,
   type AgentCapabilities,
   type AgentRun,
+  type AgentMessage,
   type AgentWorkspace,
+  type CreateAgentMessage,
   type CreateAgentRun,
   type CreateAgentWorkspace,
   type Page,
@@ -350,6 +353,39 @@ function projectAgentRun(value: unknown): AgentRun {
 function projectAgentRunEnvelope(value: unknown): { run: AgentRun } {
   if (!isRecord(value)) throw invalidDto();
   return { run: projectAgentRun(value.run) };
+}
+
+function projectAgentMessage(value: unknown, runId: string, workspaceId: string): AgentMessage {
+  try {
+    const parsed = agentMessageSchema.parse(value);
+    if (parsed.runId !== runId || parsed.workspaceId !== workspaceId || parsed.content.includes('\0') ||
+        new TextEncoder().encode(parsed.content).byteLength > 16384) throw invalidDto();
+    return { ...parsed, content: sanitizeUntrustedText(parsed.content) };
+  } catch {
+    throw invalidDto();
+  }
+}
+
+function projectAgentMessagePage(value: unknown, runId: string, workspaceId: string): Page<AgentMessage> {
+  if (!isRecord(value) || !Array.isArray(value.items) ||
+      (value.nextCursor !== null && (typeof value.nextCursor !== 'string' || value.nextCursor.length === 0 || value.nextCursor.length > 1024))) {
+    throw invalidDto();
+  }
+  const items = value.items.map((item) => projectAgentMessage(item, runId, workspaceId));
+  const ids = new Set<string>();
+  if (items.some((item, index) => {
+    if (ids.has(item.id) || (index > 0 && item.sequence <= items[index - 1]!.sequence)) return true;
+    ids.add(item.id);
+    return false;
+  })) throw invalidDto();
+  return { items, nextCursor: value.nextCursor as string | null };
+}
+
+function projectAgentMessageEnvelope(value: unknown, runId: string, workspaceId: string, expectedContent: string): { message: AgentMessage } {
+  if (!isRecord(value)) throw invalidDto();
+  const message = projectAgentMessage(value.message, runId, workspaceId);
+  if (message.role !== 'user' || message.content !== sanitizeUntrustedText(expectedContent)) throw invalidDto();
+  return { message };
 }
 
 function generateAgentIdempotencyKey(): string {
@@ -1076,6 +1112,54 @@ export class RealApiClient {
     return projectAgentRunEnvelope(await this.request(`/api/v1/agent/runs/${encodeURIComponent(id)}`, {
       method: 'GET',
     }));
+  }
+
+  async listAgentMessages(
+    runId: string,
+    options: { workspaceId: string; limit?: number; cursor?: string }
+  ): Promise<Page<AgentMessage>> {
+    const params = new URLSearchParams();
+    if (options.limit !== undefined) params.set('limit', String(options.limit));
+    if (options.cursor !== undefined) params.set('cursor', options.cursor);
+    const query = params.toString();
+    const response = await this.request(
+      `/api/v1/agent/runs/${encodeURIComponent(runId)}/messages${query ? `?${query}` : ''}`
+    );
+    return projectAgentMessagePage(response, runId, options.workspaceId);
+  }
+
+  async createAgentMessage(
+    runId: string,
+    input: CreateAgentMessage,
+    options: { workspaceId: string; idempotencyKey?: string }
+  ): Promise<{ message: AgentMessage }> {
+    const content = input.content.trim();
+    if (!content || content.includes('\0') || new TextEncoder().encode(content).byteLength > 16384) {
+      throw new ApiException(400, 'VALIDATION_ERROR', 'Message content must be between 1 and 16,384 UTF-8 bytes');
+    }
+    const key = options.idempotencyKey ?? generateAgentIdempotencyKey();
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(key)) {
+      throw new ApiException(400, 'VALIDATION_ERROR', 'Invalid idempotency key');
+    }
+    const headers = new Headers();
+    headers.set('Idempotency-Key', key);
+    const requestOptions: RequestInit = {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ content }),
+    };
+    const path = `/api/v1/agent/runs/${encodeURIComponent(runId)}/messages`;
+    try {
+      return projectAgentMessageEnvelope(await this.request(path, requestOptions), runId, options.workspaceId, content);
+    } catch (error) {
+      if (!isUncertainAdmissionFailure(error)) throw error;
+      try {
+        return projectAgentMessageEnvelope(await this.request(path, requestOptions), runId, options.workspaceId, content);
+      } catch (reconciliationError) {
+        if (reconciliationError instanceof ApiException && reconciliationError.status < 500) throw reconciliationError;
+        throw error;
+      }
+    }
   }
 
   async getRun(id: string): Promise<{ run: AgentRun }> {
