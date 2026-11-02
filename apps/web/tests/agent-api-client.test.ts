@@ -253,4 +253,47 @@ describe('Real Agent API client', () => {
     })).rejects.toMatchObject({ status: 400, code: 'VALIDATION_ERROR' });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
+
+  it('opens authenticated same-origin SSE with a header cursor and validates public events only', async () => {
+    const secret = 'synthetic-worker-lease-sentinel';
+    const runId = fixture.run.id;
+    const frames = [
+      `id: 1\nevent: run.status\ndata: ${JSON.stringify({ runId, status: 'running', phase: 'planning', workerLeaseToken: secret })}\n\n`,
+      `event: heartbeat\ndata: {}\n\n`,
+      `event: future.event\ndata: ${JSON.stringify({ private: secret })}\n\n`,
+      `id: 2\nevent: run.failed\ndata: ${JSON.stringify({ runId, code: 'RUNTIME_UNAVAILABLE', message: 'No runtime', rawReasoning: secret })}\n\n`,
+    ].join('');
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new TextEncoder().encode(frames)); controller.close(); },
+    });
+    const fetchMock = vi.fn().mockResolvedValue(new Response(body, { headers: { 'Content-Type': 'text/event-stream; charset=utf-8' } }));
+    vi.stubGlobal('fetch', fetchMock);
+    const received: unknown[] = [];
+
+    await new RealApiClient().streamAgentRunEvents(runId, (event) => received.push(event), { lastEventId: 0 });
+
+    expect(fetchMock.mock.calls[0][0]).toBe(`/api/v1/agent/runs/${runId}/events`);
+    expect(fetchMock.mock.calls[0][1]).toEqual(expect.objectContaining({ method: 'GET', credentials: 'include' }));
+    expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get('Last-Event-ID')).toBe('0');
+    expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get('Accept')).toBe('text/event-stream');
+    expect(received).toEqual([
+      { sequence: 1, type: 'run.status', status: 'running', phase: 'planning' },
+      { sequence: 2, type: 'run.failed', code: 'RUNTIME_UNAVAILABLE', message: 'No runtime' },
+    ]);
+    expect(JSON.stringify(received)).not.toContain(secret);
+  });
+
+  it('cancels only the SSE observation reader when its AbortSignal is aborted', async () => {
+    const body = new ReadableStream<Uint8Array>({ start() {} });
+    const fetchMock = vi.fn().mockResolvedValue(new Response(body, { headers: { 'Content-Type': 'text/event-stream' } }));
+    vi.stubGlobal('fetch', fetchMock);
+    const controller = new AbortController();
+    const observing = new RealApiClient().streamAgentRunEvents(fixture.run.id, () => {}, { signal: controller.signal });
+    await Promise.resolve();
+    controller.abort();
+
+    await expect(observing).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][1]?.method).toBe('GET');
+  });
 });

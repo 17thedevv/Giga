@@ -25,7 +25,8 @@ import type {
   SaveCredentialDto,
   SetCredentialPreferenceDto,
 } from './types.js';
-import { SseStreamParser, validateChatStreamEvent } from './sse-parser.js';
+import { SseStreamParser, validateChatStreamEvent, type SseEvent } from './sse-parser.js';
+import { projectAgentRunEvent, type PublicAgentRunEvent } from './agent-events.js';
 import {
   agentRunSchema,
   agentMessageSchema,
@@ -1112,6 +1113,77 @@ export class RealApiClient {
     return projectAgentRunEnvelope(await this.request(`/api/v1/agent/runs/${encodeURIComponent(id)}`, {
       method: 'GET',
     }));
+  }
+
+  /** Observe durable run events. Aborting this request only closes the SSE reader; it never cancels the Agent run. */
+  async streamAgentRunEvents(
+    id: string,
+    onEvent: (event: PublicAgentRunEvent) => void,
+    options: { signal?: AbortSignal; lastEventId?: number } = {},
+  ): Promise<void> {
+    const path = `/api/v1/agent/runs/${encodeURIComponent(id)}/events`;
+    const requestEpoch = sessionGeneration;
+    const headers = new Headers({ Accept: 'text/event-stream' });
+    if (options.lastEventId !== undefined) {
+      if (!Number.isSafeInteger(options.lastEventId) || options.lastEventId < 0 || options.lastEventId > 2_147_483_647) {
+        throw new ApiException(400, 'INVALID_CURSOR', 'The Agent event cursor is invalid.');
+      }
+      headers.set('Last-Event-ID', String(options.lastEventId));
+    }
+
+    const response = await fetch(`${this.baseUrl}${path}`, {
+      method: 'GET',
+      headers,
+      credentials: 'include',
+      signal: options.signal,
+    });
+    const invalidatedGeneration = notifyUnauthorized(requestEpoch, path, response.status);
+    assertResponseGeneration(requestEpoch, path, invalidatedGeneration);
+    if (!response.ok) {
+      const status = response.status;
+      const code = status === 401 ? 'UNAUTHENTICATED' : status === 403 ? 'FORBIDDEN' : status === 404 ? 'NOT_FOUND' : 'STREAM_UNAVAILABLE';
+      const message = status === 401 ? 'Sign in is required to observe this run.'
+        : status === 403 ? 'This run is not available to the current account.'
+          : status === 404 ? 'Run not found or unavailable for this account.' : 'The Agent event stream is unavailable.';
+      throw new ApiException(status, code, message);
+    }
+    const contentType = response.headers.get('content-type') ?? '';
+    if (contentType.split(';', 1)[0]?.trim().toLowerCase() !== 'text/event-stream' || !response.body) {
+      throw new ApiException(502, 'INVALID_STREAM', 'The Agent API returned an invalid event stream.');
+    }
+
+    const reader = response.body.getReader();
+    let parserFailure: Error | null = null;
+    const parser = new SseStreamParser((frame: SseEvent) => {
+      if (parserFailure) return;
+      const projected = projectAgentRunEvent(frame.event, frame.id, frame.data, id);
+      if (projected) onEvent(projected);
+    }, {
+      clearIdAfterDispatch: true,
+      onError: (error) => { parserFailure = error; },
+    });
+    const cancelObservation = () => { void reader.cancel().catch(() => undefined); };
+    options.signal?.addEventListener('abort', cancelObservation, { once: true });
+
+    try {
+      while (true) {
+        const chunk = await reader.read();
+        assertResponseGeneration(requestEpoch, path, invalidatedGeneration);
+        if (chunk.done) break;
+        parser.feedBytes(chunk.value);
+        if (parserFailure) throw parserFailure;
+      }
+      parser.flush();
+      if (parserFailure) throw parserFailure;
+      assertResponseGeneration(requestEpoch, path, invalidatedGeneration);
+    } catch (error) {
+      if (options.signal?.aborted && error instanceof DOMException && error.name === 'AbortError') return;
+      try { await reader.cancel(); } catch { /* Stream is already closed. */ }
+      throw error;
+    } finally {
+      options.signal?.removeEventListener('abort', cancelObservation);
+      reader.releaseLock();
+    }
   }
 
   async listAgentMessages(
