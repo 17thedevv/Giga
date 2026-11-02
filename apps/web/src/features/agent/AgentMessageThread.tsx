@@ -29,6 +29,23 @@ interface AgentMessageThreadProps {
   readonly onRefreshRun: () => Promise<void>;
 }
 
+class MessageHistoryConflictError extends Error {
+  constructor() {
+    super('Conflicting Agent message history');
+    this.name = 'MessageHistoryConflictError';
+  }
+}
+
+const AGENT_MESSAGE_FIELDS: readonly (keyof AgentMessage)[] = [
+  'id',
+  'workspaceId',
+  'runId',
+  'sequence',
+  'role',
+  'content',
+  'createdAt',
+];
+
 function utf8Length(value: string): number {
   return new TextEncoder().encode(value).byteLength;
 }
@@ -41,6 +58,9 @@ function createIdempotencyKey(): string {
 }
 
 function safeMessageError(error: unknown): string {
+  if (error instanceof MessageHistoryConflictError) {
+    return 'Message history is inconsistent. Reload the conversation to recover authoritative state.';
+  }
   if (!(error instanceof ApiException)) return 'The Agent service or network is unavailable.';
   if (error.status === 401) return 'Your session has expired. Sign in again to continue.';
   if (error.status === 403 || error.status === 404) return 'This conversation is unavailable for the current account.';
@@ -56,12 +76,30 @@ function messageRoleLabel(role: AgentMessage['role']): string {
 }
 
 function mergeMessagePages(current: readonly AgentMessage[], incoming: readonly AgentMessage[]): AgentMessage[] {
-  const bySequence = new Map(current.map((message) => [message.sequence, message]));
-  for (const message of incoming) {
-    const existing = bySequence.get(message.sequence);
-    if (existing && existing.id !== message.id) throw new Error('Conflicting message sequence');
+  const byId = new Map<string, AgentMessage>();
+  const bySequence = new Map<number, AgentMessage>();
+
+  for (const message of [...current, ...incoming]) {
+    const existingById = byId.get(message.id);
+    const existingBySequence = bySequence.get(message.sequence);
+    if (existingById || existingBySequence) {
+      if (
+        !existingById ||
+        !existingBySequence ||
+        existingById.id !== existingBySequence.id ||
+        existingById.sequence !== existingBySequence.sequence ||
+        AGENT_MESSAGE_FIELDS.some((field) => existingById[field] !== message[field])
+      ) {
+        throw new MessageHistoryConflictError();
+      }
+      // A repeated page/confirmed record is safe to ignore only when every public field matches.
+      continue;
+    }
+
+    byId.set(message.id, message);
     bySequence.set(message.sequence, message);
   }
+
   return [...bySequence.values()].sort((left, right) => left.sequence - right.sequence);
 }
 
@@ -154,6 +192,7 @@ export const AgentMessageThread: React.FC<AgentMessageThreadProps> = ({ run, onS
           setMessages(reconciled);
           messagesRef.current = reconciled;
           setCursor(pageResult.value.nextCursor);
+          if (!pendingSubmissionRef.current) setSubmitError(null);
         }
       } else {
         setLoadError(safeMessageError(pageResult.reason));
@@ -171,9 +210,11 @@ export const AgentMessageThread: React.FC<AgentMessageThreadProps> = ({ run, onS
         setFollowUpAvailable(false);
         setCapabilityReason('Could not confirm follow-up support. Sending is disabled until the Agent API confirms it.');
       }
-    } catch {
+    } catch (error) {
       if (isCurrentRead() && isCurrentSessionGeneration(sessionGeneration)) {
-        setLoadError('The Agent service returned an invalid conversation response.');
+        setLoadError(error instanceof MessageHistoryConflictError
+          ? safeMessageError(error)
+          : 'The Agent service returned an invalid conversation response.');
       } else if (isCurrentRead()) {
         invalidateForSessionExpiry();
       }

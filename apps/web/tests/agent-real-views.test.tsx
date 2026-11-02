@@ -393,6 +393,171 @@ describe('Real Agent workspace and run integration', () => {
     expect(screen.getAllByTestId('agent-message-item').map((item) => item.getAttribute('data-sequence'))).toEqual(['1', '2']);
   });
 
+  it('rejects a cross-page ID reused at another sequence without partial updates, then recovers and deduplicates overlap', async () => {
+    const pageOnlyMessage = {
+      ...initialMessage,
+      id: '30000000-0000-4000-8000-000000000031',
+      sequence: 2,
+      content: 'Must not partially apply',
+    };
+    const sameIdDifferentSequence = { ...initialMessage, sequence: 3, content: 'Contradictory sequence' };
+    const recoveredLaterMessage = {
+      ...initialMessage,
+      id: '30000000-0000-4000-8000-000000000032',
+      sequence: 2,
+      content: 'Recovered later message',
+    };
+    let readCount = 0;
+    const listMessages = vi.spyOn(realApiClient, 'listAgentMessages').mockImplementation(async () => {
+      readCount++;
+      if (readCount === 1) return { items: [initialMessage], nextCursor: 'first-page-cursor' };
+      if (readCount === 2) return {
+        items: [pageOnlyMessage, sameIdDifferentSequence],
+        nextCursor: 'cursor-from-rejected-page',
+      };
+      if (readCount === 3) return { items: [initialMessage], nextCursor: 'recovered-cursor' };
+      return { items: [initialMessage, recoveredLaterMessage], nextCursor: null };
+    });
+    vi.spyOn(realApiClient, 'getAgentRun').mockResolvedValue({ run: failedRun });
+    vi.spyOn(realApiClient, 'getAgentWorkspace').mockResolvedValue({ workspace });
+
+    renderReal(<AgentRunView />, '/agent/runs/' + failedRun.id);
+    expect(await screen.findByText(initialMessage.content, { selector: '.g-agent-message__content' })).toBeDefined();
+    fireEvent.click(screen.getByTestId('load-more-agent-messages-btn'));
+
+    expect(await screen.findByTestId('agent-messages-error')).toBeDefined();
+    expect(screen.getByTestId('agent-messages-error').textContent).toContain('history is inconsistent');
+    expect(screen.getAllByTestId('agent-message-item').map((item) => item.getAttribute('data-sequence'))).toEqual(['1']);
+    expect(screen.queryByText('Must not partially apply')).toBeNull();
+
+    fireEvent.click(screen.getByText('Retry loading'));
+    await waitFor(() => expect(listMessages).toHaveBeenCalledTimes(3));
+    expect(screen.queryByTestId('agent-messages-error')).toBeNull();
+    fireEvent.click(await screen.findByTestId('load-more-agent-messages-btn'));
+
+    expect(await screen.findByText('Recovered later message')).toBeDefined();
+    expect(listMessages).toHaveBeenLastCalledWith(failedRun.id, {
+      workspaceId: failedRun.workspaceId,
+      cursor: 'recovered-cursor',
+    });
+    expect(screen.getAllByTestId('agent-message-item').map((item) => item.getAttribute('data-sequence'))).toEqual(['1', '2']);
+    expect(screen.getAllByText(initialMessage.content, { selector: '.g-agent-message__content' })).toHaveLength(1);
+  });
+
+  it('rejects a cross-page sequence reused by another ID without applying any part of that page', async () => {
+    const conflictingMessage = {
+      ...initialMessage,
+      id: '30000000-0000-4000-8000-000000000033',
+      content: 'Different ID for sequence one',
+    };
+    const laterMessage = {
+      ...initialMessage,
+      id: '30000000-0000-4000-8000-000000000034',
+      sequence: 2,
+      content: 'Must not partially apply either',
+    };
+    vi.spyOn(realApiClient, 'listAgentMessages')
+      .mockResolvedValueOnce({ items: [initialMessage], nextCursor: 'first-page-cursor' })
+      .mockResolvedValueOnce({ items: [conflictingMessage, laterMessage], nextCursor: null });
+    vi.spyOn(realApiClient, 'getAgentRun').mockResolvedValue({ run: failedRun });
+    vi.spyOn(realApiClient, 'getAgentWorkspace').mockResolvedValue({ workspace });
+
+    renderReal(<AgentRunView />, '/agent/runs/' + failedRun.id);
+    expect(await screen.findByText(initialMessage.content, { selector: '.g-agent-message__content' })).toBeDefined();
+    fireEvent.click(screen.getByTestId('load-more-agent-messages-btn'));
+
+    expect(await screen.findByTestId('agent-messages-error')).toBeDefined();
+    expect(screen.getAllByTestId('agent-message-item').map((item) => item.getAttribute('data-sequence'))).toEqual(['1']);
+    expect(screen.queryByText('Different ID for sequence one')).toBeNull();
+    expect(screen.queryByText('Must not partially apply either')).toBeNull();
+  });
+
+  it('deduplicates an exact repeated message at the boundary between pages', async () => {
+    const laterMessage = {
+      ...initialMessage,
+      id: '30000000-0000-4000-8000-000000000035',
+      sequence: 2,
+      content: 'Message after an exact overlap',
+    };
+    vi.spyOn(realApiClient, 'listAgentMessages')
+      .mockResolvedValueOnce({ items: [initialMessage], nextCursor: 'first-page-cursor' })
+      .mockResolvedValueOnce({ items: [initialMessage, laterMessage], nextCursor: null });
+    vi.spyOn(realApiClient, 'getAgentRun').mockResolvedValue({ run: failedRun });
+    vi.spyOn(realApiClient, 'getAgentWorkspace').mockResolvedValue({ workspace });
+
+    renderReal(<AgentRunView />, '/agent/runs/' + failedRun.id);
+    expect(await screen.findByText(initialMessage.content, { selector: '.g-agent-message__content' })).toBeDefined();
+    fireEvent.click(screen.getByTestId('load-more-agent-messages-btn'));
+
+    expect(await screen.findByText(laterMessage.content, { selector: '.g-agent-message__content' })).toBeDefined();
+    expect(screen.getAllByText(initialMessage.content, { selector: '.g-agent-message__content' })).toHaveLength(1);
+    expect(screen.getAllByTestId('agent-message-item').map((item) => item.getAttribute('data-sequence'))).toEqual(['1', '2']);
+  });
+
+  it.each([
+    { field: 'content', conflicting: { ...initialMessage, content: 'Contradictory message text' } },
+    { field: 'role', conflicting: { ...initialMessage, role: 'assistant' as const } },
+    { field: 'createdAt', conflicting: { ...initialMessage, createdAt: '2026-11-02T12:34:56.000Z' } },
+  ])('rejects matching ID/sequence with conflicting canonical $field', async ({ conflicting }) => {
+    vi.spyOn(realApiClient, 'listAgentMessages')
+      .mockResolvedValueOnce({ items: [initialMessage], nextCursor: 'first-page-cursor' })
+      .mockResolvedValueOnce({ items: [conflicting], nextCursor: null });
+    vi.spyOn(realApiClient, 'getAgentRun').mockResolvedValue({ run: failedRun });
+    vi.spyOn(realApiClient, 'getAgentWorkspace').mockResolvedValue({ workspace });
+
+    renderReal(<AgentRunView />, '/agent/runs/' + failedRun.id);
+    expect(await screen.findByText(initialMessage.content, { selector: '.g-agent-message__content' })).toBeDefined();
+    fireEvent.click(screen.getByTestId('load-more-agent-messages-btn'));
+
+    expect(await screen.findByTestId('agent-messages-error')).toBeDefined();
+    expect(screen.getAllByTestId('agent-message-item')).toHaveLength(1);
+    expect(screen.getByText(initialMessage.content, { selector: '.g-agent-message__content' })).toBeDefined();
+    expect(screen.queryByText('Contradictory message text')).toBeNull();
+    expect(screen.getByTestId('agent-message-item').querySelector('article')?.getAttribute('aria-label'))
+      .toBe(`${initialMessage.role === 'user' ? 'You' : 'Agent'} message 1`);
+  });
+
+  it('recovers authoritative POST reconciliation conflicts without retrying or duplicating the confirmed POST', async () => {
+    const activeRun = { ...failedRun, status: 'running' as const };
+    const confirmedMessage = {
+      ...initialMessage,
+      id: '30000000-0000-4000-8000-000000000036',
+      runId: activeRun.id,
+      workspaceId: activeRun.workspaceId,
+      sequence: 2,
+      content: 'Authoritatively confirmed follow-up',
+    };
+    const contradictoryAuthoritativeRecord = { ...confirmedMessage, sequence: 3 };
+    let readCount = 0;
+    const listMessages = vi.spyOn(realApiClient, 'listAgentMessages').mockImplementation(async () => {
+      readCount++;
+      if (readCount === 1) return { items: [initialMessage], nextCursor: null };
+      if (readCount === 2) return { items: [initialMessage, contradictoryAuthoritativeRecord], nextCursor: null };
+      return { items: [initialMessage, confirmedMessage], nextCursor: null };
+    });
+    vi.spyOn(realApiClient, 'getAgentCapabilities').mockResolvedValue(followUpEnabledCapabilities());
+    vi.spyOn(realApiClient, 'getAgentRun').mockResolvedValue({ run: activeRun });
+    vi.spyOn(realApiClient, 'getAgentWorkspace').mockResolvedValue({ workspace });
+    const createMessage = vi.spyOn(realApiClient, 'createAgentMessage').mockResolvedValue({ message: confirmedMessage });
+
+    renderReal(<AgentRunView />, '/agent/runs/' + activeRun.id);
+    fireEvent.change(await screen.findByTestId('agent-follow-up-input'), { target: { value: confirmedMessage.content } });
+    fireEvent.click(screen.getByTestId('send-agent-follow-up-btn'));
+
+    expect(await screen.findByTestId('agent-messages-error')).toBeDefined();
+    expect(screen.getByTestId('agent-messages-error').textContent).toContain('history is inconsistent');
+    expect(createMessage).toHaveBeenCalledTimes(1);
+    expect(screen.getAllByText(confirmedMessage.content, { selector: '.g-agent-message__content' })).toHaveLength(1);
+    expect(screen.getAllByTestId('agent-message-item')).toHaveLength(2);
+
+    fireEvent.click(screen.getByText('Retry loading'));
+    await waitFor(() => expect(listMessages).toHaveBeenCalledTimes(3));
+    expect(screen.queryByTestId('agent-messages-error')).toBeNull();
+    expect(screen.getAllByText(confirmedMessage.content, { selector: '.g-agent-message__content' })).toHaveLength(1);
+    expect(screen.getAllByTestId('agent-message-item')).toHaveLength(2);
+    expect(createMessage).toHaveBeenCalledTimes(1);
+  });
+
   it('ignores a stale message page after navigating to another run', async () => {
     const olderRun = { ...failedRun, status: 'running' as const };
     const newerRun = { ...failedRun, id: '20000000-0000-4000-8000-000000000006', task: 'New route task' };
