@@ -59,8 +59,9 @@ BEGIN
       RAISE EXCEPTION 'Runtime has excessive privileges on %', protected_table;
     END IF;
   END LOOP;
-  IF has_table_privilege('giga_runtime', 'public.schema_migrations', 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER') THEN
-    RAISE EXCEPTION 'Runtime must not access migration history';
+  IF NOT has_table_privilege('giga_runtime', 'public.schema_migrations', 'SELECT') OR
+      has_table_privilege('giga_runtime', 'public.schema_migrations', 'INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER,REFERENCES') THEN
+    RAISE EXCEPTION 'Runtime must have read-only migration history access';
   END IF;
   FOR function_name, function_signature, owner_role, allowed_role IN VALUES
     ('settle_agent_sandbox_allocation', 'uuid,uuid,uuid,integer,uuid,character varying,character varying,character varying', 'giga_agent_lifecycle_owner', 'giga_lifecycle'),

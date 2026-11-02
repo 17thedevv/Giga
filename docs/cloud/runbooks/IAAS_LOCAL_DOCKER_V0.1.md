@@ -138,7 +138,7 @@ must remain separate. The API receives neither the bootstrap nor quota login
 password.
 
 Startup validates configuration, runs pending forward migrations with the
-migration login, removes ordinary runtime access to `schema_migrations`, then
+migration login, restricts ordinary runtime access to read-only `schema_migrations`, then
 uses the existing production startup checks for runtime and lifecycle
 connections. No broad table grants are applied after 015/016: doing so would
 undo their column/function restrictions. No public API or DTO change is part of

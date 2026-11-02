@@ -40,8 +40,10 @@ export async function start(options = {}) {
   const migrationPool = createDatabasePool({ connectionString: config.migrationDatabaseUrl });
   try {
     await runMigrations(migrationPool);
-    // Migration 015 grants all tables to runtime. Keep migration history privileged.
+    // AgentRepository checks migration 013 at runtime. Permit that read only.
+    // Migration 015's blanket table grant must not permit history mutation.
     await migrationPool.query('REVOKE ALL ON TABLE public.schema_migrations FROM giga_api_runtime');
+    await migrationPool.query('GRANT SELECT ON TABLE public.schema_migrations TO giga_api_runtime');
   } finally {
     await closeDatabasePool(migrationPool);
   }

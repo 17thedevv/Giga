@@ -14,7 +14,7 @@ const project = process.env.COMPOSE_PROJECT_NAME + '-https';
 const compose = ['compose', '--env-file', '.env.https', '-p', project, '-f', 'compose.yaml'];
 const certificate = await readFile('artifacts/private-tls/fullchain.pem');
 const privateValues = (await readFile('.env.https', 'utf8')).split(/\r?\n/)
-  .filter(line => /(?:PASSWORD|KEY|TOKEN|SECRET)=/.test(line))
+  .filter(line => /^[A-Z_]*(?:PASSWORD|KEY|TOKEN|SECRET)[A-Z_]*=/.test(line))
   .map(line => line.slice(line.indexOf('=') + 1)).filter(value => value.length >= 8);
 const origin = 'https://localhost';
 const checks = [];

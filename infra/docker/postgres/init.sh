@@ -62,7 +62,7 @@ GRANT USAGE ON SCHEMA public TO giga_api_runtime, giga_agent_lifecycle_finalizer
 
 -- Migrations 015/016 install the final protected table/column ACLs. Never run
 -- blanket table grants after them. The application startup additionally revokes
--- all runtime access to schema_migrations, which migration 015 initially grants.
+-- runtime writes to schema_migrations, while retaining required version reads.
 ALTER DEFAULT PRIVILEGES FOR ROLE giga_migration IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO giga_api_runtime;
 ALTER DEFAULT PRIVILEGES FOR ROLE giga_migration IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO giga_api_runtime;
 COMMIT;

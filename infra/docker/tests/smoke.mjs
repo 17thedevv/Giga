@@ -18,7 +18,7 @@ const checks = [];
 const reportDir = 'artifacts/docker-smoke';
 const temporary = await mkdtemp(join(tmpdir(), 'giga-docker-smoke-'));
 const privateValues = (await readFile('.env', 'utf8')).split(/\r?\n/)
-  .filter(line => /(?:PASSWORD|KEY|TOKEN|SECRET)=/.test(line))
+  .filter(line => /^[A-Z_]*(?:PASSWORD|KEY|TOKEN|SECRET)[A-Z_]*=/.test(line))
   .map(line => line.slice(line.indexOf('=') + 1).replace(/^["']|["']$/g, '')).filter(value => value.length >= 8);
 let fixtureActive = false;
 let activeCheck = '';
@@ -179,6 +179,10 @@ try {
     assert.match(database, /^giga_restore_test_[a-f0-9]{32}$/);
     assert.equal(sql("SELECT count(*) FROM users WHERE id='" + userId + "';", 'giga_admin', 'DB_PASSWORD_ADMIN', database), '1');
     assert.equal(sql("SELECT count(*) FROM conversations WHERE id='" + conversationId + "';", 'giga_admin', 'DB_PASSWORD_ADMIN', database), '1');
+    assert.equal(sql("SELECT title FROM conversations WHERE id='" + conversationId + "';", 'giga_admin', 'DB_PASSWORD_ADMIN', database), 'Persistent Docker fixture');
+    assert.equal(sql("SELECT email FROM users WHERE id='" + userId + "';", 'giga_admin', 'DB_PASSWORD_ADMIN', database), email);
+    assert.equal(sql("SELECT count(*) FROM sessions WHERE user_id='" + userId + "';", 'giga_admin', 'DB_PASSWORD_ADMIN', database),
+      sql("SELECT count(*) FROM sessions WHERE user_id='" + userId + "';"));
     sql(await readFile('infra/docker/postgres/roles-check.sql', 'utf8'), 'giga_admin', 'DB_PASSWORD_ADMIN', database);
   });
   await check('missing secrets, invalid origin and provider configuration fail closed', async () => {
