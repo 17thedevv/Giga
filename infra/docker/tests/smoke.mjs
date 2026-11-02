@@ -312,9 +312,11 @@ try {
         sql("SELECT setval('public.p2_historical_seq', 999);", 'giga_runtime', 'DB_PASSWORD_API');
       }, /permission denied/i);
 
-      // 5. Runtime CAN nextval() and currval()
-      assert.equal(sql("SELECT nextval('public.p2_historical_seq');", 'giga_runtime', 'DB_PASSWORD_API'), '10');
-      assert.equal(sql("SELECT currval('public.p2_historical_seq');", 'giga_runtime', 'DB_PASSWORD_API'), '10');
+      // 5. Runtime CAN nextval() and currval() within an active session
+      assert.equal(
+        sql("SELECT nextval('public.p2_historical_seq') || '|' || currval('public.p2_historical_seq');", 'giga_runtime', 'DB_PASSWORD_API'),
+        '10|10'
+      );
 
       // 6. New sequences created by migration role do not inherit UPDATE default privilege
       sql('CREATE SEQUENCE public.p2_future_seq START 1;', 'giga_migration', 'DB_PASSWORD_MIGRATION');
