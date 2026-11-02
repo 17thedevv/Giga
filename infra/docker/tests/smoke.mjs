@@ -1,5 +1,6 @@
 // Runs only against a disposable Compose project. Never point this at a shared stack.
 import assert from 'node:assert/strict';
+import { request as httpRequest } from 'node:http';
 import { spawnSync } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -56,6 +57,17 @@ async function request(path, { method = 'GET', cookie, body, origin = base, head
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
 }
+function requestWithHost(path, host) {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(new URL(path, base), { headers: { Host: host } }, response => {
+      response.resume();
+      response.on('end', () => resolve(response.statusCode));
+    });
+    req.setTimeout(10000, () => req.destroy(new Error('Host validation request timed out')));
+    req.on('error', reject);
+    req.end();
+  });
+}
 async function json(path, options, expected) {
   const response = await request(path, options);
   assert.equal(response.status, expected, 'Expected HTTP status for ' + path);
@@ -90,7 +102,7 @@ try {
     assert.equal(missing.status, 404);
     assert.match(missing.headers.get('content-type'), /application\/json/);
     assert.equal((await missing.json()).error.code, 'NOT_FOUND');
-    await assert.rejects(() => request('/health', { headers: { Host: 'attacker.invalid' } }),
+    await assert.rejects(() => requestWithHost('/health', 'attacker.invalid'),
       'Nginx closes requests with a Host outside the generated allowlist');
   });
   await check('frontend assets and deep links', async () => {
