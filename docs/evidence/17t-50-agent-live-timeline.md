@@ -1,8 +1,9 @@
 # 17T-50 — Durable Agent Live Timeline and SSE Replay
 
-**Status:** Draft implementation evidence; independent review and CI pending. API contract v0.2 remains DRAFT.
+**Status:** Draft implementation evidence; CI green on the implementation commit, with final evidence-only CI pending; independent review remains pending. API contract v0.2 remains DRAFT.
 **Branch:** `feat/17t-50-agent-live-timeline`
 **Baseline:** `463646a44244b1aabfc0c597612f2c102d67f5b9` (`origin/main`, includes merged PR #47).
+**Implementation commit:** `733ad11fdc3d83e2c4f8ca08b1a7c12a1f228460`.
 **Linear:** [17T-50](https://linear.app/17thedev/issue/17T-50).
 **Scope:** Real Agent run detail, typed frontend SSE observation, replay projection and UI. No backend changes, API contract edits, Demo behavior changes, run admission/control, or deployment.
 
@@ -61,9 +62,11 @@
 | API Agent replay tests (`npx tsx --test --test-concurrency=1 tests/agent/agent-api.test.ts`) | PASS — 14 pass, 2 skipped because pg-mem cannot verify PostgreSQL-specific concurrency/timestamp behavior |
 | `node --test .agents/scripts/validate-git-workflow.test.mjs` | PASS — 6 tests |
 | `node .agents/scripts/validate-skills.mjs` | PASS — 8 skill manifests |
-| `git diff --check` | PASS at final pre-commit check; rerun after commit preparation |
+| `git diff --check` | PASS on the implementation changes before commit; rerun for the evidence-only update |
+| GitHub Frontend CI on implementation commit | PASS — [run 75](https://github.com/17thedevv/Giga/actions/runs/41406478206) |
+| GitHub Validate Git Workflow on implementation commit | PASS — [run 225](https://github.com/17thedevv/Giga/actions/runs/41406478156) |
 | Authenticated browser against a deployed staging SHA | Not run; no Playwright/browser test dependency is installed/configured for `apps/web`, and no deployed 17T-50 SHA or secure browser environment was verified in this task |
-| GitHub Actions on final HEAD | Pending push / PR |
+| Final evidence-only commit CI | Pending push; implementation SHA above has both required workflows green |
 
 ### Dependency audit scope note
 
