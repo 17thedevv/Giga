@@ -21,14 +21,22 @@ Date: 2026-11-02, Asia/Bangkok (+07:00).
     Replaced fail-open default grants with explicit grants on existing application tables.
     PostgreSQL regression coverage added to `roles-check.sql` verifying that newly created
     sensitive tables are denied to `giga_runtime` unless explicitly authorized.
+  - P2 (Sequences): Sequence least-privilege enforced. Replaced historical fail-open `GRANT ALL`
+    on sequences in migration 015 with `GRANT USAGE, SELECT`. Configured post-migration hardening
+    in `migrate.mjs` to revoke excessive `UPDATE` (which enables `setval()`) on existing databases
+    while preserving `USAGE` and `SELECT`. Verified default sequence privileges for `giga_migration`
+    grant only `USAGE, SELECT` (no `UPDATE`). Added fail-closed sequence check to production startup
+    and regression tests in `roles-check.sql` and `smoke.mjs`.
 - Base inspected: `463646a44244b1aabfc0c597612f2c102d67f5b9`.
 - Reviewed HEAD before fix: `6e8c10ca87c8b4b1aef2c8efa2936c3fe0bd2923`.
-- Final Hardened HEAD: `74ff81abc0962518fbcabcb1d7db84497ff565c4`.
+- Sequence least-privilege implementation commit: `f4f19d0ba018c87d8b2bb8f2df10ace768395ebd`.
+- Exact commit tested by CI: `f4f19d0ba018c87d8b2bb8f2df10ace768395ebd`.
 - [Draft PR #49](https://github.com/17thedevv/Giga/pull/49).
-- Final CI Validation:
-  - Compose Smoke: [Run #41416771806](https://github.com/17thedevv/Giga/actions/runs/41416771806) (PASS)
-  - Backend CI: [Run #41416771761](https://github.com/17thedevv/Giga/actions/runs/41416771761) (PASS)
-  - Git Workflow: [Run #41416771879](https://github.com/17thedevv/Giga/actions/runs/41416771879) (PASS)
+- Exact CI Validation Runs for Tested Commit (`f4f19d0ba018c87d8b2bb8f2df10ace768395ebd`):
+  - Compose Smoke: [Run #41421847783](https://github.com/17thedevv/Giga/actions/runs/41421847783) (PASS; artifact `docker-smoke-f4f19d0ba018c87d8b2bb8f2df10ace768395ebd`)
+  - Backend CI: [Run #41421847594](https://github.com/17thedevv/Giga/actions/runs/41421847594) (PASS)
+  - Git Workflow: [Run #41421847582](https://github.com/17thedevv/Giga/actions/runs/41421847582) (PASS)
+- Note on Commit Traceability: In accordance with repository guidelines, this evidence document records the exact code and test commit tested by CI (`f4f19d0b...`); any subsequent documentation sync commit will carry its own Git tree hash on branch `build/17t-92-local-iaas-compose`.
 - Intended owner: Trà; intended reviewer/cross-trainee: Thư, from the parent
   deployment task. Agent work is not attributed to either human. Review and
   cross-training are **NOT RUN**.
@@ -83,8 +91,9 @@ The reports were captured at 2026-11-02T08:02:10.026Z (HTTP) and
 | D14 | Real browser login, refresh, protected deep link and logout; HTTPS client cookie/CSRF checks | Chrome on local HTTP; Node HTTPS client on disposable TLS | PASS | [HTTP/HTTPS reports](https://github.com/17thedevv/Giga/actions/runs/41409878121/artifacts/13124649078) |
 | D15 | Unknown `Host` rejected on HTTP and verified HTTPS ingress before proxying/redirecting | Explicit raw HTTP/HTTPS Host headers | PASS | [HTTP/HTTPS reports](https://github.com/17thedevv/Giga/actions/runs/41409878121/artifacts/13124649078) |
 | D16 | Independent peer startup/recovery exercise | Human cross-training | NOT RUN | Reviewer exercise remains open |
-| D17 | P1: One-shot migration job succeeds, API container receives runtime credential only; restart needs no migration secrets | Real PostgreSQL + Compose inspection | PASS | [Run #41416771806](https://github.com/17thedevv/Giga/actions/runs/41416771806) |
-| D18 | P2: Restrict future-table default privileges and verify inaccessible without explicit grant | Real PostgreSQL role check | PASS | [Run #41416771806](https://github.com/17thedevv/Giga/actions/runs/41416771806) |
+| D17 | P1: One-shot migration job succeeds, API container receives runtime credential only; restart needs no migration secrets | Real PostgreSQL + Compose inspection | PASS | [Run #41421847783](https://github.com/17thedevv/Giga/actions/runs/41421847783) |
+| D18 | P2: Restrict future-table default privileges and verify inaccessible without explicit grant | Real PostgreSQL role check | PASS | [Run #41421847783](https://github.com/17thedevv/Giga/actions/runs/41421847783) |
+| D19 | P2: Sequence least privilege: deny UPDATE/setval to runtime; preserve USAGE/SELECT; upgrade repair and new sequence defaults | Real PostgreSQL sequence checks | PASS | [Run #41421847783](https://github.com/17thedevv/Giga/actions/runs/41421847783) |
 
 Infrastructure guard tests: 4 PASS on Node 22.23.4. Local API/Web checks above
 remain separately reported: 51 API tests passed, 4 real-PostgreSQL tests were
