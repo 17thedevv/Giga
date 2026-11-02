@@ -13,9 +13,10 @@ Date: 2026-11-02, Asia/Bangkok (+07:00).
   observed at preflight). The original checkout was on a different Agent feature
   branch with six unrelated frontend edits. Work was isolated in separate
   checkouts; those edits were excluded.
-- Exact implementation SHA tested in containers: `814f9ed71653a111fc693089b9354a2d34105e19`.
-  Both the HTTP and HTTPS smoke reports identify this PR head SHA.
-- [Draft PR #49](https://github.com/17thedevv/Giga/pull/49), [successful Docker run](https://github.com/17thedevv/Giga/actions/runs/41408059589), [redacted run artifact](https://github.com/17thedevv/Giga/actions/runs/41408059589/artifacts/13124093406).
+- Exact implementation SHA tested in containers: `6d5c9c37feee6c70b1dead7683e95036cfe0194b`.
+  Both the HTTP and HTTPS smoke reports identify this SHA; the subsequent PR
+  head change records this evidence only.
+- [Draft PR #49](https://github.com/17thedevv/Giga/pull/49), [successful Docker run #8](https://github.com/17thedevv/Giga/actions/runs/41409042790), [redacted run artifact](https://github.com/17thedevv/Giga/actions/runs/41409042790/artifacts/13124861335), [Git workflow validation](https://github.com/17thedevv/Giga/actions/runs/41409042800).
 - Intended owner: Trà; intended reviewer/cross-trainee: Thư, from the parent
   deployment task. Agent work is not attributed to either human. Review and
   cross-training are **NOT RUN**.
@@ -47,30 +48,38 @@ Local checks executed on Windows / Node 24.20.0 before publication:
 | `git diff --check` | PASS |
 
 The exact-SHA Ubuntu run completed with a successful clean image build, Compose
-startup, HTTP smoke, and HTTPS rehearsal. The artifact is redacted and retained
-for 14 days from 2026-11-02.
+startup, 14 HTTP smoke checks and 5 HTTPS rehearsal checks. The artifact is
+redacted and retained until 2026-11-16.
+The reports were captured at 2026-11-02T07:54:01.887Z (HTTP) and
+2026-11-02T07:54:27.117Z (HTTPS), or 14:54 Asia/Bangkok.
 
 | ID | Check | Provider/data | Result | Evidence |
 | --- | --- | --- | --- | --- |
-| D01 | No-cache Node 22 multi-stage image build, contracts and runtime Web bundle | No provider | PASS | [Run #41408059589](https://github.com/17thedevv/Giga/actions/runs/41408059589) |
-| D02 | Compose startup, PostgreSQL/API readiness and `/health` | Real PostgreSQL containers | PASS | [Run #41408059589](https://github.com/17thedevv/Giga/actions/runs/41408059589) |
-| D03 | Frontend assets and deep links; API-first JSON routing | Built production bundle | PASS | [Run #41408059589](https://github.com/17thedevv/Giga/actions/runs/41408059589) |
-| D04 | Register/login/me/logout, old-session rejection and protected routes | Disposable accounts | PASS | [Chrome + HTTP smoke](https://github.com/17thedevv/Giga/actions/runs/41408059589/artifacts/13124093406) |
-| D05 | CSRF missing/foreign Origin rejection and HTTP/HTTPS cookie attributes | HTTP and TLS profiles | PASS | [HTTP/HTTPS reports](https://github.com/17thedevv/Giga/actions/runs/41408059589/artifacts/13124093406) |
-| D06 | Account/conversation/session persistence after database/API restart | Disposable PostgreSQL data | PASS | [HTTP smoke](https://github.com/17thedevv/Giga/actions/runs/41408059589/artifacts/13124093406) |
-| D07 | Separated SSE deltas arrive before completion through Nginx | Deterministic injected provider; **not live AI** | PASS | Started 0 ms; deltas 610/1,212/1,814 ms; completed 1,818 ms; [report](https://github.com/17thedevv/Giga/actions/runs/41408059589/artifacts/13124093406) |
-| D08 | Restricted quota/lifecycle writes and finalizer access denied to runtime | Real PostgreSQL role logins/grants | PASS | [Role check](https://github.com/17thedevv/Giga/actions/runs/41408059589/artifacts/13124093406) |
-| D09 | Backup and new disposable restore preserve rows, ownership and grants | Real PostgreSQL dump/restore | PASS | [HTTP smoke](https://github.com/17thedevv/Giga/actions/runs/41408059589/artifacts/13124093406) |
-| D10 | Agent/cloud execution unavailable with Chat disabled and explicit Chat-on fixture | No E2B allocation; external provider transport blocked | PASS | [HTTP smoke](https://github.com/17thedevv/Giga/actions/runs/41408059589/artifacts/13124093406) |
-| D11 | Missing/invalid credentials and origin fail safely; production role validation stays active | Negative config and role fixtures | PASS | [Run #41408059589](https://github.com/17thedevv/Giga/actions/runs/41408059589) |
-| D12 | PostgreSQL/API have no host-published ports; internal DB network verified | Docker container/network inspection | PASS | [HTTP smoke](https://github.com/17thedevv/Giga/actions/runs/41408059589/artifacts/13124093406) |
-| D13 | Container memory, CPU, image sizes and database size measured | Smoke workload; idle snapshot | PASS | Values below and in [reports](https://github.com/17thedevv/Giga/actions/runs/41408059589/artifacts/13124093406) |
-| D14 | Real browser login, refresh, protected deep link and logout; HTTPS client cookie/CSRF checks | Chrome on local HTTP; Node HTTPS client on disposable TLS | PASS | [HTTP/HTTPS reports](https://github.com/17thedevv/Giga/actions/runs/41408059589/artifacts/13124093406) |
-| D15 | Independent peer startup/recovery exercise | Human cross-training | NOT RUN | Reviewer exercise remains open |
+| D01 | No-cache Node 22 multi-stage image build, contracts and runtime Web bundle | No provider | PASS | [Run #41409042790](https://github.com/17thedevv/Giga/actions/runs/41409042790) |
+| D02 | Compose startup, PostgreSQL/API readiness and `/health` | Real PostgreSQL containers | PASS | [Run #41409042790](https://github.com/17thedevv/Giga/actions/runs/41409042790) |
+| D03 | Frontend assets and deep links; API-first JSON routing | Built production bundle | PASS | [Run #41409042790](https://github.com/17thedevv/Giga/actions/runs/41409042790) |
+| D04 | Register/login/me/logout, old-session rejection and protected routes | Disposable accounts | PASS | [Chrome + HTTP smoke](https://github.com/17thedevv/Giga/actions/runs/41409042790/artifacts/13124861335) |
+| D05 | CSRF missing/foreign Origin rejection and HTTP/HTTPS cookie attributes | HTTP and TLS profiles | PASS | [HTTP/HTTPS reports](https://github.com/17thedevv/Giga/actions/runs/41409042790/artifacts/13124861335) |
+| D06 | Account/conversation/session persistence after database/API restart | Disposable PostgreSQL data | PASS | [HTTP smoke](https://github.com/17thedevv/Giga/actions/runs/41409042790/artifacts/13124861335) |
+| D07 | Separated SSE deltas arrive before completion through Nginx | Deterministic injected provider; **not live AI** | PASS | Started 0 ms; deltas 608/1,209/1,811 ms; completed 1,814 ms; [report](https://github.com/17thedevv/Giga/actions/runs/41409042790/artifacts/13124861335) |
+| D08 | Restricted quota/lifecycle writes and finalizer access denied to runtime | Real PostgreSQL role logins/grants | PASS | [Role check](https://github.com/17thedevv/Giga/actions/runs/41409042790/artifacts/13124861335) |
+| D09 | Backup and new disposable restore preserve rows, ownership and grants | Real PostgreSQL dump/restore | PASS | [HTTP smoke](https://github.com/17thedevv/Giga/actions/runs/41409042790/artifacts/13124861335) |
+| D10 | Agent/cloud execution unavailable with Chat disabled and explicit Chat-on fixture | No E2B allocation; external provider transport blocked | PASS | [HTTP smoke](https://github.com/17thedevv/Giga/actions/runs/41409042790/artifacts/13124861335) |
+| D11 | Missing/invalid credentials and origin fail safely; production role validation stays active | Negative config and role fixtures | PASS | [Run #41409042790](https://github.com/17thedevv/Giga/actions/runs/41409042790) |
+| D12 | PostgreSQL/API have no host-published ports; internal DB network verified | Docker container/network inspection | PASS | [HTTP smoke](https://github.com/17thedevv/Giga/actions/runs/41409042790/artifacts/13124861335) |
+| D13 | Container memory, CPU, image sizes and database size measured | Smoke workload; idle snapshot | PASS | Values below and in [reports](https://github.com/17thedevv/Giga/actions/runs/41409042790/artifacts/13124861335) |
+| D14 | Real browser login, refresh, protected deep link and logout; HTTPS client cookie/CSRF checks | Chrome on local HTTP; Node HTTPS client on disposable TLS | PASS | [HTTP/HTTPS reports](https://github.com/17thedevv/Giga/actions/runs/41409042790/artifacts/13124861335) |
+| D15 | Unknown `Host` rejected on HTTP and verified HTTPS ingress before proxying/redirecting | Explicit raw HTTP/HTTPS Host headers | PASS | [HTTP/HTTPS reports](https://github.com/17thedevv/Giga/actions/runs/41409042790/artifacts/13124861335) |
+| D16 | Independent peer startup/recovery exercise | Human cross-training | NOT RUN | Reviewer exercise remains open |
 
 Infrastructure guard tests: 4 PASS on Node 22.23.4. Local API/Web checks above
 remain separately reported: 51 API tests passed, 4 real-PostgreSQL tests were
 skipped on Windows, and the infrastructure guard had 4 PASS.
+
+Run #7 initially stopped at the Host rejection assertion: Node's Fetch API
+ignored the supplied `Host` header, so the test did not send the intended
+negative request. The harness was changed to use `node:http`; run #8 passed the
+HTTP and HTTPS Host rejection checks on the exact SHA above.
 
 ## Evidence capture rules
 
@@ -86,12 +95,13 @@ transport behavior only; label any future live Gemini test separately.
 
 - Host inventory observed by preflight: 12 logical CPUs and approximately
   16 GiB memory; this is not a measured stack requirement.
-- Run time: Docker 28.0.4, Compose 2.38.2, Node 22.23.4, PostgreSQL 16.15,
+- Run time (2026-11-02 14:54 Asia/Bangkok): Docker 28.0.4, Compose 2.38.2,
+  Node 22.23.4, PostgreSQL 16.15,
   Chrome 156.0.8078.47. No-cache multi-stage build, PostgreSQL 16.15 migration,
   role, auth, HTTPS, and restore checks completed.
-- End-of-run Docker samples: HTTP API 19.36 MiB / 0.04% CPU, Nginx 4.387 MiB /
-  0.00%, PostgreSQL 48.54 MiB / 0.03%; HTTPS API 20.02 MiB / 0.00%, Nginx
-  4.605 MiB / 0.00%, PostgreSQL 31.41 MiB / 0.03%. Container memory limits are
+- End-of-run Docker samples: HTTP API 25.47 MiB / 0.00% CPU, Nginx 4.438 MiB /
+  0.00%, PostgreSQL 48.22 MiB / 0.01%; HTTPS API 20.05 MiB / 0.00%, Nginx
+  5.191 MiB / 0.00%, PostgreSQL 31.73 MiB / 0.02%. Container memory limits are
   API 768 MiB, Nginx 128 MiB, PostgreSQL 512 MiB. These are brief smoke-test
   samples, not peak-load or VM-sizing results.
 - Image sizes: API 249,954,915 bytes, PostgreSQL 435,423,250 bytes, Nginx
