@@ -40,14 +40,30 @@ export async function runMigrationJob() {
     await migrationPool.query('ALTER DEFAULT PRIVILEGES FOR ROLE giga_migration IN SCHEMA public REVOKE ALL ON TABLES FROM giga_api_runtime');
 
     // 3. Ensure explicit CRUD access on existing application tables for giga_api_runtime.
-    await migrationPool.query(
-      'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE ' +
-      'public.users, public.sessions, public.conversations, public.messages, ' +
-      'public.skills, public.user_skill_preferences, public.skill_definitions, ' +
-      'public.chat_generations, public.user_byok_credentials, public.agent_workspaces, ' +
-      'public.agent_runs, public.agent_messages, public.agent_tool_calls, public.agent_artifacts ' +
-      'TO giga_api_runtime'
-    );
+    const applicationTables = [
+      'users',
+      'sessions',
+      'conversations',
+      'messages',
+      'user_preferences',
+      'skill_definitions',
+      'skill_versions',
+      'skill_installations',
+      'chat_generations',
+      'chat_operation_keys',
+      'chat_turn_selections',
+      'user_provider_credentials',
+      'chat_credential_preferences',
+      'agent_workspaces',
+      'agent_runs',
+      'agent_run_events',
+      'agent_run_steps',
+      'agent_messages',
+    ];
+    for (const table of applicationTables) {
+      await migrationPool.query(`GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.${table} TO giga_api_runtime`);
+    }
+    await migrationPool.query('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO giga_api_runtime');
 
     console.log('[giga-migrate] Database migrations and least-privilege security hardening complete.');
   } finally {
@@ -56,9 +72,13 @@ export async function runMigrationJob() {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  runMigrationJob().catch(() => {
+  runMigrationJob().catch((err) => {
     // Redacted output: do not dump connection credentials, URLs, or trace.
     console.error('[giga-migrate] Migration job failed: check database connection, credentials, and schema scripts.');
+    if (err && err.message) {
+      const safeMessage = String(err.message).replace(/postgres(?:ql)?:\/\/\S+/gi, '[redacted-database-url]');
+      console.error(`[giga-migrate] Error: ${safeMessage}`);
+    }
     process.exit(1);
   });
 }
