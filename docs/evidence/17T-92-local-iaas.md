@@ -22,8 +22,13 @@ Date: 2026-11-02, Asia/Bangkok (+07:00).
     PostgreSQL regression coverage added to `roles-check.sql` verifying that newly created
     sensitive tables are denied to `giga_runtime` unless explicitly authorized.
 - Base inspected: `463646a44244b1aabfc0c597612f2c102d67f5b9`.
-- Reviewed HEAD: `6e8c10ca87c8b4b1aef2c8efa2936c3fe0bd2923`.
+- Reviewed HEAD before fix: `6e8c10ca87c8b4b1aef2c8efa2936c3fe0bd2923`.
+- Final Hardened HEAD: `74ff81abc0962518fbcabcb1d7db84497ff565c4`.
 - [Draft PR #49](https://github.com/17thedevv/Giga/pull/49).
+- Final CI Validation:
+  - Compose Smoke: [Run #41416771806](https://github.com/17thedevv/Giga/actions/runs/41416771806) (PASS)
+  - Backend CI: [Run #41416771761](https://github.com/17thedevv/Giga/actions/runs/41416771761) (PASS)
+  - Git Workflow: [Run #41416771879](https://github.com/17thedevv/Giga/actions/runs/41416771879) (PASS)
 - Intended owner: Trà; intended reviewer/cross-trainee: Thư, from the parent
   deployment task. Agent work is not attributed to either human. Review and
   cross-training are **NOT RUN**.
@@ -78,8 +83,8 @@ The reports were captured at 2026-11-02T08:02:10.026Z (HTTP) and
 | D14 | Real browser login, refresh, protected deep link and logout; HTTPS client cookie/CSRF checks | Chrome on local HTTP; Node HTTPS client on disposable TLS | PASS | [HTTP/HTTPS reports](https://github.com/17thedevv/Giga/actions/runs/41409878121/artifacts/13124649078) |
 | D15 | Unknown `Host` rejected on HTTP and verified HTTPS ingress before proxying/redirecting | Explicit raw HTTP/HTTPS Host headers | PASS | [HTTP/HTTPS reports](https://github.com/17thedevv/Giga/actions/runs/41409878121/artifacts/13124649078) |
 | D16 | Independent peer startup/recovery exercise | Human cross-training | NOT RUN | Reviewer exercise remains open |
-| D17 | P1: One-shot migration job succeeds, API container receives runtime credential only; restart needs no migration secrets | Real PostgreSQL + Compose inspection | PASS | `smoke.mjs` container env inspection + API restart check |
-| D18 | P2: Restrict future-table default privileges and verify inaccessible without explicit grant | Real PostgreSQL role check | PASS | `roles-check.sql` p2_sensitive_audit_log regression test |
+| D17 | P1: One-shot migration job succeeds, API container receives runtime credential only; restart needs no migration secrets | Real PostgreSQL + Compose inspection | PASS | [Run #41416771806](https://github.com/17thedevv/Giga/actions/runs/41416771806) |
+| D18 | P2: Restrict future-table default privileges and verify inaccessible without explicit grant | Real PostgreSQL role check | PASS | [Run #41416771806](https://github.com/17thedevv/Giga/actions/runs/41416771806) |
 
 Infrastructure guard tests: 4 PASS on Node 22.23.4. Local API/Web checks above
 remain separately reported: 51 API tests passed, 4 real-PostgreSQL tests were
