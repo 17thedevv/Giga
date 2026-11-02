@@ -149,11 +149,49 @@ describe('PORT configuration and fail-fast validation', () => {
       CHAT_ENABLED: 'false',
     });
     assert.strictEqual(prodConfig.nodeEnv, 'production');
+    assert.strictEqual(prodConfig.migrationMode, 'auto');
     assert.strictEqual(prodConfig.migrationDatabaseUrl, 'postgres://migration_user:pass@localhost:5432/db');
     assert.strictEqual(prodConfig.agentLifecycleFinalizerDatabaseUrl,
       'postgres://lifecycle_user:pass@localhost:5432/db');
     assert.strictEqual(prodConfig.cookieSecure, true);
     assert.deepStrictEqual(prodConfig.allowedOrigins, ['https://giga.local']);
+  });
+
+  it('loadConfig supports explicit externally-migrated mode with disabled agent execution', () => {
+    assert.throws(
+      () => loadConfig({
+        NODE_ENV: 'production',
+        MIGRATION_MODE: 'invalid_mode',
+        DATABASE_URL: 'postgres://api_user:pass@localhost:5432/db',
+        ALLOWED_ORIGINS: 'https://giga.local',
+      }),
+      /Invalid MIGRATION_MODE configuration/
+    );
+
+    assert.throws(
+      () => loadConfig({
+        NODE_ENV: 'production',
+        MIGRATION_MODE: 'external',
+        DATABASE_URL: 'postgres://api_user:pass@localhost:5432/db',
+        MIGRATION_DATABASE_URL: 'postgres://migration_user:pass@localhost:5432/db',
+        ALLOWED_ORIGINS: 'https://giga.local',
+      }),
+      /Conflicting migration configuration/
+    );
+
+    const extConfig = loadConfig({
+      NODE_ENV: 'production',
+      MIGRATION_MODE: 'external',
+      AGENT_CLOUD_EXECUTION_ENABLED: 'false',
+      DATABASE_URL: 'postgres://api_user:pass@localhost:5432/db',
+      ALLOWED_ORIGINS: 'https://giga.local',
+      CHAT_ENABLED: 'false',
+    });
+    assert.strictEqual(extConfig.nodeEnv, 'production');
+    assert.strictEqual(extConfig.migrationMode, 'external');
+    assert.strictEqual(extConfig.migrationDatabaseUrl, undefined);
+    assert.strictEqual(extConfig.agentLifecycleFinalizerDatabaseUrl, undefined);
+    assert.strictEqual(extConfig.databaseUrl, 'postgres://api_user:pass@localhost:5432/db');
   });
 
   it('parseSameSite handles valid values and rejects invalid', () => {

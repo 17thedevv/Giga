@@ -1,0 +1,139 @@
+# HTTPS rehearsal/deployment topology. configure.mjs --local selects the HTTP override.
+name: giga-local
+services:
+  postgres:
+    image: postgres:16-bookworm@sha256:e8a07d2c7579b038938cdba6c539e580e5001caf9ea203d397b5cc83e76bd938
+    environment:
+      POSTGRES_USER: giga_admin
+      POSTGRES_DB: giga
+      POSTGRES_PASSWORD: ${DB_PASSWORD_ADMIN:?Run node infra/docker/configure.mjs --local}
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+      DB_PASSWORD_ADMIN: ${DB_PASSWORD_ADMIN:?Missing admin password}
+      DB_PASSWORD_MIGRATION: ${DB_PASSWORD_MIGRATION:?Missing migration password}
+      DB_PASSWORD_API: ${DB_PASSWORD_API:?Missing runtime password}
+      DB_PASSWORD_LIFECYCLE: ${DB_PASSWORD_LIFECYCLE:?Missing lifecycle password}
+      DB_PASSWORD_QUOTA: ${DB_PASSWORD_QUOTA:?Missing quota password}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/docker/postgres/init.sh:/docker-entrypoint-initdb.d/10-giga.sh:ro
+    networks: [data]
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U giga_admin -d giga -h 127.0.0.1']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+    stop_grace_period: 60s
+    shm_size: 128m
+    mem_limit: 512m
+    cpus: 1.0
+    security_opt: [no-new-privileges:true]
+
+  migrate:
+    image: giga-api:${IMAGE_TAG:-local}
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile
+      target: runtime
+    command: [node, infra/docker/migrate.mjs]
+    environment:
+      NODE_ENV: production
+      DB_HOST: postgres
+      DB_NAME: giga
+      DB_PASSWORD_MIGRATION: ${DB_PASSWORD_MIGRATION:?Missing migration password}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [data]
+    restart: "no"
+    init: true
+    read_only: true
+    tmpfs: ['/tmp:size=64m,mode=1777']
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    mem_limit: 512m
+    cpus: 1.0
+
+  api:
+    image: giga-api:${IMAGE_TAG:-local}
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile
+      target: runtime
+    environment:
+      NODE_ENV: production
+      PORT: '3000'
+      SERVE_WEB: 'true'
+      DB_HOST: postgres
+      DB_NAME: giga
+      MIGRATION_MODE: external
+      DB_PASSWORD_API: ${DB_PASSWORD_API:?Missing runtime password}
+      ALLOWED_ORIGINS: ${PUBLIC_ORIGIN:?Configure exact public origin}
+      COOKIE_SECURE: 'true'
+      COOKIE_SAME_SITE: lax
+      GIGA_LOCAL_HTTP: 'false'
+      CHAT_ENABLED: ${CHAT_ENABLED:-false}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      CHAT_MODEL_ID: ${CHAT_MODEL_ID:-}
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-}
+      AGENT_CLOUD_EXECUTION_ENABLED: 'false'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    networks: [edge, data]
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3000/health',{signal:AbortSignal.timeout(2000)}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 40s
+    init: true
+    read_only: true
+    tmpfs: ['/tmp:size=64m,mode=1777']
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    restart: unless-stopped
+    stop_grace_period: 30s
+    mem_limit: 768m
+    cpus: 1.0
+
+  nginx:
+    image: nginx:stable-alpine@sha256:0e52bd054126cdc040b1276c0af347aeb02a41b9cfe305d6094767ac30e97949
+    entrypoint: []
+    command: [nginx, -g, 'daemon off;']
+    user: '101:101'
+    ports:
+      - '${GIGA_BIND_IP:-127.0.0.1}:80:8080'
+      - '${GIGA_BIND_IP:-127.0.0.1}:443:8443'
+    volumes:
+      - ./infra/docker/nginx/https.conf:/etc/nginx/nginx.conf:ro
+      - ./infra/docker/nginx/common.conf:/etc/nginx/giga-common.conf:ro
+      - ./infra/docker/nginx/allowed-hosts.conf:/etc/nginx/giga-allowed-hosts.conf:ro
+      - ${TLS_CERT_DIR:?Configure TLS certificate directory}:/etc/nginx/tls:ro
+    networks: [edge]
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, 'http://127.0.0.1:8081/health']
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    read_only: true
+    tmpfs: ['/tmp:size=32m,mode=1777']
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    restart: unless-stopped
+    stop_grace_period: 30s
+    mem_limit: 128m
+    cpus: 0.5
+
+networks:
+  edge:
+  data:
+    internal: true
+volumes:
+  pgdata:
