@@ -87,12 +87,20 @@ CREATE TABLE public.p2_sensitive_audit_log (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   secret_token TEXT NOT NULL
 );
+CREATE SEQUENCE public.p2_sensitive_seq START 1;
 RESET ROLE;
 
 DO $check_p2$
 BEGIN
   IF has_table_privilege('giga_runtime', 'public.p2_sensitive_audit_log', 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') THEN
     RAISE EXCEPTION 'P2 regression: newly created table received fail-open default privileges for giga_runtime';
+  END IF;
+  IF has_sequence_privilege('giga_runtime', 'public.p2_sensitive_seq', 'UPDATE') THEN
+    RAISE EXCEPTION 'P2 sequence regression: newly created sequence received excessive UPDATE default privilege for giga_runtime';
+  END IF;
+  IF NOT has_sequence_privilege('giga_runtime', 'public.p2_sensitive_seq', 'USAGE') OR
+     NOT has_sequence_privilege('giga_runtime', 'public.p2_sensitive_seq', 'SELECT') THEN
+    RAISE EXCEPTION 'P2 sequence regression: newly created sequence lacks USAGE or SELECT privilege for giga_runtime';
   END IF;
 END;
 $check_p2$;
@@ -111,6 +119,16 @@ BEGIN
   EXCEPTION WHEN insufficient_privilege THEN NULL; END;
   BEGIN DELETE FROM public.p2_sensitive_audit_log WHERE FALSE;
     RAISE EXCEPTION 'Runtime unexpectedly deleted from newly created table without explicit authorization';
+  EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+  -- Sequence least privilege: USAGE (nextval, currval) and SELECT succeed; setval fails
+  BEGIN
+    PERFORM nextval('public.p2_sensitive_seq');
+    PERFORM currval('public.p2_sensitive_seq');
+    PERFORM last_value FROM public.p2_sensitive_seq;
+  END;
+  BEGIN
+    PERFORM setval('public.p2_sensitive_seq', 999);
+    RAISE EXCEPTION 'Runtime unexpectedly executed setval() without sequence UPDATE privilege';
   EXCEPTION WHEN insufficient_privilege THEN NULL; END;
   BEGIN UPDATE public.schema_migrations SET version = version WHERE FALSE;
     RAISE EXCEPTION 'Runtime unexpectedly wrote migration history';

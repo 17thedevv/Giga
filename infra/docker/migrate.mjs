@@ -63,7 +63,12 @@ export async function runMigrationJob() {
     for (const table of applicationTables) {
       await migrationPool.query(`GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.${table} TO giga_api_runtime`);
     }
+    // 4. Ensure sequence least privilege (P2): revoke excessive UPDATE/setval and grant USAGE, SELECT only.
+    // Repairs databases where historical migration 015 had granted ALL privileges on sequences.
+    await migrationPool.query('REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM giga_api_runtime');
     await migrationPool.query('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO giga_api_runtime');
+    await migrationPool.query('ALTER DEFAULT PRIVILEGES FOR ROLE giga_migration IN SCHEMA public REVOKE ALL ON SEQUENCES FROM giga_api_runtime');
+    await migrationPool.query('ALTER DEFAULT PRIVILEGES FOR ROLE giga_migration IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO giga_api_runtime');
 
     console.log('[giga-migrate] Database migrations and least-privilege security hardening complete.');
   } finally {

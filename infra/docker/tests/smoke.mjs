@@ -275,6 +275,64 @@ try {
     sql(await readFile('infra/docker/postgres/roles-check.sql', 'utf8'));
     await health();
   });
+  await check('sequence least privilege and post-migration hardening against historical grants', async () => {
+    try {
+      // 1. Simulate historical database state where a sequence had ALL privileges granted to runtime
+      sql('CREATE SEQUENCE public.p2_historical_seq START 10;', 'giga_migration', 'DB_PASSWORD_MIGRATION');
+      sql('GRANT ALL PRIVILEGES ON SEQUENCE public.p2_historical_seq TO giga_api_runtime;', 'giga_migration', 'DB_PASSWORD_MIGRATION');
+      assert.equal(
+        sql("SELECT has_sequence_privilege('giga_runtime', 'public.p2_historical_seq', 'UPDATE');"),
+        't',
+        'Historical grant conferred UPDATE on sequence'
+      );
+
+      // 2. Post-migration hardening repairs existing database sequences
+      const migrateRun = run('docker', [...compose, 'run', '--rm', '--no-deps', 'migrate']);
+      assert.equal(migrateRun.status, 0, 'Migration hardening runner succeeds');
+
+      // 3. Verify UPDATE is revoked while USAGE and SELECT remain
+      assert.equal(
+        sql("SELECT has_sequence_privilege('giga_runtime', 'public.p2_historical_seq', 'UPDATE');"),
+        'f',
+        'Hardening must revoke UPDATE privilege on existing sequences'
+      );
+      assert.equal(
+        sql("SELECT has_sequence_privilege('giga_runtime', 'public.p2_historical_seq', 'USAGE');"),
+        't',
+        'Hardening must preserve USAGE privilege on existing sequences'
+      );
+      assert.equal(
+        sql("SELECT has_sequence_privilege('giga_runtime', 'public.p2_historical_seq', 'SELECT');"),
+        't',
+        'Hardening must preserve SELECT privilege on existing sequences'
+      );
+
+      // 4. Runtime cannot setval() on the sequence
+      assert.throws(() => {
+        sql("SELECT setval('public.p2_historical_seq', 999);", 'giga_runtime', 'DB_PASSWORD_API');
+      }, /permission denied/i);
+
+      // 5. Runtime CAN nextval() and currval()
+      assert.equal(sql("SELECT nextval('public.p2_historical_seq');", 'giga_runtime', 'DB_PASSWORD_API'), '10');
+      assert.equal(sql("SELECT currval('public.p2_historical_seq');", 'giga_runtime', 'DB_PASSWORD_API'), '10');
+
+      // 6. New sequences created by migration role do not inherit UPDATE default privilege
+      sql('CREATE SEQUENCE public.p2_future_seq START 1;', 'giga_migration', 'DB_PASSWORD_MIGRATION');
+      assert.equal(
+        sql("SELECT has_sequence_privilege('giga_runtime', 'public.p2_future_seq', 'UPDATE');"),
+        'f',
+        'New sequences must not receive default UPDATE privilege'
+      );
+      assert.equal(
+        sql("SELECT has_sequence_privilege('giga_runtime', 'public.p2_future_seq', 'USAGE');"),
+        't',
+        'New sequences receive default USAGE privilege'
+      );
+    } finally {
+      sql('DROP SEQUENCE IF EXISTS public.p2_historical_seq, public.p2_future_seq CASCADE;', 'giga_migration', 'DB_PASSWORD_MIGRATION');
+    }
+    await health();
+  });
   await check('real browser login, protected deep link, reload and logout', async () => {
     return browserSmoke({ base, email, password, conversationId });
   });

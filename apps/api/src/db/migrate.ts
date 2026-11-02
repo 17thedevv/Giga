@@ -1304,9 +1304,11 @@ BEGIN
     EXECUTE format('ALTER FUNCTION %I.finalize_agent_execution_reconciliation(uuid, character varying, character, bigint, bigint, bigint, bigint, bigint, bigint, bigint, bigint, boolean) OWNER TO giga_agent_quota_owner', quota_schema);
 
     EXECUTE format('GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA %I TO giga_api_runtime', quota_schema);
-    EXECUTE format('GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA %I TO giga_api_runtime', quota_schema);
+    EXECUTE format('REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA %I FROM giga_api_runtime', quota_schema);
+    EXECUTE format('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA %I TO giga_api_runtime', quota_schema);
     EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I REVOKE ALL ON TABLES FROM giga_api_runtime', migration_login, quota_schema);
-    EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT ALL PRIVILEGES ON SEQUENCES TO giga_api_runtime', migration_login, quota_schema);
+    EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I REVOKE ALL ON SEQUENCES FROM giga_api_runtime', migration_login, quota_schema);
+    EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT USAGE, SELECT ON SEQUENCES TO giga_api_runtime', migration_login, quota_schema);
 
     EXECUTE format('REVOKE ALL PRIVILEGES ON %I.agent_execution_reservations FROM giga_api_runtime', quota_schema);
     EXECUTE format('REVOKE ALL PRIVILEGES ON %I.agent_execution_usage_events FROM giga_api_runtime', quota_schema);

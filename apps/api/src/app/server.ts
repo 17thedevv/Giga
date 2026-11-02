@@ -118,7 +118,19 @@ export async function startServer(options: StartServerOptions = {}): Promise<{
         throw new Error('Database startup validation failed: runtime role lacks required CRUD permissions on application tables.');
       }
 
-      // 5. Runtime role membership validation
+      // 5. Fail-closed check: sequence privileges (runtime must never possess UPDATE on public sequences)
+      const seqCheck = await pool.query<{ has_excessive_seq_privs: boolean }>(
+        "SELECT EXISTS (" +
+        "  SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace " +
+        "  WHERE n.nspname = 'public' AND c.relkind = 'S' " +
+        "    AND has_sequence_privilege(current_user, c.oid, 'UPDATE')" +
+        ") AS has_excessive_seq_privs"
+      );
+      if (seqCheck.rows[0]?.has_excessive_seq_privs) {
+        throw new Error('Database startup validation failed: runtime role must not possess UPDATE privilege on public sequences.');
+      }
+
+      // 6. Runtime role membership validation
       const roles = await pool.query<{
         is_superuser: boolean;
         is_api_runtime: boolean;

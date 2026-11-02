@@ -60,11 +60,12 @@ REVOKE ALL ON SCHEMA public FROM PUBLIC;
 GRANT USAGE, CREATE ON SCHEMA public TO giga_migration, giga_agent_quota_owner, giga_agent_lifecycle_owner;
 GRANT USAGE ON SCHEMA public TO giga_api_runtime, giga_agent_lifecycle_finalizer, giga_agent_quota_finalizer;
 
--- Restrict future-table default privileges (P2):
--- Replace fail-open default table grants with a controlled least-privilege policy.
+-- Restrict future-table and sequence default privileges (P2):
+-- Replace fail-open default grants with a controlled least-privilege policy.
 -- Future tables created by giga_migration do not grant CRUD to giga_api_runtime
--- unless explicitly authorized. Sequences retain USAGE, SELECT.
+-- unless explicitly authorized. Sequences receive USAGE, SELECT only (no UPDATE / setval).
 ALTER DEFAULT PRIVILEGES FOR ROLE giga_migration IN SCHEMA public REVOKE ALL ON TABLES FROM giga_api_runtime;
+ALTER DEFAULT PRIVILEGES FOR ROLE giga_migration IN SCHEMA public REVOKE ALL ON SEQUENCES FROM giga_api_runtime;
 ALTER DEFAULT PRIVILEGES FOR ROLE giga_migration IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO giga_api_runtime;
 COMMIT;
 SQL
