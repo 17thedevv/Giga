@@ -283,6 +283,28 @@ describe('Real Agent API client', () => {
     expect(JSON.stringify(received)).not.toContain(secret);
   });
 
+  it('preserves future bounded phase strings through SSE and continues parsing later events', async () => {
+    const runId = fixture.run.id;
+    const frames = [
+      `id: 1\nevent: run.status\ndata: ${JSON.stringify({ runId, status: 'running', phase: 'hydrating_v3' })}\n\n`,
+      `id: 2\nevent: run.status\ndata: ${JSON.stringify({ runId, status: 'running', phase: '<script>future</script>' })}\n\n`,
+      `id: 3\nevent: run.failed\ndata: ${JSON.stringify({ runId, code: 'RUNTIME_UNAVAILABLE', message: 'Stopped' })}\n\n`,
+    ].join('');
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new TextEncoder().encode(frames)); controller.close(); },
+    });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(body, { headers: { 'Content-Type': 'text/event-stream' } })));
+    const received: unknown[] = [];
+
+    await new RealApiClient().streamAgentRunEvents(runId, (event) => received.push(event));
+
+    expect(received).toEqual([
+      { sequence: 1, type: 'run.status', status: 'running', phase: 'hydrating_v3' },
+      { sequence: 2, type: 'run.status', status: 'running', phase: '<script>future</script>' },
+      { sequence: 3, type: 'run.failed', code: 'RUNTIME_UNAVAILABLE', message: 'Stopped' },
+    ]);
+  });
+
   it('cancels only the SSE observation reader when its AbortSignal is aborted', async () => {
     const body = new ReadableStream<Uint8Array>({ start() {} });
     const fetchMock = vi.fn().mockResolvedValue(new Response(body, { headers: { 'Content-Type': 'text/event-stream' } }));

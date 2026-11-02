@@ -19,7 +19,6 @@ export class AgentEventProjectionError extends Error {
 }
 
 const statuses: readonly AgentStatus[] = ['queued', 'running', 'awaiting_approval', 'applying', 'completed', 'failed', 'cancelled'];
-const phases = ['waiting_runtime', 'planning', 'executing', 'observing', 'verifying'] as const;
 const eventNamePattern = /^[A-Za-z][A-Za-z0-9_.-]{0,79}$/;
 const identifierPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const MAX_EVENT_SEQUENCE = 2_147_483_647;
@@ -80,8 +79,16 @@ export function projectAgentRunEvent(
   switch (eventName) {
     case 'run.status': {
       if (!statuses.includes(payload.status as AgentStatus)) throw new AgentEventProjectionError();
-      if (payload.phase !== undefined && !phases.includes(payload.phase as typeof phases[number])) throw new AgentEventProjectionError();
-      return { sequence, type: 'run.status', status: payload.status as AgentStatus, ...(payload.phase ? { phase: payload.phase as string } : {}) };
+      if (payload.phase !== undefined &&
+          (typeof payload.phase !== 'string' || payload.phase.length > 120 || /[\u0000-\u001f\u007f]/.test(payload.phase))) {
+        throw new AgentEventProjectionError();
+      }
+      return {
+        sequence,
+        type: 'run.status',
+        status: payload.status as AgentStatus,
+        ...(payload.phase === undefined ? {} : { phase: safeText(payload.phase, 120) }),
+      };
     }
     case 'plan.updated': {
       if (!Number.isSafeInteger(payload.version) || (payload.version as number) < 1 || !Array.isArray(payload.steps) || payload.steps.length > 100) {
