@@ -29,7 +29,7 @@ COPY --from=api-build --chown=node:node /app/apps/api/dist/ apps/api/dist/
 COPY --from=api-build --chown=node:node /app/apps/api/package.json apps/api/package.json
 COPY --from=api-build --chown=node:node /app/packages/contracts/agent.js /app/packages/contracts/package.json packages/contracts/
 COPY --from=web-build --chown=node:node /app/apps/web/dist/ apps/web/dist/
-COPY --chown=node:node infra/docker/start.mjs infra/docker/start.mjs
+COPY --chown=node:node infra/docker/start.mjs infra/docker/migrate.mjs infra/docker/
 USER node
 EXPOSE 3000
 CMD ["node", "infra/docker/start.mjs"]

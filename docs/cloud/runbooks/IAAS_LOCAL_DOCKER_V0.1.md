@@ -129,24 +129,41 @@ logins:
 | Login | Purpose and boundary |
 | --- | --- |
 | `giga_admin` | Cluster bootstrap and backup/recovery; never the API login |
-| `giga_migration` | Schema/migration owner; no superuser, createdb or createrole privilege |
-| `giga_runtime` | Ordinary API access through `giga_api_runtime`; no quota/lifecycle finalizer or owner membership |
-| `giga_lifecycle` | Only `giga_agent_lifecycle_finalizer`; restricted provider-authoritative routines |
+| `giga_migration` | Schema/migration owner; passed only to the one-shot `migrate` service; no superuser, createdb or createrole privilege |
+| `giga_runtime` | Ordinary API access through `giga_api_runtime`; no quota/lifecycle finalizer or owner membership; exclusive DB credential in `api` container |
+| `giga_lifecycle` | Only `giga_agent_lifecycle_finalizer`; restricted provider-authoritative routines; uninitialized while Agent Cloud execution is disabled |
 | `giga_quota` | Only quota-finalizer access; reserved for that contract and never passed to the HTTP application |
 
 The migration login can administer the precreated group memberships needed by
 015/016. The special NOLOGIN quota/lifecycle owner roles can create objects in
 the application schema to permit PostgreSQL ownership transfer; they are not
 ordinary application identities. The lifecycle finalizer and quota finalizer
-must remain separate. The API receives neither the bootstrap nor quota login
-password.
+must remain separate.
 
-Startup validates configuration, runs pending forward migrations with the
-migration login, restricts ordinary runtime access to read-only `schema_migrations`, then
-uses the existing production startup checks for runtime and lifecycle
-connections. No broad table grants are applied after 015/016: doing so would
-undo their column/function restrictions. No public API or DTO change is part of
-this infrastructure setup; the existing API contract remains DRAFT.
+### Credential separation and external migration (P1 & P2)
+
+1. **One-shot migration service:** Migrations are applied exclusively by the
+   one-shot `migrate` service, which runs after PostgreSQL readiness and exits
+   with code 0 before the `api` service begins (`condition: service_completed_successfully`).
+   Only `migrate` receives `DB_PASSWORD_MIGRATION`.
+2. **Unprivileged API container:** The long-lived `api` container receives ONLY
+   `DB_PASSWORD_API`. Migration, lifecycle-finalizer and quota-finalizer
+   credentials are not passed to the API process.
+3. **Disabled Agent lifecycle pool:** Because Agent Cloud execution remains
+   disabled (`AGENT_CLOUD_EXECUTION_ENABLED=false`), no trusted lifecycle worker
+   or privileged lifecycle-finalizer pool is initialized in the request-serving
+   process.
+4. **Externally-migrated mode with fail-closed validation:** The API runs with
+   `MIGRATION_MODE: external`. On boot, API startup validates that
+   `schema_migrations` exists, required migration version 16 is applied, the
+   runtime login has read-only access to migration history, has no `CREATE`
+   privilege on schema `public`, and has CRUD access to application tables. Missing
+   schema, migrations, or excessive privileges cause immediate fail-closed exit.
+5. **Least-privilege future-table policy:** Default table privileges for
+   `giga_migration` are revoked (`ALTER DEFAULT PRIVILEGES FOR ROLE giga_migration IN SCHEMA public REVOKE ALL ON TABLES FROM giga_api_runtime`).
+   Future tables created by migrations or administrative routines do not grant
+   CRUD to `giga_api_runtime` unless explicitly authorized. Application tables
+   receive explicit grants. Sequences retain `USAGE, SELECT`.
 
 Changing a password in `.env` does **not** change a role password in an existing
 volume. A mismatch must fail startup. For a used volume, follow a separately

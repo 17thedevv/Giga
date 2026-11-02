@@ -9,14 +9,21 @@ Date: 2026-11-02, Asia/Bangkok (+07:00).
 - Scope: local Nginx, co-hosted Hono/React, PostgreSQL 16, role separation,
   backup/recovery and deterministic Docker smoke CI. No cloud resources,
   deployment, external credential change or live provider/sandbox call.
-- Base inspected: `463646a44244b1aabfc0c597612f2c102d67f5b9` (latest `main`
-  observed at preflight). The original checkout was on a different Agent feature
-  branch with six unrelated frontend edits. Work was isolated in separate
-  checkouts; those edits were excluded.
-- Exact implementation SHA tested in containers: `2cf199975100c4cde96ad704ea9fb5e43c59394e`.
-  Both the HTTP and HTTPS smoke reports identify this SHA; the subsequent PR
-  head change records this evidence only.
-- [Draft PR #49](https://github.com/17thedevv/Giga/pull/49), [successful Docker run #10](https://github.com/17thedevv/Giga/actions/runs/41409878121), [redacted run artifact](https://github.com/17thedevv/Giga/actions/runs/41409878121/artifacts/13124649078), [Git workflow validation](https://github.com/17thedevv/Giga/actions/runs/41409878127).
+- P1/P2 Security Review Hardening:
+  - P1: Privileged credentials (`DB_PASSWORD_MIGRATION`, `DB_PASSWORD_LIFECYCLE`) removed
+    from long-lived API container. One-shot `migrate` service (`infra/docker/migrate.mjs`)
+    runs exclusively with `DB_PASSWORD_MIGRATION` before API start. API starts only after
+    migration success (`condition: service_completed_successfully`), receives only
+    unprivileged `DB_PASSWORD_API`, runs with `MIGRATION_MODE: external`, and does not
+    initialize lifecycle finalizer pool while Agent Cloud execution is disabled. Startup
+    fails closed on missing schema, version 16, or excessive privileges.
+  - P2: Future-table default privileges restricted (`REVOKE ALL ON TABLES FROM giga_api_runtime`).
+    Replaced fail-open default grants with explicit grants on existing application tables.
+    PostgreSQL regression coverage added to `roles-check.sql` verifying that newly created
+    sensitive tables are denied to `giga_runtime` unless explicitly authorized.
+- Base inspected: `463646a44244b1aabfc0c597612f2c102d67f5b9`.
+- Reviewed HEAD: `6e8c10ca87c8b4b1aef2c8efa2936c3fe0bd2923`.
+- [Draft PR #49](https://github.com/17thedevv/Giga/pull/49).
 - Intended owner: Trà; intended reviewer/cross-trainee: Thư, from the parent
   deployment task. Agent work is not attributed to either human. Review and
   cross-training are **NOT RUN**.
@@ -41,8 +48,8 @@ Local checks executed on Windows / Node 24.20.0 before publication:
 | `npm ci --prefix apps/api --no-audit --no-fund` and equivalent `apps/web` command | PASS; lockfiles unchanged; host npm reported install-script policy warnings |
 | `npm run typecheck --prefix apps/api` and `npm run build --prefix apps/api` | PASS, exit 0 |
 | `npm run build --prefix apps/web` | PASS, exit 0; includes TypeScript check and Vite production bundle |
-| API `npx tsx --test --test-concurrency=1 tests/config.test.ts tests/server.test.ts tests/web-ui.test.ts tests/health.test.ts tests/csrf.test.ts tests/auth-negative.test.ts tests/agent/agent-contract.test.ts tests/agent/agent-boundaries.test.ts` | 51 PASS, 4 PostgreSQL-specific SKIP, 0 FAIL; exit 0; in-process/pg-mem and local socket, not container evidence |
-| `node --test infra/docker/tests/config.test.mjs` | 4 PASS, 0 SKIP, exit 0; validates HTTP/TLS profiles, credential separation and disabled Agent guards |
+| API `npx tsx --test --test-concurrency=1 tests/config.test.ts tests/server.test.ts tests/web-ui.test.ts tests/health.test.ts tests/csrf.test.ts tests/auth-negative.test.ts tests/agent/agent-contract.test.ts tests/agent/agent-boundaries.test.ts` | 52 PASS, 4 PostgreSQL-specific SKIP, 0 FAIL; exit 0; includes externally-migrated mode and disabled agent cloud tests |
+| `node --test infra/docker/tests/config.test.mjs` | 5 PASS, 0 SKIP, exit 0; validates API runtime unprivileged config, migrate container credential isolation, HTTP/TLS profiles, and disabled Agent guards |
 | `node --check` on infrastructure JavaScript; Git Bash `bash -n` on shell scripts | PASS, exit 0 |
 | `node infra/docker/configure.mjs --local` | PASS; generated ignored credentials, no secret values recorded |
 | `git diff --check` | PASS |
@@ -71,6 +78,8 @@ The reports were captured at 2026-11-02T08:02:10.026Z (HTTP) and
 | D14 | Real browser login, refresh, protected deep link and logout; HTTPS client cookie/CSRF checks | Chrome on local HTTP; Node HTTPS client on disposable TLS | PASS | [HTTP/HTTPS reports](https://github.com/17thedevv/Giga/actions/runs/41409878121/artifacts/13124649078) |
 | D15 | Unknown `Host` rejected on HTTP and verified HTTPS ingress before proxying/redirecting | Explicit raw HTTP/HTTPS Host headers | PASS | [HTTP/HTTPS reports](https://github.com/17thedevv/Giga/actions/runs/41409878121/artifacts/13124649078) |
 | D16 | Independent peer startup/recovery exercise | Human cross-training | NOT RUN | Reviewer exercise remains open |
+| D17 | P1: One-shot migration job succeeds, API container receives runtime credential only; restart needs no migration secrets | Real PostgreSQL + Compose inspection | PASS | `smoke.mjs` container env inspection + API restart check |
+| D18 | P2: Restrict future-table default privileges and verify inaccessible without explicit grant | Real PostgreSQL role check | PASS | `roles-check.sql` p2_sensitive_audit_log regression test |
 
 Infrastructure guard tests: 4 PASS on Node 22.23.4. Local API/Web checks above
 remain separately reported: 51 API tests passed, 4 real-PostgreSQL tests were

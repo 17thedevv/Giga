@@ -1305,7 +1305,7 @@ BEGIN
 
     EXECUTE format('GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA %I TO giga_api_runtime', quota_schema);
     EXECUTE format('GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA %I TO giga_api_runtime', quota_schema);
-    EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT ALL PRIVILEGES ON TABLES TO giga_api_runtime', migration_login, quota_schema);
+    EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I REVOKE ALL ON TABLES FROM giga_api_runtime', migration_login, quota_schema);
     EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT ALL PRIVILEGES ON SEQUENCES TO giga_api_runtime', migration_login, quota_schema);
 
     EXECUTE format('REVOKE ALL PRIVILEGES ON %I.agent_execution_reservations FROM giga_api_runtime', quota_schema);

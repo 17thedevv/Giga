@@ -30,6 +30,31 @@ services:
     cpus: 1.0
     security_opt: [no-new-privileges:true]
 
+  migrate:
+    image: giga-api:${IMAGE_TAG:-local}
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile
+      target: runtime
+    command: [node, infra/docker/migrate.mjs]
+    environment:
+      NODE_ENV: production
+      DB_HOST: postgres
+      DB_NAME: giga
+      DB_PASSWORD_MIGRATION: ${DB_PASSWORD_MIGRATION:?Missing migration password}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [data]
+    restart: "no"
+    init: true
+    read_only: true
+    tmpfs: ['/tmp:size=64m,mode=1777']
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    mem_limit: 512m
+    cpus: 1.0
+
   api:
     image: giga-api:${IMAGE_TAG:-local}
     build:
@@ -42,9 +67,8 @@ services:
       SERVE_WEB: 'true'
       DB_HOST: postgres
       DB_NAME: giga
-      DB_PASSWORD_MIGRATION: ${DB_PASSWORD_MIGRATION:?Missing migration password}
+      MIGRATION_MODE: external
       DB_PASSWORD_API: ${DB_PASSWORD_API:?Missing runtime password}
-      DB_PASSWORD_LIFECYCLE: ${DB_PASSWORD_LIFECYCLE:?Missing lifecycle password}
       ALLOWED_ORIGINS: ${PUBLIC_ORIGIN:?Configure exact public origin}
       COOKIE_SECURE: 'true'
       COOKIE_SAME_SITE: lax
@@ -57,6 +81,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     networks: [edge, data]
     healthcheck:
       test: [CMD, node, -e, "fetch('http://127.0.0.1:3000/health',{signal:AbortSignal.timeout(2000)}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]

@@ -60,10 +60,11 @@ REVOKE ALL ON SCHEMA public FROM PUBLIC;
 GRANT USAGE, CREATE ON SCHEMA public TO giga_migration, giga_agent_quota_owner, giga_agent_lifecycle_owner;
 GRANT USAGE ON SCHEMA public TO giga_api_runtime, giga_agent_lifecycle_finalizer, giga_agent_quota_finalizer;
 
--- Migrations 015/016 install the final protected table/column ACLs. Never run
--- blanket table grants after them. The application startup additionally revokes
--- runtime writes to schema_migrations, while retaining required version reads.
-ALTER DEFAULT PRIVILEGES FOR ROLE giga_migration IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO giga_api_runtime;
+-- Restrict future-table default privileges (P2):
+-- Replace fail-open default table grants with a controlled least-privilege policy.
+-- Future tables created by giga_migration do not grant CRUD to giga_api_runtime
+-- unless explicitly authorized. Sequences retain USAGE, SELECT.
+ALTER DEFAULT PRIVILEGES FOR ROLE giga_migration IN SCHEMA public REVOKE ALL ON TABLES FROM giga_api_runtime;
 ALTER DEFAULT PRIVILEGES FOR ROLE giga_migration IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO giga_api_runtime;
 COMMIT;
 SQL

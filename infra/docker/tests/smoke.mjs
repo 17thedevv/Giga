@@ -175,6 +175,36 @@ try {
       assert.equal(JSON.parse(docker(['network', 'inspect', name]))[0].Internal, true);
     }
   });
+  await check('migration service succeeds, exits, and API starts with unprivileged credentials only', async () => {
+    const migrateId = docker([...compose, 'ps', '-a', '-q', 'migrate']);
+    assert.ok(migrateId, 'Migrate container exists');
+    const [migrateContainer] = JSON.parse(docker(['inspect', migrateId]));
+    assert.equal(migrateContainer.State.Status, 'exited', 'Migrate container must be exited');
+    assert.equal(migrateContainer.State.ExitCode, 0, 'Migrate container must exit successfully (0)');
+
+    const migrateEnv = (migrateContainer.Config.Env ?? []).map(e => e.split('=')[0]);
+    assert.ok(migrateEnv.includes('DB_PASSWORD_MIGRATION'), 'Migrate container has migration password');
+    assert.ok(!migrateEnv.includes('DB_PASSWORD_API'), 'Migrate container must not have API password');
+    assert.ok(!migrateEnv.includes('DB_PASSWORD_LIFECYCLE'), 'Migrate container must not have lifecycle password');
+    assert.ok(!migrateEnv.includes('DB_PASSWORD_QUOTA'), 'Migrate container must not have quota password');
+
+    const apiId = docker([...compose, 'ps', '-q', 'api']);
+    assert.ok(apiId, 'API container exists');
+    const [apiContainer] = JSON.parse(docker(['inspect', apiId]));
+    assert.equal(apiContainer.State.Status, 'running', 'API container is running');
+    const apiEnv = (apiContainer.Config.Env ?? []).map(e => e.split('=')[0]);
+    assert.ok(apiEnv.includes('DB_PASSWORD_API'), 'API container has runtime DB credential');
+    assert.ok(!apiEnv.includes('DB_PASSWORD_MIGRATION'), 'API container must not have migration password');
+    assert.ok(!apiEnv.includes('DB_PASSWORD_LIFECYCLE'), 'API container must not have lifecycle password');
+    assert.ok(!apiEnv.includes('DB_PASSWORD_QUOTA'), 'API container must not have quota password');
+    assert.ok(!apiEnv.includes('MIGRATION_DATABASE_URL'), 'API container must not have migration database URL');
+    assert.ok(!apiEnv.includes('AGENT_LIFECYCLE_FINALIZER_DATABASE_URL'), 'API container must not have lifecycle finalizer database URL');
+
+    docker([...compose, 'restart', 'api']);
+    await health();
+    const result = await json('/health', {}, 200);
+    assert.equal(result.status, 'ok');
+  });
   await check('data and sessions persist after stack stop/start', async () => {
     docker([...compose, 'stop']);
     docker([...compose, 'up', '-d', '--wait', '--wait-timeout', '120']);
@@ -200,10 +230,36 @@ try {
     sql(await readFile('infra/docker/postgres/roles-check.sql', 'utf8'), 'giga_admin', 'DB_PASSWORD_ADMIN', database);
   });
   await check('missing secrets, invalid origin and provider configuration fail closed', async () => {
-    for (const override of ['DB_PASSWORD_API=', 'DB_PASSWORD_API=' + '0'.repeat(64), 'DB_PASSWORD_LIFECYCLE=', 'ALLOWED_ORIGINS=*', 'CHAT_ENABLED=true']) {
+    for (const override of [
+      'DB_PASSWORD_API=',
+      'DB_PASSWORD_API=' + '0'.repeat(64),
+      'DB_PASSWORD_MIGRATION=' + randomBytes(32).toString('hex'),
+      'DB_PASSWORD_LIFECYCLE=' + randomBytes(32).toString('hex'),
+      'ALLOWED_ORIGINS=*',
+      'CHAT_ENABLED=true'
+    ]) {
       const result = run('docker', [...compose, 'run', '--rm', '--no-deps', '-e', override, 'api']);
-      assert.notEqual(result.status, 0, 'Invalid configuration is rejected');
+      assert.notEqual(result.status, 0, 'Invalid API configuration is rejected: ' + override.split('=')[0]);
       assert.ok(!result.error, 'Negative probe must finish rather than time out');
+    }
+    for (const override of [
+      'DB_PASSWORD_MIGRATION=',
+      'DB_PASSWORD_API=' + randomBytes(32).toString('hex')
+    ]) {
+      const result = run('docker', [...compose, 'run', '--rm', '--no-deps', '-e', override, 'migrate']);
+      assert.notEqual(result.status, 0, 'Invalid migration configuration is rejected: ' + override.split('=')[0]);
+      assert.ok(!result.error, 'Negative probe must finish rather than time out');
+    }
+    await health();
+  });
+  await check('API startup fails closed if required schema migrations are missing', async () => {
+    try {
+      sql('ALTER TABLE public.schema_migrations RENAME TO schema_migrations_hidden;');
+      const rejected = run('docker', [...compose, 'run', '--rm', '--no-deps', 'api']);
+      assert.notEqual(rejected.status, 0, 'API startup fails closed when schema_migrations is missing');
+      assert.ok(!rejected.error, 'Schema check must fail without timeout');
+    } finally {
+      sql('ALTER TABLE public.schema_migrations_hidden RENAME TO schema_migrations;');
     }
     await health();
   });

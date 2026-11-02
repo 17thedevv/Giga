@@ -80,9 +80,38 @@ BEGIN
 END;
 $check$;
 
+-- P2 regression check: newly created sensitive tables must not receive
+-- fail-open default privileges for giga_runtime / giga_api_runtime.
+SET LOCAL ROLE giga_migration;
+CREATE TABLE public.p2_sensitive_audit_log (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  secret_token TEXT NOT NULL
+);
+RESET ROLE;
+
+DO $check_p2$
+BEGIN
+  IF has_table_privilege('giga_runtime', 'public.p2_sensitive_audit_log', 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') THEN
+    RAISE EXCEPTION 'P2 regression: newly created table received fail-open default privileges for giga_runtime';
+  END IF;
+END;
+$check_p2$;
+
 SET LOCAL ROLE giga_runtime;
 DO $deny$
 BEGIN
+  BEGIN PERFORM count(*) FROM public.p2_sensitive_audit_log;
+    RAISE EXCEPTION 'Runtime unexpectedly read newly created table without explicit authorization';
+  EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+  BEGIN INSERT INTO public.p2_sensitive_audit_log (secret_token) VALUES ('unauthorized');
+    RAISE EXCEPTION 'Runtime unexpectedly inserted into newly created table without explicit authorization';
+  EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+  BEGIN UPDATE public.p2_sensitive_audit_log SET secret_token = 'tampered' WHERE FALSE;
+    RAISE EXCEPTION 'Runtime unexpectedly updated newly created table without explicit authorization';
+  EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+  BEGIN DELETE FROM public.p2_sensitive_audit_log WHERE FALSE;
+    RAISE EXCEPTION 'Runtime unexpectedly deleted from newly created table without explicit authorization';
+  EXCEPTION WHEN insufficient_privilege THEN NULL; END;
   BEGIN UPDATE public.schema_migrations SET version = version WHERE FALSE;
     RAISE EXCEPTION 'Runtime unexpectedly wrote migration history';
   EXCEPTION WHEN insufficient_privilege THEN NULL; END;
@@ -110,6 +139,27 @@ BEGIN
   EXCEPTION WHEN insufficient_privilege THEN NULL; END;
 END;
 $deny$;
+
+RESET ROLE;
+GRANT SELECT ON public.p2_sensitive_audit_log TO giga_api_runtime;
+
+SET LOCAL ROLE giga_runtime;
+DO $verify_explicit_grant$
+BEGIN
+  -- SELECT now succeeds with explicit grant
+  PERFORM count(*) FROM public.p2_sensitive_audit_log;
+  -- Writes must still be denied
+  BEGIN INSERT INTO public.p2_sensitive_audit_log (secret_token) VALUES ('unauthorized');
+    RAISE EXCEPTION 'Runtime unexpectedly inserted with SELECT-only grant';
+  EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+  BEGIN UPDATE public.p2_sensitive_audit_log SET secret_token = 'tampered' WHERE FALSE;
+    RAISE EXCEPTION 'Runtime unexpectedly updated with SELECT-only grant';
+  EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+  BEGIN DELETE FROM public.p2_sensitive_audit_log WHERE FALSE;
+    RAISE EXCEPTION 'Runtime unexpectedly deleted with SELECT-only grant';
+  EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+END;
+$verify_explicit_grant$;
 
 SET LOCAL ROLE giga_lifecycle;
 DO $deny$

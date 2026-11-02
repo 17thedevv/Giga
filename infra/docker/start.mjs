@@ -17,14 +17,16 @@ export function configureEnvironment(env = process.env) {
     throw new Error('Invalid origin for the selected HTTP/TLS profile');
   }
   if (env.DB_HOST !== 'postgres' || env.DB_NAME !== 'giga') throw new Error('This stack must target its dedicated Compose database');
-  const roles = [['API', 'giga_runtime', 'DATABASE_URL'], ['MIGRATION', 'giga_migration', 'MIGRATION_DATABASE_URL'], ['LIFECYCLE', 'giga_lifecycle', 'AGENT_LIFECYCLE_FINALIZER_DATABASE_URL']];
-  const passwords = roles.map(([role]) => env[`DB_PASSWORD_${role}`]);
-  if (passwords.some(password => !/^[a-f0-9]{32,128}$/.test(password ?? '')) || new Set(passwords).size !== passwords.length) {
-    throw new Error('Database passwords must be distinct random hex values (32-128 characters)');
+  if (env.DB_PASSWORD_MIGRATION || env.DB_PASSWORD_LIFECYCLE || env.DB_PASSWORD_QUOTA ||
+      env.MIGRATION_DATABASE_URL || env.AGENT_LIFECYCLE_FINALIZER_DATABASE_URL) {
+    throw new Error('Privileged database credentials (migration, lifecycle, quota) are forbidden in the API container');
   }
-  for (const [role, login, name] of roles) {
-    env[name] = `postgresql://${login}:${env[`DB_PASSWORD_${role}`]}@postgres:5432/giga`;
+  const apiPassword = env.DB_PASSWORD_API;
+  if (!/^[a-f0-9]{32,128}$/.test(apiPassword ?? '')) {
+    throw new Error('Database password must be a random hex value (32-128 characters)');
   }
+  env.DATABASE_URL = `postgresql://giga_runtime:${apiPassword}@postgres:5432/giga`;
+  env.MIGRATION_MODE = 'external';
   if (!['true', 'false'].includes(env.CHAT_ENABLED)) throw new Error('CHAT_ENABLED must be explicit');
   for (const key of ['GEMINI_API_KEY', 'CHAT_MODEL_ID', 'CREDENTIAL_ENCRYPTION_KEY']) if (env[key] === '') delete env[key];
   return env;
@@ -33,21 +35,9 @@ export function configureEnvironment(env = process.env) {
 export async function start(options = {}) {
   configureEnvironment();
   const { loadConfig } = await import('../../apps/api/dist/app/config.js');
-  const { createDatabasePool, closeDatabasePool } = await import('../../apps/api/dist/db/client.js');
-  const { runMigrations } = await import('../../apps/api/dist/db/migrate.js');
   const { startServer } = await import('../../apps/api/dist/app/server.js');
   const config = loadConfig(); // Reject provider/config errors before connecting.
-  const migrationPool = createDatabasePool({ connectionString: config.migrationDatabaseUrl });
-  try {
-    await runMigrations(migrationPool);
-    // AgentRepository checks migration 013 at runtime. Permit that read only.
-    // Migration 015's blanket table grant must not permit history mutation.
-    await migrationPool.query('REVOKE ALL ON TABLE public.schema_migrations FROM giga_api_runtime');
-    await migrationPool.query('GRANT SELECT ON TABLE public.schema_migrations TO giga_api_runtime');
-  } finally {
-    await closeDatabasePool(migrationPool);
-  }
-  const running = await startServer({ ...options, config, skipMigrations: true });
+  const running = await startServer({ ...options, config });
   let closing = false;
   const shutdown = () => {
     if (closing) return;

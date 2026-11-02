@@ -9,6 +9,7 @@ export interface AppConfig {
   readonly port: number;
   readonly databaseUrl?: string;
   readonly migrationDatabaseUrl?: string;
+  readonly migrationMode?: 'auto' | 'external';
   readonly agentLifecycleFinalizerDatabaseUrl?: string;
   readonly nodeEnv: 'development' | 'production' | 'test';
   readonly cookieSecure: boolean;
@@ -130,12 +131,33 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   if (nodeEnv === 'production' && !databaseUrl) {
     throw new Error('DATABASE_URL environment variable is required in production mode.');
   }
+  const rawMigrationMode = env.MIGRATION_MODE?.trim() || env.DB_MIGRATION_MODE?.trim();
+  let migrationMode: 'auto' | 'external' = 'auto';
+  if (rawMigrationMode) {
+    if (rawMigrationMode === 'external') {
+      migrationMode = 'external';
+    } else if (rawMigrationMode === 'auto') {
+      migrationMode = 'auto';
+    } else {
+      throw new Error(
+        `Invalid MIGRATION_MODE configuration: "${rawMigrationMode}". Allowed values: 'auto', 'external'.`
+      );
+    }
+  }
+
   const migrationDatabaseUrl = env.MIGRATION_DATABASE_URL?.trim();
-  if (nodeEnv === 'production' && !migrationDatabaseUrl) {
+  if (migrationMode === 'external') {
+    if (migrationDatabaseUrl) {
+      throw new Error(
+        'Conflicting migration configuration: MIGRATION_DATABASE_URL must not be supplied in externally-migrated mode.'
+      );
+    }
+  } else if (nodeEnv === 'production' && !migrationDatabaseUrl) {
     throw new Error('MIGRATION_DATABASE_URL is required in production mode to keep migration ownership separate from the API role.');
   }
+
   const agentLifecycleFinalizerDatabaseUrl = env.AGENT_LIFECYCLE_FINALIZER_DATABASE_URL?.trim();
-  if (nodeEnv === 'production' && !agentLifecycleFinalizerDatabaseUrl) {
+  if (nodeEnv === 'production' && !agentLifecycleFinalizerDatabaseUrl && env.AGENT_CLOUD_EXECUTION_ENABLED !== 'false') {
     throw new Error('AGENT_LIFECYCLE_FINALIZER_DATABASE_URL is required in production mode for provider-authoritative sandbox lifecycle operations.');
   }
   const configuredDatabaseUrls = [
@@ -143,7 +165,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     ['MIGRATION_DATABASE_URL', migrationDatabaseUrl],
     ['AGENT_LIFECYCLE_FINALIZER_DATABASE_URL', agentLifecycleFinalizerDatabaseUrl],
   ] as const;
-  if (nodeEnv === 'production' || agentLifecycleFinalizerDatabaseUrl) {
+  if (nodeEnv === 'production' || agentLifecycleFinalizerDatabaseUrl || migrationDatabaseUrl) {
     const identities: Array<{ label: string; username: string; database: string }> = [];
     for (const [label, value] of configuredDatabaseUrls) {
       if (!value) continue;
@@ -189,6 +211,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     serveWeb: env.SERVE_WEB === 'true',
     port,
     databaseUrl,
+    migrationMode,
     ...(migrationDatabaseUrl ? { migrationDatabaseUrl } : {}),
     ...(agentLifecycleFinalizerDatabaseUrl ? { agentLifecycleFinalizerDatabaseUrl } : {}),
     nodeEnv,
