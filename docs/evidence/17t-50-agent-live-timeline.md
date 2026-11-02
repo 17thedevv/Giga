@@ -1,6 +1,6 @@
 # 17T-50 — Durable Agent Live Timeline and SSE Replay
 
-**Status:** Draft implementation evidence; CI green on the implementation commit, with final evidence-only CI pending; independent review remains pending. API contract v0.2 remains DRAFT.
+**Status:** Draft implementation evidence; CI green on the implementation commit and first evidence update; independent review remains pending. API contract v0.2 remains DRAFT.
 **Branch:** `feat/17t-50-agent-live-timeline`
 **Baseline:** `463646a44244b1aabfc0c597612f2c102d67f5b9` (`origin/main`, includes merged PR #47).
 **Implementation commit:** `733ad11fdc3d83e2c4f8ca08b1a7c12a1f228460`.
@@ -66,7 +66,9 @@
 | GitHub Frontend CI on implementation commit | PASS — [run 75](https://github.com/17thedevv/Giga/actions/runs/41406478206) |
 | GitHub Validate Git Workflow on implementation commit | PASS — [run 225](https://github.com/17thedevv/Giga/actions/runs/41406478156) |
 | Authenticated browser against a deployed staging SHA | Not run; no Playwright/browser test dependency is installed/configured for `apps/web`, and no deployed 17T-50 SHA or secure browser environment was verified in this task |
-| Final evidence-only commit CI | Pending push; implementation SHA above has both required workflows green |
+| GitHub Frontend CI on evidence update `de2ca84f3da05d3d50c5d9f06f0fe25b20ba1b24` | PASS — [run 76](https://github.com/17thedevv/Giga/actions/runs/41406649104) |
+| GitHub Validate Git Workflow on evidence update `de2ca84f3da05d3d50c5d9f06f0fe25b20ba1b24` | PASS — [run 226](https://github.com/17thedevv/Giga/actions/runs/41406649199) |
+| Live status for subsequent documentation-only updates | See [PR #48 checks](https://github.com/17thedevv/Giga/pull/48/checks) |
 
 ### Dependency audit scope note
 
