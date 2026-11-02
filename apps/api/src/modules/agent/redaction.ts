@@ -7,15 +7,15 @@ export const SENSITIVE_KEY_NAMES =
   '(?:[A-Za-z][A-Za-z0-9_-]{0,127})?(?:api[_-]?key|access[_-]?key|token|password|passwd|pass|secret(?:[_-]?key)?|private[_-]?key|privkey|database[_-]?url|connection[_-]?string|credential(?:s)?(?:[_-]?encryption)?[_-]?key|credentials?|encryption[_-]?key|authorization|proxy[_-]?authorization|cookies?|set[_-]?cookie)';
 
 const SENSITIVE_KEY_SUFFIXES = [
-  'apikey', 'accesskey', 'token', 'password', 'passwd', 'pass', 'secret', 'secretkey',
+  'apikey', 'accesskey', 'accesskeyid', 'apikeyid', 'token', 'password', 'passwd', 'pass', 'secret', 'secretkey',
   'privatekey', 'privkey', 'databaseurl', 'connectionstring', 'credential', 'credentials',
   'credentialencryptionkey', 'credentialsencryptionkey', 'encryptionkey', 'authorization',
   'proxyauthorization', 'cookie', 'setcookie',
 ] as const;
 
-const SENSITIVE_KEY_ASSIGNMENT_HEADER = /(["'])([A-Za-z][A-Za-z0-9_-]{0,127})\1(\s*[:=]\s*)/g;
-const UNQUOTED_SENSITIVE_KEY_ASSIGNMENT_HEADER = /\b([A-Za-z][A-Za-z0-9_-]{0,127})(\s*[:=]\s*)/g;
-const NEXT_ASSIGNMENT = /[A-Za-z][A-Za-z0-9_-]{0,127}\s*[:=]\s*/y;
+const SENSITIVE_KEY_ASSIGNMENT_HEADER = /(["'])([A-Za-z][A-Za-z0-9_-]{0,127})\1([ \t]*[:=][ \t]*)/g;
+const UNQUOTED_SENSITIVE_KEY_ASSIGNMENT_HEADER = /\b([A-Za-z][A-Za-z0-9_-]{0,127})([ \t]*[:=][ \t]*)/g;
+const NEXT_ASSIGNMENT = /[A-Za-z][A-Za-z0-9_-]{0,127}(?:=[ \t]*[^\s,;=}\]]|:[ \t]+[^\s,;}\]])/y;
 const EXISTING_REDACTION = /["']?\[(?:REDACTED|REDACTED_KEY|REDACTED_PRIVATE_KEY)\]["']?/y;
 const EXISTING_REDACTED_SCHEME = /(?:Bearer|Basic|Token)\s+\[REDACTED\]/iy;
 
@@ -32,9 +32,13 @@ function redactSensitiveAssignments(content: string): string {
       const name = match[header === SENSITIVE_KEY_ASSIGNMENT_HEADER ? 2 : 1]!;
       if (!isSensitiveKey(name)) continue;
 
+      const separator = match[header === SENSITIVE_KEY_ASSIGNMENT_HEADER ? 3 : 2]!;
       const valueStart = header.lastIndex;
-      NEXT_ASSIGNMENT.lastIndex = valueStart;
-      if (NEXT_ASSIGNMENT.test(sanitized)) continue;
+      const hasTrailingWhitespaceInSeparator = /[ \t]$/.test(separator);
+      if (hasTrailingWhitespaceInSeparator) {
+        NEXT_ASSIGNMENT.lastIndex = valueStart;
+        if (NEXT_ASSIGNMENT.test(sanitized)) continue;
+      }
       EXISTING_REDACTION.lastIndex = valueStart;
       if (EXISTING_REDACTION.test(sanitized)) continue;
       EXISTING_REDACTED_SCHEME.lastIndex = valueStart;
@@ -128,7 +132,7 @@ export function redactStringPatterns(content: string): string {
 
   // 1. Private keys (PEM format). An unmatched BEGIN marker consumes the
   // remainder of this bounded scan so truncation cannot expose key material.
-  sanitized = sanitized.replace(/-----BEGIN ([A-Z ]*PRIVATE KEY)-----[\s\S]*?(?:-----END \1-----|$)/g, '[REDACTED_PRIVATE_KEY]');
+  sanitized = sanitized.replace(/-----BEGIN ([A-Z ]*(?:PRIVATE|SECRET) KEY(?: BLOCK)?)-----[\s\S]*?(?:-----END \1-----|$)/gi, '[REDACTED_PRIVATE_KEY]');
 
   // 2. URL userinfo credentials: https://user:password@host or postgres://user:pass@host:port/db
   sanitized = sanitized.replace(/([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)([^:\s/@]+):([^@\s/]+)@/gi, '$1$2:[REDACTED]@');
@@ -146,6 +150,7 @@ export function redactStringPatterns(content: string): string {
 
   // 6. Common API key prefixes: e2b-..., e2b_..., sk-..., ghp-..., gho-..., pat-..., live_..., test_...
   sanitized = sanitized.replace(/\b(?:e2b|sk|ghp|gho|ghu|ghs|ghr|pat|xoxb|xoxp|xapp|glpat|npm|live|test)[-_][A-Za-z0-9_\-]{8,}\b/gi, '[REDACTED_KEY]');
+  sanitized = sanitized.replace(/\bAIza[0-9A-Za-z_-]{20,}\b/g, '[REDACTED_KEY]');
 
   // 7. Quoted and unquoted key-value pairs use the same normalized predicate
   // as structured object redaction. Unclosed quoted values are redacted to the
