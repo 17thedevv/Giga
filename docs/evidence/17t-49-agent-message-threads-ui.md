@@ -132,3 +132,46 @@ Added deterministic deferred-promise coverage in `apps/web/tests/agent-real-view
 | GitHub Validate Git Workflow | PASS on review-fix code commit `385bcc225649aa1cf255a17a978f7cfce18b3460`; [run #217](https://github.com/17thedevv/Giga/actions/runs/41032087439) |
 
 The focused Real Agent view suite passes 33/33, including all deferred follow-up regressions. `385bcc225649aa1cf255a17a978f7cfce18b3460` is the exact implementation/test HEAD verified by CI; a later evidence-only commit updates this file, and its exact branch HEAD/checks are reflected in the live PR metadata. Browser E2E and deployed Real API verification remain unavailable in this environment; no browser or deployment acceptance is claimed.
+
+## Review follow-up — THREAD-02
+
+**GitHub review:** [#5732863642](https://github.com/17thedevv/Giga/pull/47#pullrequestreview-5732863642) · **Finding:** bidirectional message identity and page reconciliation.
+
+### Root cause and fix
+
+`mergeMessagePages()` keyed only by `sequence`. It rejected two IDs for one sequence but did not reject one ID appearing at different sequences, and it replaced same-ID/same-sequence records without comparing their public fields. That allowed duplicate React keys and silent record replacement across page and POST boundaries.
+
+The merger now builds temporary `byId` and `bySequence` maps across both existing and incoming records. A repeated record is ignored only when ID, sequence, workspace, run, role, content, and timestamp all match. Any one-sided identity match or canonical-field mismatch raises an internal conflict; messages and pagination cursor are committed only after the entire batch validates. Rejected page state remains unchanged. The UI shows a generic recoverable history-conflict message whose Retry loading action fetches the authoritative first page and obtains a fresh cursor.
+
+The same merger validates successful POST responses against visible and confirmed messages, and validates confirmed messages against the next authoritative GET. A POST already confirmed by the API is not replayed because local reconciliation failed; a retry of the GET can recover it. The existing body/idempotency key remains pinned on uncertain POST outcomes. No API contract or backend code changed. MSG-REFRESH-01 read/submission generation and session-fencing behavior is preserved.
+
+### Regression coverage
+
+Added deterministic cases in `apps/web/tests/agent-real-views.test.tsx`:
+
+- `rejects a cross-page ID reused at another sequence without partial updates, then recovers and deduplicates overlap` — rejects same ID/different sequence plus an otherwise-valid record in that page; verifies no partial messages/cursor apply, first-page recovery, refreshed forward cursor, exact overlap deduplication, and subsequent valid pagination.
+- `rejects a cross-page sequence reused by another ID without applying any part of that page` — covers sequence-to-ID conflict and atomic rejection.
+- `deduplicates an exact repeated message at the boundary between pages` — allows an exact overlap only once.
+- `rejects matching ID/sequence with conflicting canonical $field` — checks content, role and timestamp conflicts do not replace the displayed record.
+- `recovers authoritative POST reconciliation conflicts without retrying or duplicating the confirmed POST` — preserves the successful POST row when the follow-up authoritative page contradicts its identity, recovers on Retry loading, and asserts one POST call and one displayed copy.
+- `reconciles a successful POST identity conflict from authoritative history without replaying it` — a 2xx response that conflicts with visible history does not partially append; the confirmed POST is not resent, and a deferred authoritative read supplies the canonical row.
+- The existing MSG-REFRESH-01 tests remain in the same full suite and pass, including deferred refresh-vs-POST, stale pre-commit GET, uncertain key reuse, route A→B→C fencing and 401/session invalidation.
+
+### Verification for THREAD-02
+
+| Command / check | Result |
+| --- | --- |
+| `npm ci --prefix apps/web` | PASS; 148 packages installed, 0 vulnerabilities |
+| `npm run typecheck --prefix apps/web` | PASS |
+| `npm test --prefix apps/web -- --reporter=dot` | PASS; 315 tests in 19 files (8 THREAD-02 cases added to the 307-test baseline) |
+| Focused Agent views: `npm test --prefix apps/web -- --reporter=dot --run tests/agent-real-views.test.tsx` | PASS; 41/41 |
+| `npm run build --prefix apps/web` | PASS |
+| `npm run test:production-security --prefix apps/web` | PASS; production JavaScript bundle scanned |
+| `npm audit --prefix apps/web --audit-level=moderate` | PASS; 0 vulnerabilities |
+| `node --test .agents/scripts/validate-git-workflow.test.mjs` | PASS; 6/6 |
+| `node .agents/scripts/validate-skills.mjs` | PASS |
+| `git diff --check` | PASS before evidence update; rerun on final commit |
+| GitHub `git-conventions` | PASS on code/test commit [`d512d01`](https://github.com/17thedevv/Giga/commit/d512d01b00b02d2f477fe16bc847c64313fb5519); [run #41402016700](https://github.com/17thedevv/Giga/actions/runs/41402016700) |
+| GitHub `Build, Typecheck and Test Frontend` | PASS on code/test commit [`d512d01`](https://github.com/17thedevv/Giga/commit/d512d01b00b02d2f477fe16bc847c64313fb5519); [run #41402016692](https://github.com/17thedevv/Giga/actions/runs/41402016692) |
+
+The implementation and regression tests are in `d512d01b00b02d2f477fe16bc847c64313fb5519`. The final PR-head checks are available from the [live PR checks page](https://github.com/17thedevv/Giga/pull/47/checks); verify them on the exact head after the evidence update. The PR remains Draft and Linear 17T-49 remains In Review pending Trà's independent re-review. No merge or deployment was performed. Existing limitations remain: no authenticated deployed browser/API acceptance is claimed, API v0.2 remains DRAFT, backend follow-up capability is unavailable, and PostgreSQL-specific tests were not run without a safe `TEST_DATABASE_URL`.
