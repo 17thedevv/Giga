@@ -1,0 +1,8 @@
+# Only the isolated smoke project uses this override. Normal images omit this file.
+services:
+  api:
+    command: ["node", "infra/docker/tests/fixture-server.mjs"]
+    environment:
+      GIGA_DOCKER_FIXTURE: deterministic-sse-only
+    volumes:
+      - ./infra/docker/tests/fixture-server.mjs:/app/infra/docker/tests/fixture-server.mjs:ro

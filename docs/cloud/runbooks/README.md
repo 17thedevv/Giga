@@ -12,6 +12,7 @@ This folder will contain reproducible instructions for deployment, health checks
 
 ## Demo deployment
 
+- [Local IaaS-ready Docker stack](IAAS_LOCAL_DOCKER_V0.1.md) — local-only DRAFT, tracked by 17T-92; [container evidence](../../evidence/17T-92-local-iaas.md).
 - [Render deployment and verification runbook](RENDER_API_DEPLOY_V0.1.md) — DRAFT, tracked by 17T-12.
 - [Demo deployment evidence](../../evidence/17T-12-demo-deployment.md) — local preflight and authenticated inventory; hosted acceptance remains open.
 

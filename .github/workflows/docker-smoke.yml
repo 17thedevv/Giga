@@ -1,0 +1,94 @@
+name: Local Docker Compose smoke
+
+on:
+  pull_request:
+    paths:
+      - 'Dockerfile'
+      - '.dockerignore'
+      - 'compose.yaml'
+      - '.env.example'
+      - 'infra/docker/**'
+      - 'apps/api/**'
+      - 'apps/web/**'
+      - 'packages/contracts/**'
+      - '.github/workflows/docker-smoke.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'Dockerfile'
+      - '.dockerignore'
+      - 'compose.yaml'
+      - '.env.example'
+      - 'infra/docker/**'
+      - 'apps/api/**'
+      - 'apps/web/**'
+      - 'packages/contracts/**'
+      - '.github/workflows/docker-smoke.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-smoke-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compose-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      COMPOSE_PROJECT_NAME: giga-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+      GIGA_DOCKER_SMOKE: '1'
+    steps:
+      - name: Checkout exact proposed revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Set up Node.js 22 for dependency-free smoke harness
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Verify local container and browser prerequisites
+        run: |
+          docker version
+          docker compose version
+          google-chrome --version
+          git rev-parse HEAD
+      - name: Verify fail-closed infrastructure configuration
+        run: node --test infra/docker/tests/config.test.mjs
+      - name: Generate disposable local configuration and validate Compose
+        run: |
+          node infra/docker/configure.mjs --local
+          docker compose config --quiet
+      - name: Clean multi-stage image build
+        run: docker compose build --pull --no-cache
+      - name: Start real PostgreSQL, API and Nginx containers
+        run: docker compose up -d --wait --wait-timeout 120
+      - name: Exercise real auth, roles, persistence, restore, browser and fixture SSE
+        run: node infra/docker/tests/smoke.mjs
+      - name: Record redacted acceptance summary
+        if: always()
+        run: |
+          if test -f artifacts/docker-smoke/summary.md; then
+            cat artifacts/docker-smoke/summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf 'Container smoke did not reach its evidence writer. Inspect the failed build/start step.\n' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Preserve redacted evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-smoke-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            artifacts/docker-smoke/report.json
+            artifacts/docker-smoke/summary.md
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Remove only this job's disposable containers and volume
+        if: always()
+        run: |
+          if test -f .env; then
+            docker compose down --volumes --remove-orphans
+          fi

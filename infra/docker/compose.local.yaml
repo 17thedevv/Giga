@@ -1,0 +1,12 @@
+# Development-only loopback HTTP. NODE_ENV stays production so role checks run.
+services:
+  api:
+    environment:
+      COOKIE_SECURE: 'false'
+      GIGA_LOCAL_HTTP: 'true'
+  nginx:
+    ports: !override
+      - '127.0.0.1:8080:8080'
+    volumes: !override
+      - ./infra/docker/nginx/http.conf:/etc/nginx/nginx.conf:ro
+      - ./infra/docker/nginx/common.conf:/etc/nginx/giga-common.conf:ro
