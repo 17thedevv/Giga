@@ -4,6 +4,7 @@
 **Branch:** `feat/17t-50-agent-live-timeline`
 **Baseline:** `463646a44244b1aabfc0c597612f2c102d67f5b9` (`origin/main`, includes merged PR #47).
 **Implementation commit:** `733ad11fdc3d83e2c4f8ca08b1a7c12a1f228460`.
+**Review-fix commit:** `e2ce0aeac8b13bf884e5cedbca498d984aca7dcf` (local only; not pushed because PR #48 is already merged).
 **Linear:** [17T-50](https://linear.app/17thedev/issue/17T-50).
 **Scope:** Real Agent run detail, typed frontend SSE observation, replay projection and UI. No backend changes, API contract edits, Demo behavior changes, run admission/control, or deployment.
 
@@ -99,8 +100,8 @@ These results apply to the local follow-up changes on `feat/17t-50-agent-live-ti
 | `node --test .agents/scripts/validate-git-workflow.test.mjs` | PASS — 6 tests |
 | `node .agents/scripts/validate-skills.mjs` | PASS — 8 skill manifests |
 | `git diff --check` | PASS |
-| Git workflow validator on the follow-up commit | Pending commit; run with exact branch/title/body/base/head after commit |
-| GitHub CI on follow-up HEAD | Not available: PR #48 was merged before these changes; no follow-up ref or PR exists. Existing CI results above are for the earlier PR commits only. |
+| Git workflow validator on follow-up commit `e2ce0aeac8b13bf884e5cedbca498d984aca7dcf` | PASS — exact branch/title/body and base/head SHAs |
+| GitHub CI on follow-up HEAD | Not available: PR #48 was merged before these changes; the follow-up commit is local and no follow-up PR exists. Existing CI results above are for the earlier PR commits only. |
 | Authenticated browser against a deployed follow-up SHA | Not run: no deployed follow-up SHA or configured Playwright runner was available. |
 
 ### Dependency audit scope note
