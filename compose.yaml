@@ -85,6 +85,7 @@ services:
     volumes:
       - ./infra/docker/nginx/https.conf:/etc/nginx/nginx.conf:ro
       - ./infra/docker/nginx/common.conf:/etc/nginx/giga-common.conf:ro
+      - ./infra/docker/nginx/allowed-hosts.conf:/etc/nginx/giga-allowed-hosts.conf:ro
       - ${TLS_CERT_DIR:?Configure TLS certificate directory}:/etc/nginx/tls:ro
     networks: [edge]
     depends_on:

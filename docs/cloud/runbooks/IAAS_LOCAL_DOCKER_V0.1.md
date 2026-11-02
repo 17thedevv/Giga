@@ -82,7 +82,11 @@ an existing configuration; preserve that file with its data volume. The file
 contains `COMPOSE_PATH_SEPARATOR=|` and
 `COMPOSE_FILE=compose.yaml|infra/docker/compose.local.yaml`, so subsequent
 `docker compose up -d --build` starts the complete configured stack without
-extra flags. `.env.example` contains placeholders for manual review only; its
+extra flags. It also writes the ignored
+`infra/docker/nginx/allowed-hosts.conf` from the configured origin hostname.
+Both ingress profiles reject unknown `Host` values before proxying or redirecting.
+If changing the origin, stop the stack and generate a matching fresh `.env` and
+allowlist together. `.env.example` contains placeholders for manual review only; its
 placeholder values must not be used as credentials. Do not run a credential-
 revealing `docker compose config` or publish `docker inspect` environment output.
 

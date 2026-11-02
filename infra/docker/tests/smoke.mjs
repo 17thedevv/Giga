@@ -90,6 +90,8 @@ try {
     assert.equal(missing.status, 404);
     assert.match(missing.headers.get('content-type'), /application\/json/);
     assert.equal((await missing.json()).error.code, 'NOT_FOUND');
+    await assert.rejects(() => request('/health', { headers: { Host: 'attacker.invalid' } }),
+      'Nginx closes requests with a Host outside the generated allowlist');
   });
   await check('frontend assets and deep links', async () => {
     const index = await request('/');

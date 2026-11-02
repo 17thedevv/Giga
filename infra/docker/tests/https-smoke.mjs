@@ -29,7 +29,7 @@ function redact(value) {
   for (const secret of privateValues) text = text.split(secret).join('[redacted]');
   return text.slice(-1500);
 }
-function request(path, { method = 'GET', cookie, body, requestOrigin = origin, plainHttp = false } = {}) {
+function request(path, { method = 'GET', cookie, body, requestOrigin = origin, plainHttp = false, host } = {}) {
   return new Promise((resolve, reject) => {
     const data = body === undefined ? undefined : JSON.stringify(body);
     const send = plainHttp ? httpRequest : httpsRequest;
@@ -37,6 +37,7 @@ function request(path, { method = 'GET', cookie, body, requestOrigin = origin, p
       hostname: 'localhost', family: 4, port: plainHttp ? 80 : 443, path, method,
       ...(plainHttp ? {} : { ca: certificate, rejectUnauthorized: true }),
       headers: {
+        ...(host ? { Host: host } : {}),
         ...(method === 'GET' ? {} : { Origin: requestOrigin }),
         ...(cookie ? { Cookie: cookie } : {}),
         ...(data === undefined ? {} : { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) }),
@@ -81,11 +82,15 @@ try {
     const response = await request('/health?rehearsal=1', { plainHttp: true });
     assert.equal(response.status, 308);
     assert.equal(response.headers.location, 'https://localhost/health?rehearsal=1');
+    await assert.rejects(() => request('/health', { plainHttp: true, host: 'attacker.invalid' }),
+      'HTTP Host must match the generated Nginx allowlist');
   });
   await check('verified TLS health, security headers and frontend deep links', async () => {
     const health = await request('/health');
     assert.equal(health.status, 200); assert.equal(JSON.parse(health.text).status, 'ok');
     securityHeaders(health);
+    await assert.rejects(() => request('/health', { host: 'attacker.invalid' }),
+      'HTTPS Host must match the generated Nginx allowlist');
     for (const path of ['/', '/login', '/chat/' + randomUUID(), '/agent/runs/' + randomUUID()]) {
       const response = await request(path);
       assert.equal(response.status, 200); assert.match(response.headers['content-type'], /text\/html/);

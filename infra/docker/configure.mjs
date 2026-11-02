@@ -29,7 +29,17 @@ const lines = [
   'GIGA_BIND_IP=127.0.0.1', 'IMAGE_TAG=local', 'CHAT_ENABLED=false',
   ...['ADMIN', 'MIGRATION', 'API', 'LIFECYCLE', 'QUOTA'].map(role => `DB_PASSWORD_${role}=${randomBytes(32).toString('hex')}`),
 ];
+const hostname = url.hostname.toLowerCase();
+if (!/^(?:[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?|\[[0-9a-f:]+\])$/.test(hostname)) {
+  throw new Error('Origin hostname is not valid for the Nginx allowlist');
+}
 // Exclusive create prevents accidental password changes for an existing volume.
 writeFileSync(output, lines.join('\n') + '\n', { flag: 'wx', mode: 0o600 });
+// Hostnames are public routing metadata, not credentials. Nginx reads this
+// include as UID 101 and rejects Host headers outside the configured origin.
+writeFileSync('infra/docker/nginx/allowed-hosts.conf',
+  `map $host $giga_host_allowed {\n    default 0;\n    "${hostname}" 1;\n}\n`,
+  { mode: 0o644 });
 console.log(`Created ${output}. ${local ? 'Loopback HTTP only.' : 'HTTPS selected; provide certificates readable by nginx UID 101.'}`);
+console.log('Nginx Host validation matches the configured origin hostname.');
 console.log('Run: docker compose up -d --build --wait');
