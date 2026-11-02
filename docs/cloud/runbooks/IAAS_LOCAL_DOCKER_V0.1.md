@@ -243,8 +243,8 @@ If only the application needs rollback and that older image is compatible with
 the **current** database schema:
 
 ```bash
-IMAGE_TAG=accepted-sha docker compose up -d --no-build --pull never api
-docker compose up -d --wait nginx
+IMAGE_TAG=accepted-sha docker compose up -d --no-build --pull never --wait api
+docker compose up -d --no-deps --wait nginx
 curl --fail http://localhost:8080/health
 ```
 
@@ -256,12 +256,29 @@ including auth, queries and role boundaries. If incompatible, stop rollout and
 prepare a reviewed forward fix or a separate database recovery/cutover plan.
 Keep the original data volume until that decision is approved.
 
+Persist the selected rollback `IMAGE_TAG` in the private `.env` before later
+whole-stack commands; a temporary shell override does not edit that file.
+The proxy-only command uses `--no-deps` so it cannot select a different API image.
+
 ## Verification and acceptance checklist
 
-Run the committed Docker smoke workflow/harness on disposable configuration and
-data; record its exact commit SHA and artifact in the
-[evidence record](../../evidence/17T-92-local-iaas.md). A source review, in-memory
-database or successful TypeScript build cannot replace these container checks.
+The current exact-SHA container rehearsal passed on 2026-11-02: commit
+`814f9ed71653a111fc693089b9354a2d34105e19`, Docker 28.0.4, Compose 2.38.2,
+Node 22.23.4, PostgreSQL 16.15, on an Ubuntu 24.04 GitHub runner. Four guard
+tests, 14 HTTP/container checks, and five local-TLS checks passed. The reports
+record zero live provider calls. See the [run and redacted artifact](https://github.com/17thedevv/Giga/actions/runs/41408059589)
+and the [acceptance/evidence record](../../evidence/17T-92-local-iaas.md).
+The first HTTP smoke used Chrome against loopback HTTP. HTTPS auth/cookie checks
+used a Node HTTP client with only the ephemeral localhost certificate trusted;
+public HTTPS was not tested. The Windows host itself has no Docker/WSL engine.
+
+The exact-SHA sample after the smoke workload was API 19.36 MiB, Nginx
+4.387 MiB, and PostgreSQL 48.54 MiB for HTTP; 20.02, 4.605 and 31.41 MiB for
+the HTTPS rehearsal. The PostgreSQL fixture database occupied 9,804,823 bytes.
+Runtime image sizes were API 249,954,915 bytes, PostgreSQL 435,423,250 bytes,
+and Nginx 62,313,481 bytes. These are end-of-smoke samples, not peak-load
+measurements or VM-sizing evidence. The full measurement and SSE timing detail
+is in the linked evidence record.
 
 For the local HTTP smoke, use a dedicated project; the harness deliberately
 creates test rows, restarts containers and temporarily substitutes a fixture
