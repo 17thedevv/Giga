@@ -34,6 +34,22 @@ describe('Agent SSE event projection', () => {
       .toEqual({ sequence: 5, type: 'run.completed', artifactIds: ['artifact-1'], verifiedChecks: [{ name: 'Typecheck', outcome: 'passed' }], summary: 'Done' });
   });
 
+  it('accepts bounded contract-valid phases, including empty and unfamiliar values', () => {
+    const projectPhase = (phase: unknown) => projectAgentRunEvent('run.status', '1', { runId, status: 'running', phase }, runId);
+    expect(projectPhase('planning')).toEqual({ sequence: 1, type: 'run.status', status: 'running', phase: 'planning' });
+    expect(projectPhase('hydrating_v3')).toEqual({ sequence: 1, type: 'run.status', status: 'running', phase: 'hydrating_v3' });
+    expect(projectPhase('')).toEqual({ sequence: 1, type: 'run.status', status: 'running', phase: '' });
+    expect(() => projectPhase(12)).toThrow('invalid event');
+    expect(() => projectPhase('unsafe\u0000phase')).toThrow('invalid event');
+    expect(() => projectPhase('x'.repeat(121))).toThrow('invalid event');
+    expect(projectPhase('<script>alert(1)</script>')).toEqual({
+      sequence: 1, type: 'run.status', status: 'running', phase: '<script>alert(1)</script>',
+    });
+    expect(projectPhase('Bearer abcdefghijklmnopqrstuvwxyz')).toEqual({
+      sequence: 1, type: 'run.status', status: 'running', phase: 'Bearer [redacted]',
+    });
+  });
+
   it('ignores ID-less heartbeat and tracks additive events without retaining their payload', () => {
     expect(projectAgentRunEvent('heartbeat', undefined, { private: 'ignored' }, runId)).toBeNull();
     const unknown = projectAgentRunEvent('future.event', '8', { secret: 'sentinel', providerResponse: { reasoning: 'private' } }, runId);
