@@ -86,6 +86,22 @@ describe('SseStreamParser', () => {
     });
   });
 
+  it('can clear frame-local IDs for Agent replay while retaining default SSE ID behavior', () => {
+    const events: SseEvent[] = [];
+    const parser = new SseStreamParser((event) => events.push(event), { clearIdAfterDispatch: true });
+    parser.feed('id: 4\nevent: run.status\ndata: {}\n\nevent: heartbeat\ndata: {}\n\n');
+
+    expect(events).toEqual([
+      { id: '4', event: 'run.status', data: {} },
+      { id: undefined, event: 'heartbeat', data: {} },
+    ]);
+
+    const chatEvents: SseEvent[] = [];
+    const chatParser = new SseStreamParser((event) => chatEvents.push(event));
+    chatParser.feed('id: message-1\ndata: {"text":"hello"}\n\ndata: {"text":"world"}\n\n');
+    expect(chatEvents.map((event) => event.id)).toEqual(['message-1', 'message-1']);
+  });
+
   it('ignores comment lines starting with colon', () => {
     const events: SseEvent[] = [];
     const parser = new SseStreamParser((evt) => events.push(evt));

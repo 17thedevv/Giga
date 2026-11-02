@@ -58,6 +58,8 @@ describe('Real Agent workspace and run integration', () => {
     sessionStorage.clear();
     vi.restoreAllMocks();
     vi.spyOn(realApiClient, 'getAgentCapabilities').mockResolvedValue(capabilities);
+    // Run detail now opens a long-lived observation request; keep unrelated UI lifecycle tests independent of stream closure/reconciliation.
+    vi.spyOn(realApiClient, 'streamAgentRunEvents').mockImplementation(async () => new Promise<void>(() => {}));
     vi.spyOn(realApiClient, 'listAgentMessages').mockImplementation(async (id, options) => ({
       items: [{ ...initialMessage, runId: id, workspaceId: options.workspaceId }],
       nextCursor: null,
@@ -301,6 +303,12 @@ describe('Real Agent workspace and run integration', () => {
     expect(screen.queryByText(/Created src\//)).toBeNull();
     expect(screen.queryByText(/Production Build/)).toBeNull();
     expect(screen.queryByTestId('demo-run-badge')).toBeNull();
+    expect(await screen.findByTestId('agent-run-timeline')).toBeDefined();
+    await waitFor(() => expect(realApiClient.streamAgentRunEvents).toHaveBeenCalledWith(
+      failedRun.id,
+      expect.any(Function),
+      expect.objectContaining({ lastEventId: 0, signal: expect.any(AbortSignal) }),
+    ));
     expect(await screen.findByText(failedRun.task, { selector: '.g-agent-message__content' })).toBeDefined();
     expect(screen.getByTestId('agent-thread-read-only').textContent).toContain('read-only');
   });

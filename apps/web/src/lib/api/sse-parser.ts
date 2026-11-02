@@ -151,6 +151,8 @@ export class SseStreamParser {
     private readonly options?: {
       onError?: (err: Error) => void;
       enforceTerminalIdempotency?: boolean;
+      /** Clear the current ID after each frame for protocols where IDs are frame-local. */
+      clearIdAfterDispatch?: boolean;
     }
   ) {}
 
@@ -273,6 +275,7 @@ export class SseStreamParser {
     if (this.currentDataLines.length === 0) {
       this.currentEvent = 'message';
       this.currentDataCharacters = 0;
+      if (this.options?.clearIdAfterDispatch) this.currentId = undefined;
       return;
     }
 
@@ -317,6 +320,8 @@ export class SseStreamParser {
       } else {
         throw error;
       }
+    } finally {
+      if (this.options?.clearIdAfterDispatch) this.currentId = undefined;
     }
   }
 

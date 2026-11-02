@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useRouter } from '../../app/router.js';
-import { realApiClient, ApiException } from '../../lib/api/client.js';
+import { realApiClient, ApiException, getSessionGeneration, isCurrentSessionGeneration } from '../../lib/api/client.js';
 import {
   isAgentCapabilityAvailable,
   readAgentCapabilities,
@@ -17,6 +17,7 @@ import { Input } from '../../components/Input.js';
 import { Modal } from '../../components/Modal.js';
 import { Textarea } from '../../components/Textarea.js';
 import { AgentMessageThread } from './AgentMessageThread.js';
+import { AgentRunTimeline } from './AgentRunTimeline.js';
 
 const modes: readonly { value: AgentMode; title: string; detail: string }[] = [
   { value: 'ask', title: 'Ask', detail: 'Answer a question without changing workspace files.' },
@@ -678,6 +679,9 @@ export const AgentRealRunView: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [workspaceError, setWorkspaceError] = useState<string | null>(null);
   const requestRef = useRef(0);
+  const timelineRequestRef = useRef(0);
+  const activeRunIdRef = useRef(runId);
+  activeRunIdRef.current = runId;
 
   const loadRun = useCallback(async () => {
     const requestId = ++requestRef.current;
@@ -712,6 +716,21 @@ export const AgentRealRunView: React.FC = () => {
       setError(safeAgentError(failure, 'run'));
     } finally {
       if (requestRef.current === requestId) setIsLoading(false);
+    }
+  }, [runId]);
+
+  const refreshRunAuthoritatively = useCallback(async (): Promise<AgentRun | null> => {
+    if (!runId) return null;
+    const session = getSessionGeneration();
+    const requestId = ++timelineRequestRef.current;
+    try {
+      const response = await realApiClient.getAgentRun(runId);
+      if (activeRunIdRef.current !== runId || timelineRequestRef.current !== requestId ||
+          !isCurrentSessionGeneration(session) || response.run.id !== runId) return null;
+      setRun(response.run);
+      return response.run;
+    } catch {
+      return null;
     }
   }, [runId]);
 
@@ -804,6 +823,7 @@ export const AgentRealRunView: React.FC = () => {
             </p>
           )}
         </section>
+        <AgentRunTimeline key={`timeline-${run.id}`} run={run} onRefreshRun={refreshRunAuthoritatively} />
         <AgentMessageThread
           key={run.id}
           run={run}
