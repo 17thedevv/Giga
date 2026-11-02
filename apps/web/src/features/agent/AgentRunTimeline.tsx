@@ -88,6 +88,7 @@ export const AgentRunTimeline: React.FC<AgentRunTimelineProps> = ({ run, onRefre
   const [capabilityNonce, setCapabilityNonce] = useState(0);
   const [isRetrying, setIsRetrying] = useState(false);
   const [capability, setCapability] = useState<'unknown' | 'available' | 'unavailable'>('unknown');
+  const [capabilityRunId, setCapabilityRunId] = useState<string | null>(null);
   const cursorRef = useRef(0);
   const entriesRef = useRef(new Map<number, PublicAgentRunEvent>());
   const terminalMarkerRef = useRef<TerminalMarker | null>(null);
@@ -137,6 +138,7 @@ export const AgentRunTimeline: React.FC<AgentRunTimelineProps> = ({ run, onRefre
     setEvents([]);
     setWarning(null);
     setOlderEventsTrimmed(false);
+    setCapabilityRunId(null);
     setPhase('loading-capabilities');
   }, [run.id, run.status]);
 
@@ -160,15 +162,18 @@ export const AgentRunTimeline: React.FC<AgentRunTimelineProps> = ({ run, onRefre
     let active = true;
     sessionExpiredRef.current = false;
     setCapability('unknown');
+    setCapabilityRunId(null);
     setPhase('loading-capabilities');
     const handleExpired = () => onSessionExpired();
     window.addEventListener(SESSION_EXPIRED_EVENT, handleExpired);
     void realApiClient.getAgentCapabilities().then((capabilities) => {
       if (!active || !isCurrentSessionGeneration(session) || sessionExpiredRef.current) return;
       setCapability(isAgentCapabilityAvailable(capabilities, 'eventReplay') && isAgentCapabilityAvailable(capabilities, 'runHistory') ? 'available' : 'unavailable');
+      setCapabilityRunId(run.id);
     }).catch(() => {
       if (!active || !isCurrentSessionGeneration(session) || sessionExpiredRef.current) return;
       setCapability('unavailable');
+      setCapabilityRunId(run.id);
     });
     return () => {
       active = false;
@@ -177,6 +182,7 @@ export const AgentRunTimeline: React.FC<AgentRunTimelineProps> = ({ run, onRefre
   }, [capabilityNonce, run.id, onSessionExpired]);
 
   useEffect(() => {
+    if (capabilityRunId !== run.id) return;
     if (capability === 'unknown') return;
     if (capability === 'unavailable') {
       setPhase('unavailable');
@@ -329,7 +335,7 @@ export const AgentRunTimeline: React.FC<AgentRunTimelineProps> = ({ run, onRefre
       window.removeEventListener(SESSION_EXPIRED_EVENT, handleExpired);
       controller.abort(); // Observation only; the durable run continues on the server.
     };
-  }, [capability, clearAllWarnings, clearWarning, onSessionExpired, publishWarning, retryNonce, run.id]);
+  }, [capability, capabilityRunId, clearAllWarnings, clearWarning, onSessionExpired, publishWarning, retryNonce, run.id]);
 
   const retry = async () => {
     if (sessionExpiredRef.current || retryLockRef.current) return;
@@ -338,6 +344,7 @@ export const AgentRunTimeline: React.FC<AgentRunTimelineProps> = ({ run, onRefre
     try {
       if (capability === 'unavailable') {
         setCapability('unknown');
+        setCapabilityRunId(null);
         setPhase('loading-capabilities');
         setCapabilityNonce((value) => value + 1);
         return;

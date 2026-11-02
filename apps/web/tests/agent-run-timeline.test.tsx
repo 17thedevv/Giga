@@ -238,6 +238,49 @@ describe('AgentRunTimeline', () => {
     expect(screen.getByTestId('agent-timeline-empty')).toBeDefined();
   });
 
+  it('keeps one active observer and an independent cursor across run A to B to C', async () => {
+    vi.spyOn(realApiClient, 'getAgentCapabilities').mockResolvedValue(capabilities);
+    const runA = { ...run, status: 'running' as const };
+    const runB = { ...runA, id: '20000000-0000-4000-8000-000000000098' };
+    const runC = { ...runA, id: '20000000-0000-4000-8000-000000000097' };
+    const activeSignals = new Set<AbortSignal>();
+    let maxActive = 0;
+    const observations: Array<{ id: string; cursor: number | undefined; emit: (event: PublicAgentRunEvent) => void }> = [];
+    vi.spyOn(realApiClient, 'streamAgentRunEvents').mockImplementation(async (id, onEvent, options) => {
+      const signal = options?.signal;
+      if (!signal) throw new Error('Expected observation signal');
+      activeSignals.add(signal);
+      maxActive = Math.max(maxActive, activeSignals.size);
+      observations.push({ id, cursor: options?.lastEventId, emit: onEvent });
+      await new Promise<void>((resolve) => {
+        const finish = () => { activeSignals.delete(signal); resolve(); };
+        signal.addEventListener('abort', finish, { once: true });
+        if (signal.aborted) finish();
+      });
+    });
+    const view = render(<AgentRunTimeline run={runA} onRefreshRun={vi.fn().mockResolvedValue(runA)} />);
+    await flushPendingPromises();
+    expect(observations.map(({ id }) => id)).toEqual([runA.id]);
+    act(() => observations[0]!.emit({ sequence: 1, type: 'run.status', status: 'running' }));
+
+    view.rerender(<AgentRunTimeline run={runB} onRefreshRun={vi.fn().mockResolvedValue(runB)} />);
+    await flushPendingPromises();
+    expect(observations.map(({ id }) => id)).toEqual([runA.id, runB.id]);
+    expect(screen.queryByTestId('agent-timeline-events')).toBeNull();
+    act(() => observations[1]!.emit({ sequence: 1, type: 'run.status', status: 'running', phase: 'run_b' }));
+
+    view.rerender(<AgentRunTimeline run={runC} onRefreshRun={vi.fn().mockResolvedValue(runC)} />);
+    await flushPendingPromises();
+    expect(observations.map(({ id }) => id)).toEqual([runA.id, runB.id, runC.id]);
+    expect(observations.map(({ cursor }) => cursor)).toEqual([0, 0, 0]);
+    expect(maxActive).toBe(1);
+    expect(activeSignals.size).toBe(1);
+    expect(screen.queryByText(/run_b/)).toBeNull();
+    act(() => observations[2]!.emit({ sequence: 1, type: 'run.status', status: 'running', phase: 'run_c' }));
+    expect(await screen.findByText('Run status: running · run_c')).toBeDefined();
+    expect(maxActive).toBe(1);
+  });
+
   it('clears protected event content and aborts observation when the session expires', async () => {
     vi.spyOn(realApiClient, 'getAgentCapabilities').mockResolvedValue(capabilities);
     let resolveStream!: () => void;
