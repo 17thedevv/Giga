@@ -43,4 +43,7 @@ test('Docker guard refuses public HTTP and insecure production-like cookies', ()
   assert.doesNotThrow(() => configureEnvironment({
     ...valid(), GIGA_LOCAL_HTTP: 'false', COOKIE_SECURE: 'true', ALLOWED_ORIGINS: 'https://giga.example.invalid',
   }));
+  assert.throws(() => configureEnvironment({
+    ...valid(), GIGA_LOCAL_HTTP: 'false', COOKIE_SECURE: 'true', ALLOWED_ORIGINS: 'https://giga.example.invalid:9443',
+  }));
 });

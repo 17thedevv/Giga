@@ -11,8 +11,8 @@ if (args.some(arg => arg !== '--local' && !/^--(origin|tls-dir|output)=.+/.test(
 const origin = local ? 'http://localhost:8080' : value('origin');
 let url;
 try { url = new URL(origin); } catch { throw new Error('Supply --local or a valid HTTPS --origin'); }
-if (url.origin !== origin || url.username || url.password || (!local && url.protocol !== 'https:')) {
-  throw new Error('Origin must be an exact HTTPS origin; loopback HTTP requires --local');
+if (url.origin !== origin || url.username || url.password || (!local && (url.protocol !== 'https:' || url.port))) {
+  throw new Error('Origin must be an exact HTTPS origin on port 443; loopback HTTP requires --local');
 }
 if (local && (value('origin') || value('tls-dir'))) throw new Error('--local cannot be combined with TLS options');
 const tlsDir = local ? './infra/docker/nginx' : value('tls-dir');

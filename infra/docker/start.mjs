@@ -13,7 +13,7 @@ export function configureEnvironment(env = process.env) {
   let origin;
   try { origin = new URL(env.ALLOWED_ORIGINS); } catch { throw new Error('Configure one exact allowed origin'); }
   if (origin.origin !== env.ALLOWED_ORIGINS || origin.username || origin.password ||
-      (local ? !['http://localhost:8080', 'http://127.0.0.1:8080'].includes(origin.origin) : origin.protocol !== 'https:')) {
+      (local ? !['http://localhost:8080', 'http://127.0.0.1:8080'].includes(origin.origin) : origin.protocol !== 'https:' || origin.port)) {
     throw new Error('Invalid origin for the selected HTTP/TLS profile');
   }
   if (env.DB_HOST !== 'postgres' || env.DB_NAME !== 'giga') throw new Error('This stack must target its dedicated Compose database');
