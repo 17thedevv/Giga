@@ -513,7 +513,10 @@ describe('Real Agent workspace and run integration', () => {
     expect(screen.getAllByTestId('agent-message-item')).toHaveLength(1);
     expect(screen.getByText(initialMessage.content, { selector: '.g-agent-message__content' })).toBeDefined();
     expect(screen.queryByText('Contradictory message text')).toBeNull();
-    expect(screen.getByTestId('agent-message-item').querySelector('article')?.getAttribute('aria-label'))
+    const row = screen.getByTestId('agent-message-item');
+    expect(row.querySelector('.g-agent-message__content')?.textContent).toBe(initialMessage.content);
+    expect(row.querySelector('time')?.getAttribute('datetime')).toBe(initialMessage.createdAt);
+    expect(row.querySelector('article')?.getAttribute('aria-label'))
       .toBe(`${initialMessage.role === 'user' ? 'You' : 'Agent'} message 1`);
   });
 
@@ -555,6 +558,49 @@ describe('Real Agent workspace and run integration', () => {
     expect(screen.queryByTestId('agent-messages-error')).toBeNull();
     expect(screen.getAllByText(confirmedMessage.content, { selector: '.g-agent-message__content' })).toHaveLength(1);
     expect(screen.getAllByTestId('agent-message-item')).toHaveLength(2);
+    expect(createMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('reconciles a successful POST identity conflict from authoritative history without replaying it', async () => {
+    const activeRun = { ...failedRun, status: 'running' as const };
+    const postContent = 'Authoritative copy of the confirmed submission';
+    const contradictoryResponse = { ...initialMessage, sequence: 2, content: postContent };
+    const authoritativeMessage = {
+      ...contradictoryResponse,
+      id: '30000000-0000-4000-8000-000000000037',
+      runId: activeRun.id,
+      workspaceId: activeRun.workspaceId,
+    };
+    const authoritativePage = deferred<{ items: AgentMessage[]; nextCursor: null }>();
+    let readCount = 0;
+    const listMessages = vi.spyOn(realApiClient, 'listAgentMessages').mockImplementation(async () => {
+      readCount++;
+      if (readCount === 1) return { items: [initialMessage], nextCursor: null };
+      return authoritativePage.promise;
+    });
+    vi.spyOn(realApiClient, 'getAgentCapabilities').mockResolvedValue(followUpEnabledCapabilities());
+    vi.spyOn(realApiClient, 'getAgentRun').mockResolvedValue({ run: activeRun });
+    vi.spyOn(realApiClient, 'getAgentWorkspace').mockResolvedValue({ workspace });
+    const createMessage = vi.spyOn(realApiClient, 'createAgentMessage').mockResolvedValue({ message: contradictoryResponse });
+
+    renderReal(<AgentRunView />, '/agent/runs/' + activeRun.id);
+    fireEvent.change(await screen.findByTestId('agent-follow-up-input'), { target: { value: postContent } });
+    fireEvent.click(screen.getByTestId('send-agent-follow-up-btn'));
+
+    expect(await screen.findByTestId('agent-follow-up-error')).toBeDefined();
+    await waitFor(() => expect(listMessages).toHaveBeenCalledTimes(2));
+    expect(createMessage).toHaveBeenCalledTimes(1);
+    expect(screen.getAllByTestId('agent-message-item')).toHaveLength(1);
+    expect(screen.getByText(initialMessage.content, { selector: '.g-agent-message__content' })).toBeDefined();
+    expect(screen.queryByText(postContent)).toBeNull();
+
+    await act(async () => {
+      authoritativePage.resolve({ items: [initialMessage, authoritativeMessage], nextCursor: null });
+    });
+    expect(await screen.findByText(postContent, { selector: '.g-agent-message__content' })).toBeDefined();
+    expect(screen.getAllByText(postContent, { selector: '.g-agent-message__content' })).toHaveLength(1);
+    expect(screen.getAllByTestId('agent-message-item')).toHaveLength(2);
+    expect(screen.queryByTestId('agent-follow-up-error')).toBeNull();
     expect(createMessage).toHaveBeenCalledTimes(1);
   });
 
