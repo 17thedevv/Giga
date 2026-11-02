@@ -1,6 +1,6 @@
 # 17T-50 — Durable Agent Live Timeline and SSE Replay
 
-**Status:** Follow-up PR in progress. PR #48 was merged on 2026-11-02 at `41db8937f2b94d577c3300aeb72e672449e7e68a` before review `5733317585` was remediated. The merged PR remains unchanged. API contract v0.2 remains DRAFT.
+**Status:** Follow-up [Draft PR #51](https://github.com/17thedevv/Giga/pull/51) opened on 2026-11-02. PR #48 was merged at `41db8937f2b94d577c3300aeb72e672449e7e68a` before review `5733317585` was remediated; the merged PR remains unchanged. API contract v0.2 remains DRAFT.
 **Branch:** `fix/17t-50-timeline-review-followup`
 **Base:** `e059b09c7d979c52ad71ec57168b928c055913e7` (`origin/main` at follow-up branch creation).
 **Original PR #48 implementation commit:** `733ad11fdc3d83e2c4f8ca08b1a7c12a1f228460`.
@@ -110,8 +110,8 @@ These results apply to the new branch `fix/17t-50-timeline-review-followup`, bas
 | `node --test .agents/scripts/validate-git-workflow.test.mjs` | PASS — 6 tests |
 | `node .agents/scripts/validate-skills.mjs` | PASS — 8 skill manifests |
 | `git diff --check` | PASS — source/test changes committed; evidence update checked before commit |
-| Git workflow validator on final PR HEAD | Pending final evidence commit with `fix(web): resolve Agent timeline replay review findings` and body referencing 17T-50 |
-| GitHub Frontend CI and Git Workflow CI | Pending push and Draft PR creation; verify both on the exact final PR head. |
+| Git workflow validator on initial PR HEAD `f1b22db0c745d28eda009e05cbc7c6d157221cc2` | PASS — exact branch, title, issue reference, commit subjects, base and head |
+| GitHub Frontend CI and Git Workflow CI | Check the exact current PR #51 head; record final results after the evidence-link commit. |
 | Authenticated browser against a deployed follow-up SHA | Not run: no deployed follow-up SHA or configured Playwright runner is available; no deployment is in scope. |
 
 ### Dependency audit scope note
@@ -130,4 +130,4 @@ The API `npm audit` exits 1 with four moderate findings; this is an existing bac
 - This evidence is local frontend test evidence, not production or deployed API/browser evidence. Do not claim that deployed cookies, CORS, owner checks, SSE proxy buffering, replay persistence, or session expiry have passed based on these tests.
 - Backend event replay route and event persistence are existing behavior and were not modified. Backend reviewer Trà should confirm event field compatibility, owner scoping, and the interpretation of connection close/high-watermark replay.
 - Cloud execution, cancellation, approvals, sandbox files and artifact downloads remain capability-gated/unavailable according to the current API metadata. Timeline entries do not imply that a tool executed or that an artifact is downloadable.
-- PR #48 was merged while review `5733317585` still required changes and remains untouched. The follow-up Draft PR is the integration/re-review path; Linear 17T-50 remains In Review. Do not claim the post-review fixes are merged, and do not deploy them.
+- PR #48 was merged while review `5733317585` still required changes and remains untouched. Draft [PR #51](https://github.com/17thedevv/Giga/pull/51) is the integration/re-review path; Linear 17T-50 remains In Review. Do not claim the post-review fixes are merged, and do not deploy them.
