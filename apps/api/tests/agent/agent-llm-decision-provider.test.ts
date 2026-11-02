@@ -200,15 +200,17 @@ test('context is bounded, secret-redacted, run-scoped and separated from server 
 
 test('secret values are absent from captured model payloads for every context source', async (t) => {
   const credentials = [
-    ['AWS_SECRET_ACCESS_KEY', 'payload-secret-aws-9f08c7136a'],
-    ['STRIPE_SECRET_KEY', 'payload-secret-stripe-570ea24c19'],
-    ['SECRET_KEY', 'payload-secret-generic-2d39bc6214'],
-    ['GEMINI_API_KEY', 'payload-secret-gemini-e7014f5c32'],
-    ['AGENT_LIFECYCLE_FINALIZER_DATABASE_URL', 'payload-secret-lifecycle-361c0b09f7'],
-    ['AGENT_QUOTA_FINALIZER_DATABASE_URL', 'payload-secret-quota-8eb4a96d02'],
-    ['E2B_API_KEY', 'payload-secret-e2b-f2c6a73210'],
-    ['GITHUB_TOKEN', 'payload-secret-github-4d0e836b91'],
-    ['WORKER_LEASE_TOKEN', 'payload-secret-lease-913a4fbc52'],
+    ['AWS_SECRET_ACCESS_KEY', 'synthetic-secret-aws-9f08c7136a='],
+    ['STRIPE_SECRET_KEY', 'synthetic-secret-stripe-570ea24c19=='],
+    ['SECRET_KEY', 'synthetic-secret-generic-2d39bc6214='],
+    ['GEMINI_API_KEY', 'synthetic-secret-gemini-e7014f5c32'],
+    ['AGENT_LIFECYCLE_FINALIZER_DATABASE_URL', 'synthetic-secret-lifecycle-361c0b09f7'],
+    ['AGENT_QUOTA_FINALIZER_DATABASE_URL', 'synthetic-secret-quota-8eb4a96d02'],
+    ['E2B_API_KEY', 'synthetic-secret-e2b-f2c6a73210'],
+    ['GITHUB_TOKEN', 'synthetic-secret-github-4d0e836b91'],
+    ['WORKER_LEASE_TOKEN', 'synthetic-secret-lease-913a4fbc52'],
+    ['AUTH_TOKEN', 'synthetic-account:p@ssw0rd!'],
+    ['AWS_ACCESS_KEY_ID', 'synthetic-aws-accesskeyid-9f08c7136a'],
   ] as const;
   const assignmentText = credentials.map(([name, value]) => `${name}=${value}`).join('\n');
   const structuredCredentials = Object.fromEntries(credentials);
@@ -264,7 +266,7 @@ test('secret values are absent from captured model payloads for every context so
   }
 });
 
-test('oversized PEM private keys are redacted before truncation reaches the model payload', async () => {
+test('oversized PEM private keys and truncated PGP keys are redacted before model payload', async () => {
   const privateKeyBody = 'PRIVATE_KEY_BODY_MUST_NOT_REACH_MODEL_' + 'A'.repeat(20 * 1024);
   const oversizedPem = `-----BEGIN PRIVATE KEY-----\n${privateKeyBody}\n-----END PRIVATE KEY-----`;
   assert.ok(Buffer.byteLength(oversizedPem, 'utf8') > 16 * 1024);
@@ -281,6 +283,36 @@ test('oversized PEM private keys are redacted before truncation reaches the mode
   assert.ok(userContext.includes('[REDACTED_PRIVATE_KEY]'));
   assert.ok(userContext.includes('[TRUNCATED]'));
   assert.ok(Buffer.byteLength(userContext, 'utf8') <= 32 * 1024);
+
+  // Unclosed truncated PGP private key block without END marker
+  const fakePgp = makeEngine([modelResult('{"kind":"complete","summary":"Safe answer"}')]);
+  const agentPgp = new LLMBackedAgentDecisionProvider(fakePgp.engine, createDefaultToolRegistry());
+  const pgpSecret = 'PGP_SECRET_KEY_BODY_MUST_NOT_LEAK_' + 'B'.repeat(500);
+  const truncatedPgp = `-----BEGIN PGP PRIVATE KEY BLOCK-----\n${pgpSecret}`;
+  assert.equal((await agentPgp.decide(context('execute', { task: `Inspect PGP: ${truncatedPgp}` }))).kind, 'complete');
+  const pgpPayload = JSON.stringify(fakePgp.provider.requests[0]!.messages);
+  assert.equal(pgpPayload.includes('-----BEGIN PGP PRIVATE KEY BLOCK-----'), false);
+  assert.equal(pgpPayload.includes('PGP_SECRET_KEY_BODY_MUST_NOT_LEAK'), false);
+});
+
+test('standalone AIza keys and base64-padded assignments are redacted while empty assignments preserve following keys', async () => {
+  const fake = makeEngine([modelResult('{"kind":"complete","summary":"Safe answer"}')]);
+  const agent = new LLMBackedAgentDecisionProvider(fake.engine, createDefaultToolRegistry());
+  const aizaKey = ['AIza', 'SySynthetic', 'TestKey', '9'.repeat(15), 'XYZ'].join('');
+  const taskText = [
+    `Found standalone key: ${aizaKey} in log output`,
+    'AWS_SECRET_ACCESS_KEY=secretWithSingleEquals123=',
+    'STRIPE_SECRET_KEY=secretWithDoubleEquals456==',
+    'EMPTY_API_KEY=',
+    'SAFE_CONFIG_VAR=safe_value_must_survive',
+  ].join('\n');
+
+  assert.equal((await agent.decide(context('execute', { task: taskText }))).kind, 'complete');
+  const payload = JSON.stringify(fake.provider.requests[0]!.messages);
+  assert.equal(payload.includes(aizaKey), false, 'standalone AIza key must be redacted');
+  assert.equal(payload.includes('secretWithSingleEquals123'), false, 'single equals secret must be redacted');
+  assert.equal(payload.includes('secretWithDoubleEquals456'), false, 'double equals secret must be redacted');
+  assert.ok(payload.includes('safe_value_must_survive'), 'safe subsequent variable must not be swallowed');
 });
 
 test('large attacker-controlled strings are bounded before shared redaction work', async () => {
