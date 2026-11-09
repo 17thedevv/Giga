@@ -307,32 +307,20 @@ The proxy-only command uses `--no-deps` so it cannot select a different API imag
 
 ## Verification and acceptance checklist
 
-An earlier container rehearsal passed on 2026-11-02 at commit
-`2cf199975100c4cde96ad704ea9fb5e43c59394e`, Docker 28.0.4, Compose 2.38.2,
-Node 22.23.4, PostgreSQL 16.15, on an Ubuntu 24.04 GitHub runner. Four guard
-tests, 14 HTTP/container checks, and five local-TLS checks passed, including
-rejection of unrecognized `Host` headers. The reports record zero live provider
-calls. The browser runner also stops Chrome's Linux process group and retries
-temporary profile cleanup. See the [run](https://github.com/17thedevv/Giga/actions/runs/41409878121),
-[redacted artifact](https://github.com/17thedevv/Giga/actions/runs/41409878121/artifacts/13124649078)
-and the [acceptance/evidence record](../../evidence/17T-92-local-iaas.md).
-For current results use the checks on the PR's proposed revision. The Docker
-workflow exercises production auto-migrate on an empty database and on a
-database at migration 016 with existing data and legacy grants. It also
-revokes each CRUD permission independently, expects startup rejection, then
-reuses the HTTP volume with the HTTPS configuration and checks preserved data.
+The container rehearsal on 2026-11-09 used implementation SHA
+`01c21d242614120dfcf9ec90b12429817fbdd2a7`. Docker passed 6 configuration
+checks, 17 HTTP/container checks and 5 HTTPS checks. Backend CI passed
+652 PostgreSQL-backed tests with zero skips, and Git Workflow passed.
+See the [acceptance record](../../evidence/17T-92-local-iaas.md) and the
+[redacted smoke reports](https://github.com/17thedevv/Giga/actions/runs/42545472255/artifacts/13643176739).
 
-The first HTTP smoke used Chrome against loopback HTTP. HTTPS auth/cookie checks
-used a Node HTTP client with only the ephemeral localhost certificate trusted;
-public HTTPS was not tested. The Windows host itself has no Docker/WSL engine.
-
-The exact-SHA sample after the smoke workload was API 18.64 MiB, Nginx
-4.402 MiB, and PostgreSQL 48.39 MiB for HTTP; 19.92, 5.023 and 31.62 MiB for
-the HTTPS rehearsal. The PostgreSQL fixture database occupied 9,804,823 bytes.
-Runtime image sizes were API 249,954,915 bytes, PostgreSQL 435,423,250 bytes,
-and Nginx 62,313,481 bytes. These are end-of-smoke samples, not peak-load
-measurements or VM-sizing evidence. The full measurement and SSE timing detail
-is in the linked evidence record.
+The suite verifies production auto-migrate on a fresh database and an upgrade
+from migration 016, each required CRUD grant, separate host allowlists, and an
+HTTP-to-HTTPS switch using the original credentials and volume. The Chrome
+checks run against loopback HTTP. The HTTPS client trusts only the disposable
+localhost certificate for the rehearsal. SSE timing comes from a deterministic
+fixture with zero live provider calls. The acceptance record lists the resource
+measurements and open gates.
 
 For the local HTTP smoke, use a dedicated project; the harness deliberately
 creates test rows, restarts containers and temporarily substitutes a fixture
@@ -385,9 +373,29 @@ For browser acceptance, use Real mode and inspect requests on the exact tested
 origin. Register/login, refresh, navigate directly to a deep link, create and
 reopen a conversation, log out, and verify a second tab cannot reuse the old
 session. Confirm cookie attributes and foreign-origin mutation rejection. A
-human peer must independently repeat startup or a recovery/troubleshooting
-exercise before cross-training is accepted. Record NOT RUN when these have not
-actually happened.
+human peer records their result in the independent rehearsal below.
+
+### D16 independent startup and restore
+
+Use a clean checkout of the proposed PR revision, a new Compose project with
+an empty volume, and disposable data. One of Trà and Thư performs the drill
+independently. The other verifies the evidence and records their review.
+
+1. Record the commit SHA, UTC timestamp, operator, Docker/Compose versions and
+   project name. Generate a local env, build and start the stack, and confirm
+   healthy services and a successful `/health`. Keep the same Compose project
+   for the entire exercise.
+2. Create a disposable account and conversation. Record only the synthetic
+   fixture identifier or title. Restart the stack and verify it can still
+   open the conversation.
+3. Follow [Backup and recovery](#backup-and-recovery) to create a private dump
+   and restore it to the fresh `giga_restore_test_*` database. Use the exact
+   database name returned by the script. Verify the fixture row and run the
+   documented role check against the restored database.
+4. The verifier checks the SHA, health and restart results, restore target,
+   fixture row and role check. Record operator and verifier, sanitized command
+   results, and PASS/FAIL in the evidence record. D16 remains pending until
+   both people have performed their parts.
 
 Resource observation commands (redact host paths and avoid environment dumps):
 

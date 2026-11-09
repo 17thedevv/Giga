@@ -1,148 +1,99 @@
 # Local IaaS Docker evidence — 17T-92
 
-Tracking: [17T-92](https://linear.app/17thedev/issue/17T-92/prepare-local-iaas-ready-docker-compose-infrastructure).
-Runbook: [Local IaaS-ready Docker stack](../cloud/runbooks/IAAS_LOCAL_DOCKER_V0.1.md).
-Date: 2026-11-02, Asia/Bangkok (+07:00).
+Tracking: [17T-92](https://linear.app/17thedev/issue/17T-92/prepare-local-iaas-ready-docker-compose-infrastructure) · [Draft PR #49](https://github.com/17thedevv/Giga/pull/49) · [Local runbook](../cloud/runbooks/IAAS_LOCAL_DOCKER_V0.1.md)
 
-## Scope and source
+## Verified revision
 
-- Scope: local Nginx, co-hosted Hono/React, PostgreSQL 16, role separation,
-  backup/recovery and deterministic Docker smoke CI. No cloud resources,
-  deployment, external credential change or live provider/sandbox call.
-- P1/P2 Security Review Hardening:
-  - P1: Privileged credentials (`DB_PASSWORD_MIGRATION`, `DB_PASSWORD_LIFECYCLE`) removed
-    from long-lived API container. One-shot `migrate` service (`infra/docker/migrate.mjs`)
-    runs exclusively with `DB_PASSWORD_MIGRATION` before API start. API starts only after
-    migration success (`condition: service_completed_successfully`), receives only
-    unprivileged `DB_PASSWORD_API`, runs with `MIGRATION_MODE: external`, and does not
-    initialize lifecycle finalizer pool while Agent Cloud execution is disabled. Startup
-    fails closed on missing schema, version 16, or excessive privileges.
-  - P2: Future-table default privileges restricted (`REVOKE ALL ON TABLES FROM giga_api_runtime`).
-    Replaced fail-open default grants with explicit grants on existing application tables.
-    PostgreSQL regression coverage added to `roles-check.sql` verifying that newly created
-    sensitive tables are denied to `giga_runtime` unless explicitly authorized.
-  - P2 (Sequences): Sequence least-privilege enforced. Replaced historical fail-open `GRANT ALL`
-    on sequences in migration 015 with `GRANT USAGE, SELECT`. Configured post-migration hardening
-    in `migrate.mjs` to revoke excessive `UPDATE` (which enables `setval()`) on existing databases
-    while preserving `USAGE` and `SELECT`. Verified default sequence privileges for `giga_migration`
-    grant only `USAGE, SELECT` (no `UPDATE`). Added fail-closed sequence check to production startup
-    and regression tests in `roles-check.sql` and `smoke.mjs`.
-- Base inspected: `463646a44244b1aabfc0c597612f2c102d67f5b9`.
-- Reviewed HEAD before fix: `6e8c10ca87c8b4b1aef2c8efa2936c3fe0bd2923`.
-- Sequence least-privilege implementation commit: `f4f19d0ba018c87d8b2bb8f2df10ace768395ebd`.
-- Exact commit tested by CI: `f4f19d0ba018c87d8b2bb8f2df10ace768395ebd`.
-- [Draft PR #49](https://github.com/17thedevv/Giga/pull/49).
-- Exact CI Validation Runs for Tested Commit (`f4f19d0ba018c87d8b2bb8f2df10ace768395ebd`):
-  - Compose Smoke: [Run #41421847783](https://github.com/17thedevv/Giga/actions/runs/41421847783) (PASS; artifact `docker-smoke-f4f19d0ba018c87d8b2bb8f2df10ace768395ebd`)
-  - Backend CI: [Run #41421847594](https://github.com/17thedevv/Giga/actions/runs/41421847594) (PASS)
-  - Git Workflow: [Run #41421847582](https://github.com/17thedevv/Giga/actions/runs/41421847582) (PASS)
-- Note on Commit Traceability: In accordance with repository guidelines, this evidence document records the exact code and test commit tested by CI (`f4f19d0b...`); any subsequent documentation sync commit will carry its own Git tree hash on branch `build/17t-92-local-iaas-compose`.
-- Intended owner: Trà; intended reviewer/cross-trainee: Thư, from the parent
-  deployment task. Agent work is not attributed to either human. Review and
-  cross-training are **NOT RUN**.
+- Implementation SHA: `01c21d242614120dfcf9ec90b12429817fbdd2a7`. The smoke artifact records this SHA in both reports.
+- Environment: Ubuntu 24.04 GitHub runner, Docker 28.0.4, Compose 2.38.2, Node 22.23.4, PostgreSQL 16.15 and Chrome 156.0.8078.79.
+- Reports captured on 2026-11-09 at 08:27:35 (HTTP) and 08:28:02 (HTTPS) Asia/Bangkok. UTC timestamps: `2026-11-09T01:27:35.417Z` and `2026-11-09T01:28:02.138Z`.
+- This document records the tested implementation revision. See the [PR checks](https://github.com/17thedevv/Giga/pull/49/checks) for the status of subsequent documentation commits.
 
-## Local execution limitation
+| Workflow | Result | Evidence |
+| --- | --- | --- |
+| Backend CI | PASS. 652 tests with real PostgreSQL, 0 skipped | [Backend run](https://github.com/17thedevv/Giga/actions/runs/42545472226) |
+| Local Docker Compose smoke | PASS. Clean image build, 6 config checks, 17 HTTP/container checks, 5 HTTPS checks | [Docker run](https://github.com/17thedevv/Giga/actions/runs/42545472255) · [Redacted reports](https://github.com/17thedevv/Giga/actions/runs/42545472255/artifacts/13643176739) |
+| Validate Git Workflow | PASS on the tested implementation revision | [Git workflow run](https://github.com/17thedevv/Giga/actions/runs/42545804222) |
 
-Preflight on the Windows host found no `docker`, Podman/containerd CLI, Docker
-installation/service/daemon, or installed WSL distribution. `wsl --status` and
-`wsl --list --verbose` reported WSL is not installed. Host Node was 24.20.0,
-not the target Node 22 runtime. No software was installed and no service state
-was changed to work around this. Actual Docker acceptance is therefore blocked
-on this host. Actual container acceptance was run by the PR's Ubuntu 24.04 CI
-job with Docker; the Windows limitation does not imply that the container tests
-were skipped.
+The artifact contains the sanitized HTTP and HTTPS reports and expires on
+2026-11-23. Fixture SSE made zero live provider calls. The Chrome tests used
+loopback HTTP. The HTTPS client verified a disposable localhost certificate
+using explicit trust. Public HTTPS, live provider acceptance and cloud recovery
+remain separate release gates.
+
+## Migration 017 and review fixes
+
+- Migration 015 retains its original SQL. Forward migration 017 repairs legacy
+  grants in the shared runner used by production auto-migrate and the one-shot
+  Compose migration service. The API container receives the runtime credential
+  alone. Migration history is readable and runtime writes are denied.
+- Migration 017 limits future-table defaults and removes sequence `UPDATE`
+  while preserving `USAGE` and `SELECT`. Restricted quota and lifecycle grants
+  remain in place. Startup checks each required CRUD privilege on the ordinary
+  application tables.
+- Each environment file selects its own Nginx allowlist. `--from` creates a new
+  env file for the selected origin and profile while preserving all five
+  PostgreSQL credentials. The smoke switches the existing volume to HTTPS and
+  verifies that the HTTP conversation is still present.
 
 ## Acceptance matrix
 
-Local checks executed on Windows / Node 24.20.0 before publication:
+| ID | Check | Result | Evidence |
+| --- | --- | --- | --- |
+| D01 | Clean Node 22 image build with API, web bundle and contracts | PASS | [Build step](https://github.com/17thedevv/Giga/actions/runs/42545472255) |
+| D02 | Fresh Compose config, migration job, readiness and `/health` | PASS | [Compose run](https://github.com/17thedevv/Giga/actions/runs/42545472255) |
+| D03 | Frontend assets and deep links, API JSON routing | PASS | [HTTP report](https://github.com/17thedevv/Giga/actions/runs/42545472255/artifacts/13643176739) |
+| D04 | Register, login, authenticated routes and logout, including rejected old session | PASS | [HTTP report](https://github.com/17thedevv/Giga/actions/runs/42545472255/artifacts/13643176739) |
+| D05 | Missing/foreign Origin rejected and cookie attributes match HTTP/HTTPS profile | PASS | [HTTP and HTTPS reports](https://github.com/17thedevv/Giga/actions/runs/42545472255/artifacts/13643176739) |
+| D06 | Account, conversation and session data survive restart | PASS | [HTTP report](https://github.com/17thedevv/Giga/actions/runs/42545472255/artifacts/13643176739) |
+| D07 | Incremental SSE through Nginx using a deterministic fixture | PASS | [SSE timing](https://github.com/17thedevv/Giga/actions/runs/42545472255/artifacts/13643176739) |
+| D08 | Real role logins, denied privileged writes and finalizer access | PASS | [HTTP report](https://github.com/17thedevv/Giga/actions/runs/42545472255/artifacts/13643176739) |
+| D09 | Backup and restore preserve fixture rows, ownership and grants in a fresh disposable database | PASS | [HTTP report](https://github.com/17thedevv/Giga/actions/runs/42545472255/artifacts/13643176739) |
+| D10 | Agent cloud execution stays unavailable with Chat disabled and with fixture Chat enabled | PASS | [HTTP report](https://github.com/17thedevv/Giga/actions/runs/42545472255/artifacts/13643176739) |
+| D11 | Invalid configuration, missing migrations and excessive role membership fail closed | PASS | [HTTP report](https://github.com/17thedevv/Giga/actions/runs/42545472255/artifacts/13643176739) |
+| D12 | PostgreSQL and API have no host-published ports | PASS | [HTTP report](https://github.com/17thedevv/Giga/actions/runs/42545472255/artifacts/13643176739) |
+| D13 | Record container resources, image size and database size | PASS | [Reports](https://github.com/17thedevv/Giga/actions/runs/42545472255/artifacts/13643176739) |
+| D14 | Chrome protected deep link, login, reload and logout. TLS verified separately | PASS | [Reports](https://github.com/17thedevv/Giga/actions/runs/42545472255/artifacts/13643176739) |
+| D15 | Unknown `Host` rejected at HTTP and HTTPS ingress | PASS | [Reports](https://github.com/17thedevv/Giga/actions/runs/42545472255/artifacts/13643176739) |
+| D16 | Independent peer starts the stack and restores a backup into a disposable database. The other peer verifies the result | PENDING | [D16 procedure](../cloud/runbooks/IAAS_LOCAL_DOCKER_V0.1.md#d16-independent-startup-and-restore) |
+| D17 | Migration job exits successfully and API restarts with only runtime credentials | PASS | [HTTP report](https://github.com/17thedevv/Giga/actions/runs/42545472255/artifacts/13643176739) |
+| D18 | New tables require an explicit runtime grant | PASS | [Role checks](https://github.com/17thedevv/Giga/actions/runs/42545472255/artifacts/13643176739) |
+| D19 | Legacy sequence ACLs repaired. New sequence defaults deny `UPDATE` and allow `USAGE, SELECT` | PASS | [Role and upgrade checks](https://github.com/17thedevv/Giga/actions/runs/42545472255/artifacts/13643176739) |
+| D20 | Production auto startup applies 017 on empty PostgreSQL and upgrades a populated 016 database with legacy ACLs. Rerun applies no migrations | PASS | [Migration regression](https://github.com/17thedevv/Giga/actions/runs/42545472255/artifacts/13643176739) |
+| D21 | Each missing `SELECT`, `INSERT`, `UPDATE` or `DELETE` grant independently blocks startup | PASS | [Migration regression](https://github.com/17thedevv/Giga/actions/runs/42545472255/artifacts/13643176739) |
+| D22 | Two origins get distinct allowlists and the source env and all database credentials survive reconfiguration | PASS | [Config checks](https://github.com/17thedevv/Giga/actions/runs/42545472255) |
+| D23 | HTTP volume starts under the HTTPS profile with the existing credentials and still contains the HTTP fixture conversation | PASS | [HTTPS switch step](https://github.com/17thedevv/Giga/actions/runs/42545472255) |
 
-| Command | Observed result |
-| --- | --- |
-| `npm ci --prefix apps/api --no-audit --no-fund` and equivalent `apps/web` command | PASS; lockfiles unchanged; host npm reported install-script policy warnings |
-| `npm run typecheck --prefix apps/api` and `npm run build --prefix apps/api` | PASS, exit 0 |
-| `npm run build --prefix apps/web` | PASS, exit 0; includes TypeScript check and Vite production bundle |
-| API `npx tsx --test --test-concurrency=1 tests/config.test.ts tests/server.test.ts tests/web-ui.test.ts tests/health.test.ts tests/csrf.test.ts tests/auth-negative.test.ts tests/agent/agent-contract.test.ts tests/agent/agent-boundaries.test.ts` | 52 PASS, 4 PostgreSQL-specific SKIP, 0 FAIL; exit 0; includes externally-migrated mode and disabled agent cloud tests |
-| `node --test infra/docker/tests/config.test.mjs` | 5 PASS, 0 SKIP, exit 0; validates API runtime unprivileged config, migrate container credential isolation, HTTP/TLS profiles, and disabled Agent guards |
-| `node --check` on infrastructure JavaScript; Git Bash `bash -n` on shell scripts | PASS, exit 0 |
-| `node infra/docker/configure.mjs --local` | PASS; generated ignored credentials, no secret values recorded |
-| `git diff --check` | PASS |
+## Measurements
 
-The exact-SHA Ubuntu run completed with a successful clean image build, Compose
-startup, 14 HTTP smoke checks and 5 HTTPS rehearsal checks. The artifact is
-redacted and retained until 2026-11-16.
-The reports were captured at 2026-11-02T08:02:10.026Z (HTTP) and
-2026-11-02T08:02:35.612Z (HTTPS), or 15:02 Asia/Bangkok.
+The fixture stream started at 1 ms, delivered deltas at 612, 1,214 and 1,817 ms,
+and completed at 1,821 ms. These timings demonstrate delivery through the
+proxy using a deterministic adapter.
 
-| ID | Check | Provider/data | Result | Evidence |
-| --- | --- | --- | --- | --- |
-| D01 | No-cache Node 22 multi-stage image build, contracts and runtime Web bundle | No provider | PASS | [Run #41409878121](https://github.com/17thedevv/Giga/actions/runs/41409878121) |
-| D02 | Compose startup, PostgreSQL/API readiness and `/health` | Real PostgreSQL containers | PASS | [Run #41409878121](https://github.com/17thedevv/Giga/actions/runs/41409878121) |
-| D03 | Frontend assets and deep links; API-first JSON routing | Built production bundle | PASS | [Run #41409878121](https://github.com/17thedevv/Giga/actions/runs/41409878121) |
-| D04 | Register/login/me/logout, old-session rejection and protected routes | Disposable accounts | PASS | [Chrome + HTTP smoke](https://github.com/17thedevv/Giga/actions/runs/41409878121/artifacts/13124649078) |
-| D05 | CSRF missing/foreign Origin rejection and HTTP/HTTPS cookie attributes | HTTP and TLS profiles | PASS | [HTTP/HTTPS reports](https://github.com/17thedevv/Giga/actions/runs/41409878121/artifacts/13124649078) |
-| D06 | Account/conversation/session persistence after database/API restart | Disposable PostgreSQL data | PASS | [HTTP smoke](https://github.com/17thedevv/Giga/actions/runs/41409878121/artifacts/13124649078) |
-| D07 | Separated SSE deltas arrive before completion through Nginx | Deterministic injected provider; **not live AI** | PASS | Started 1 ms; deltas 610/1,213/1,815 ms; completed 1,819 ms; [report](https://github.com/17thedevv/Giga/actions/runs/41409878121/artifacts/13124649078) |
-| D08 | Restricted quota/lifecycle writes and finalizer access denied to runtime | Real PostgreSQL role logins/grants | PASS | [Role check](https://github.com/17thedevv/Giga/actions/runs/41409878121/artifacts/13124649078) |
-| D09 | Backup and new disposable restore preserve rows, ownership and grants | Real PostgreSQL dump/restore | PASS | [HTTP smoke](https://github.com/17thedevv/Giga/actions/runs/41409878121/artifacts/13124649078) |
-| D10 | Agent/cloud execution unavailable with Chat disabled and explicit Chat-on fixture | No E2B allocation; external provider transport blocked | PASS | [HTTP smoke](https://github.com/17thedevv/Giga/actions/runs/41409878121/artifacts/13124649078) |
-| D11 | Missing/invalid credentials and origin fail safely; production role validation stays active | Negative config and role fixtures | PASS | [Run #41409878121](https://github.com/17thedevv/Giga/actions/runs/41409878121) |
-| D12 | PostgreSQL/API have no host-published ports; internal DB network verified | Docker container/network inspection | PASS | [HTTP smoke](https://github.com/17thedevv/Giga/actions/runs/41409878121/artifacts/13124649078) |
-| D13 | Container memory, CPU, image sizes and database size measured | Smoke workload; idle snapshot | PASS | Values below and in [reports](https://github.com/17thedevv/Giga/actions/runs/41409878121/artifacts/13124649078) |
-| D14 | Real browser login, refresh, protected deep link and logout; HTTPS client cookie/CSRF checks | Chrome on local HTTP; Node HTTPS client on disposable TLS | PASS | [HTTP/HTTPS reports](https://github.com/17thedevv/Giga/actions/runs/41409878121/artifacts/13124649078) |
-| D15 | Unknown `Host` rejected on HTTP and verified HTTPS ingress before proxying/redirecting | Explicit raw HTTP/HTTPS Host headers | PASS | [HTTP/HTTPS reports](https://github.com/17thedevv/Giga/actions/runs/41409878121/artifacts/13124649078) |
-| D16 | Independent peer startup/recovery exercise | Human cross-training | NOT RUN | Reviewer exercise remains open |
-| D17 | P1: One-shot migration job succeeds, API container receives runtime credential only; restart needs no migration secrets | Real PostgreSQL + Compose inspection | PASS | [Run #41421847783](https://github.com/17thedevv/Giga/actions/runs/41421847783) |
-| D18 | P2: Restrict future-table default privileges and verify inaccessible without explicit grant | Real PostgreSQL role check | PASS | [Run #41421847783](https://github.com/17thedevv/Giga/actions/runs/41421847783) |
-| D19 | P2: Sequence least privilege: deny UPDATE/setval to runtime; preserve USAGE/SELECT; upgrade repair and new sequence defaults | Real PostgreSQL sequence checks | PASS | [Run #41421847783](https://github.com/17thedevv/Giga/actions/runs/41421847783) |
+| Profile | API memory / CPU | Nginx memory / CPU | PostgreSQL memory / CPU |
+| --- | --- | --- | --- |
+| Loopback HTTP | 18.93 MiB / 0.04% | 4.25 MiB / 0.00% | 66.29 MiB / 0.04% |
+| Loopback HTTPS | 20.22 MiB / 0.00% | 4.656 MiB / 0.00% | 27.09 MiB / 0.03% |
 
-Infrastructure guard tests: 4 PASS on Node 22.23.4. Local API/Web checks above
-remain separately reported: 51 API tests passed, 4 real-PostgreSQL tests were
-skipped on Windows, and the infrastructure guard had 4 PASS.
+These snapshots were taken after the smoke workload. The memory limits are
+768 MiB for API, 128 MiB for Nginx and 512 MiB for PostgreSQL. The image sizes
+were 249,963,108 bytes (API and migration service share one image),
+435,423,250 bytes (PostgreSQL), and 62,313,481 bytes (Nginx). The HTTP smoke
+database size was 9,829,399 bytes. Peak load and minimum VM size require
+separate measurement. [Resource reports](https://github.com/17thedevv/Giga/actions/runs/42545472255/artifacts/13643176739)
 
-Run #7 initially stopped at the Host rejection assertion: Node's Fetch API
-ignored the supplied `Host` header, so the test did not send the intended
-negative request. The harness was changed to use `node:http`; run #8 passed the
-HTTP and HTTPS Host rejection checks. Run #9 then reached Chrome profile cleanup
-but failed when a child process held the temporary directory open (`ENOTEMPTY`).
-The browser runner now stops Chrome's Linux process group and retries profile
-removal; run #10 passed the complete HTTP and HTTPS suites on the exact SHA above.
+## Local checks for the implementation revision
 
-## Evidence capture rules
+Windows / Node 24.20.0: API typecheck passed. The focused API config, server
+and migration suite passed 19 tests with 2 real-PostgreSQL tests skipped.
+The 6 infrastructure config tests and JavaScript syntax checks passed.
+The container runs above used the Ubuntu CI runner because the Windows
+checkout had no Docker engine.
 
-Record ISO-8601 timestamps, exact source SHA, Docker/Compose/Node/PostgreSQL
-versions, command exit codes and assertion/timing summaries. CI artifacts may
-contain the sanitized smoke report and resource measurements. They must not
-contain generated `.env` files, cookies, raw request bodies with passwords,
-database URLs, database dumps, TLS keys, provider keys or environment dumps.
-Use test account aliases, not personal data. A successful fixture stream proves
-transport behavior only; label any future live Gemini test separately.
+## Open M0 gates
 
-## Measured resources and outstanding gates
-
-- Host inventory observed by preflight: 12 logical CPUs and approximately
-  16 GiB memory; this is not a measured stack requirement.
-- Run time (2026-11-02 15:02 Asia/Bangkok): Docker 28.0.4, Compose 2.38.2,
-  Node 22.23.4, PostgreSQL 16.15,
-  Chrome 156.0.8078.47. No-cache multi-stage build, PostgreSQL 16.15 migration,
-  role, auth, HTTPS, and restore checks completed.
-- End-of-run Docker samples: HTTP API 18.64 MiB / 0.00% CPU, Nginx 4.402 MiB /
-  0.00%, PostgreSQL 48.39 MiB / 0.02%; HTTPS API 19.92 MiB / 0.00%, Nginx
-  5.023 MiB / 0.00%, PostgreSQL 31.62 MiB / 0.03%. Container memory limits are
-  API 768 MiB, Nginx 128 MiB, PostgreSQL 512 MiB. These are brief smoke-test
-  samples, not peak-load or VM-sizing results.
-- Image sizes: API 249,954,915 bytes, PostgreSQL 435,423,250 bytes, Nginx
-  62,313,481 bytes. Smoke database size: 9,804,823 bytes.
-- No live provider requests were made. SSE exercised a deterministic adapter
-  through the real PostgreSQL/API/Nginx container path. The HTTP test used
-  Chrome; HTTPS auth/cookie checks used a Node HTTP client trusting only the
-  ephemeral localhost test certificate. No public certificate or hostname was
-  tested.
-- No DigitalOcean provisioning, public HTTPS test, live AI call, E2B allocation,
-  external secret change, default-branch write or merge was performed.
-- INV-05 production managed-storage policy needs a reviewed decision before
-  future self-managed VM acceptance. Local named-volume persistence does not
-  prove host-loss recovery.
-- Render's existing deployment evidence/security follow-ups remain historical
-  and unchanged; this task does not resolve its credential incident.
-- The API v0.1 contract remains DRAFT. Human peer review, browser acceptance,
-  complete new-host recovery and cloud preflight remain open.
+The automated local infrastructure gate passed on the verified revision.
+Independent GitHub approval and D16 are pending. The authorized reviewer and
+operators record their own evidence. Merge and issue closure follow the
+release roadmap after approval, D16 and current PR checks pass. PR #49 is
+Draft and 17T-92 is In Progress as of 2026-11-09.
