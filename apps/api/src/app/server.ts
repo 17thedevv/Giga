@@ -4,7 +4,8 @@ import { createApp } from './create-app.js';
 import { loadConfig, type AppConfig } from './config.js';
 import { closeDatabasePool, createDatabasePool } from '../db/client.js';
 import { logSystemEvent } from './observability.js';
-import { RUNTIME_ACL_MIGRATION_VERSION, RUNTIME_CRUD_TABLES, runMigrations } from '../db/migrate.js';
+import { RUNTIME_ACL_MIGRATION_VERSION, runMigrations } from '../db/migrate.js';
+import { findMissingRuntimeTablePrivilege } from '../db/runtime-privileges.js';
 import { createChatEngine } from '../modules/llm/chat-bootstrap.js';
 import type { ProviderTransport } from '../modules/llm/providers/gemini/gemini-provider.js';
 import type { LLMEngine } from '../modules/llm/engine.js';
@@ -107,16 +108,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<{
       }
 
       // 4. Fail-closed check: runtime privileges on application tables
-      const appTableCheck = await pool.query<{ table_name: string; privilege: string }>(
-        `SELECT t.table_name, p.privilege
-         FROM unnest($1::text[]) AS t(table_name)
-         CROSS JOIN (VALUES ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE')) AS p(privilege)
-         WHERE has_table_privilege(current_user, to_regclass(format('public.%I', t.table_name)), p.privilege)
-               IS DISTINCT FROM TRUE
-         LIMIT 1`,
-        [RUNTIME_CRUD_TABLES],
-      );
-      const missingPrivilege = appTableCheck.rows[0];
+      const missingPrivilege = await findMissingRuntimeTablePrivilege(pool);
       if (missingPrivilege) {
         throw new Error(`Database startup validation failed: runtime role lacks ${missingPrivilege.privilege} on public.${missingPrivilege.table_name}.`);
       }

@@ -3,13 +3,16 @@ import { serve } from '@hono/node-server';
 import { clearTimeout, setTimeout } from 'node:timers';
 import type pg from 'pg';
 import { RUNTIME_ACL_MIGRATION_VERSION } from '../db/migrate.js';
+import { findMissingRuntimeTablePrivilege } from '../db/runtime-privileges.js';
 
 // Check the required ACL migration explicitly while allowing later migrations.
 const compatibility = `SELECT COALESCE(bool_or(version = $1), false) AS compatible,
+  has_database_privilege(current_user, current_database(), 'CONNECT') AS "canConnect",
   max(version)::int AS version FROM public.schema_migrations`;
 
 interface Compatibility {
   compatible: boolean;
+  canConnect: boolean;
   version: number | null;
 }
 
@@ -88,7 +91,12 @@ export function createOperationsApp(pool: pg.Pool, chatConfigured: boolean, dead
   const app = new Hono();
   const compatibilityCheck = async (client: pg.PoolClient) =>
     (await client.query<Compatibility>(compatibility, [RUNTIME_ACL_MIGRATION_VERSION])).rows[0];
-  const ready = singleFlight(() => readOnly(pool, compatibilityCheck), deadlineMs);
+  const ready = singleFlight(() => readOnly(pool, async client => {
+    const schema = await compatibilityCheck(client);
+    // A pooled connection can survive REVOKE CONNECT. Check the live ACLs
+    // without touching application rows or issuing test writes.
+    return schema?.compatible && schema.canConnect && !(await findMissingRuntimeTablePrivilege(client));
+  }), deadlineMs);
   const snapshot = singleFlight(() => readOnly(pool, async client => {
     const schema = await compatibilityCheck(client);
     if (!schema?.compatible) return undefined;
@@ -106,7 +114,7 @@ export function createOperationsApp(pool: pg.Pool, chatConfigured: boolean, dead
     c.header('Cache-Control', 'no-store');
     await next();
   });
-  app.get('/ready', async c => (await ready())?.compatible
+  app.get('/ready', async c => await ready()
     ? c.json({ status: 'ready' }, 200)
     : c.json({ status: 'not_ready' }, 503));
   app.get('/ops', async c => {

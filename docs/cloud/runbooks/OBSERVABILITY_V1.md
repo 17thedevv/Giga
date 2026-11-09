@@ -18,6 +18,7 @@ Docker rotates each service's logs at 10 MB with at most three files. The collec
 | --- | --- | --- | --- |
 | Required configuration, runtime role and migration 017 present | 200 | 200 | Run the collector for aggregate signals |
 | PostgreSQL unavailable after startup | 200 while the process is up | 503 | Inspect PostgreSQL and runtime connectivity |
+| Required database CONNECT or application-table CRUD revoked after startup | 200 while the process is up | 503 | Compare effective grants with the startup policy and restore the approved grants |
 | Schema missing migration 017 | Startup may fail | 503 if API is running | Review migration job and compatible image |
 | Required configuration invalid | API startup fails | Unreachable | Validate the private env file and role grants |
 | Optional Chat or Agent Cloud disabled | 200 | 200 | Review `chatConfigured` and `agentCloud` locally |

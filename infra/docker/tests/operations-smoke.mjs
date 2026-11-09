@@ -24,6 +24,10 @@ function probe(path) {
 }
 const live = () => fetch('http://localhost:8080/health', { signal: AbortSignal.timeout(5000) });
 const backup = name => run('sh', ['infra/docker/backup.sh', '--local', join(temporary, name)]);
+const changeAcl = sql => docker([...compose, 'exec', '-T', 'postgres',
+  'psql', '-X', '-v', 'ON_ERROR_STOP=1', '-U', 'giga_admin', '-d', 'giga', '-c', sql]);
+const apiStartedAt = () => docker(['inspect', '--format', '{{.State.StartedAt}}',
+  docker([...compose, 'ps', '-q', 'api']).trim()]).trim();
 const checks = [];
 try {
   assert.deepEqual(probe('ready'), { code: 200, body: { status: 'ready' } });
@@ -57,6 +61,24 @@ try {
     assert.ok(matches, 'Request ID must correlate across ' + service + ' logs');
   }
   checks.push('Correlated request ID across API and Nginx');
+
+  const startedAt = apiStartedAt();
+  for (const grant of [
+    ...['SELECT', 'INSERT', 'UPDATE', 'DELETE'].map(privilege => privilege + ' ON public.sessions'),
+    'CONNECT ON DATABASE giga',
+  ]) {
+    const role = grant.startsWith('CONNECT') ? 'giga_runtime' : 'giga_api_runtime';
+    changeAcl(`REVOKE ${grant} FROM ${role}`);
+    try {
+      assert.deepEqual(probe('ready'), { code: 503, body: { status: 'not_ready' } }, grant);
+      assert.equal((await live()).status, 200);
+    } finally {
+      changeAcl(`GRANT ${grant} TO ${role}`);
+    }
+    assert.deepEqual(probe('ready'), { code: 200, body: { status: 'ready' } }, grant);
+  }
+  assert.equal(apiStartedAt(), startedAt);
+  checks.push('Post-start revocation and restoration of each CRUD grant and effective database CONNECT');
 
   docker([...compose, 'stop', 'postgres']);
   try {

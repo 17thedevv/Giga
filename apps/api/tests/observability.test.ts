@@ -106,7 +106,10 @@ test('repeated readiness probes share a bounded in-flight database query', async
   const pool = {
     connect: async () => {
       connects += 1;
-      return { query: (query: string) => query.startsWith('SELECT') ? result : Promise.resolve(), release: () => {} };
+      return {
+        query: async (query: string) => query.includes('bool_or') ? result : { rows: [] },
+        release: () => {},
+      };
     },
   } as unknown as pg.Pool;
   const ops = createOperationsApp(pool, false, 15);
@@ -116,7 +119,7 @@ test('repeated readiness probes share a bounded in-flight database query', async
     assert.equal((await ops.request('/ready')).status, 503);
     assert.equal(connects, 1);
   } finally {
-    finish({ rows: [{ compatible: true, version: 17 }] });
+    finish({ rows: [{ compatible: true, canConnect: true, version: 17 }] });
   }
   await setImmediate();
   assert.equal((await ops.request('/ready')).status, 200);
