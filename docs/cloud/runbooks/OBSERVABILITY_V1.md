@@ -61,9 +61,11 @@ Defaults below are starting thresholds for local testing. Tune using the host's 
 Run the backup on a schedule with a unique archive path inside a private directory. The sidecar changes from `pending` to `complete` after a successful nonempty dump, or to `failed` on dump failure. An interruption can leave it pending. Retain or prune archive/sidecar pairs together and keep fewer than 1,000 markers per monitored directory. Backups from before sidecars need a new verified backup to establish freshness.
 
 ```sh
-sh infra/docker/backup.sh --env-file .env /absolute/private/giga-backups/giga-drill.dump
-sh infra/docker/restore-disposable.sh --env-file .env /absolute/private/giga-backups/giga-drill.dump
+sh infra/docker/backup.sh --local --env-file .env /absolute/private/giga-backups/giga-drill.dump
+sh infra/docker/restore-disposable.sh --local --env-file .env /absolute/private/giga-backups/giga-drill.dump
 ```
+
+For the HTTPS profile, omit `--local` and pass the HTTPS env file.
 
 Follow the [disposable restore procedure](IAAS_LOCAL_DOCKER_V0.1.md#backup-and-recovery) to verify fixture data, ownership and runtime grants in the generated `giga_restore_test_*` database. The completion sidecar proves the dump command succeeded. Record the restore check separately. For an outage, record the SHA, timestamps, alert codes and request IDs, then verify liveness, readiness and an authenticated operation after recovery. Restore to an isolated target. Follow the [rollback procedure](IAAS_LOCAL_DOCKER_V0.1.md#application-rollback-and-migration-compatibility) if the image or migration is suspect.
 
