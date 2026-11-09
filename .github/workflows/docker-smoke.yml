@@ -57,7 +57,7 @@ jobs:
           google-chrome --version
           git rev-parse HEAD
       - name: Verify fail-closed infrastructure configuration
-        run: node --test infra/docker/tests/config.test.mjs
+        run: node --test infra/docker/tests/config.test.mjs infra/docker/tests/monitor.test.mjs
       - name: Generate disposable local configuration and validate Compose
         run: |
           node infra/docker/configure.mjs --local
@@ -68,6 +68,8 @@ jobs:
         run: docker compose up -d --wait --wait-timeout 120
       - name: Exercise real auth, roles, persistence, restore, browser and fixture SSE
         run: node infra/docker/tests/smoke.mjs
+      - name: Exercise private readiness, outages and operations collector
+        run: node infra/docker/tests/operations-smoke.mjs
       - name: Switch the existing database volume to the HTTPS profile
         run: |
           mkdir -p artifacts/private-tls
@@ -107,6 +109,7 @@ jobs:
             artifacts/docker-smoke/summary.md
             artifacts/docker-smoke/report-https.json
             artifacts/docker-smoke/summary-https.md
+            artifacts/docker-smoke/ops-report.json
           if-no-files-found: ignore
           retention-days: 14
       - name: Remove only this job's disposable containers and volume

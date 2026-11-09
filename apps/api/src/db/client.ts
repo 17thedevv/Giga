@@ -1,4 +1,5 @@
 import pg from 'pg';
+import { logSystemEvent } from '../app/observability.js';
 
 const { Pool } = pg;
 
@@ -41,8 +42,8 @@ export function createDatabasePool(config: DatabaseConfig = {}): pg.Pool {
   const pool = new Pool(poolConfig);
 
   // Error listener to prevent unhandled process crashes on background idle client failures
-  pool.on('error', (err) => {
-    console.error('[giga-db] Unexpected idle PostgreSQL client error:', err.message);
+  pool.on('error', () => {
+    logSystemEvent('database_idle_error', 'error');
   });
 
   return pool;
@@ -55,9 +56,8 @@ export async function pingDatabase(pool: pg.Pool): Promise<boolean> {
   try {
     const res = await pool.query('SELECT 1 as alive;');
     return res.rowCount === 1;
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error(`[giga-db] Database health check failed: ${message}`);
+  } catch {
+    logSystemEvent('database_probe_failed', 'warn');
     return false;
   }
 }

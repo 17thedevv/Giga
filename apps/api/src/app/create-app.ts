@@ -28,6 +28,7 @@ import type { ProviderTransport } from '../modules/llm/providers/gemini/gemini-p
 import { AgentRepository } from '../modules/agent/repository.js';
 import { AgentService } from '../modules/agent/service.js';
 import { createAgentRoutes } from '../modules/agent/routes.js';
+import { requestLogging, type LogSink } from './observability.js';
 
 export interface HealthResponse {
   readonly status: 'ok';
@@ -53,10 +54,12 @@ export interface AppDependencies {
   readonly llmEngine?: LLMEngine;
   readonly chatRuntime?: ChatRuntime;
   readonly config?: Partial<AppConfig>;
+  readonly logSink?: LogSink;
 }
 
 export function createApp(dependencies: AppDependencies = {}): Hono {
   const app = new Hono();
+  app.use('*', requestLogging(dependencies.config?.nodeEnv ?? 'development', dependencies.logSink));
 
   const isProduction = dependencies.config?.nodeEnv === 'production';
   const cookieConfig = {
@@ -210,8 +213,6 @@ export function createApp(dependencies: AppDependencies = {}): Hono {
       };
       return c.json(errorBody, statusCode as 400 | 403 | 404 | 409);
     }
-
-    console.error('[giga-api] Unexpected unhandled error:', err);
 
     const errorBody: ErrorResponse = {
       error: {

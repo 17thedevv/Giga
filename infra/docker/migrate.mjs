@@ -36,13 +36,9 @@ export async function runMigrationJob() {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  runMigrationJob().catch((err) => {
+  runMigrationJob().catch(() => {
     // Redacted output: do not dump connection credentials, URLs, or trace.
     console.error('[giga-migrate] Migration job failed: check database connection, credentials, and schema scripts.');
-    if (err && err.message) {
-      const safeMessage = String(err.message).replace(/postgres(?:ql)?:\/\/\S+/gi, '[redacted-database-url]');
-      console.error(`[giga-migrate] Error: ${safeMessage}`);
-    }
     process.exit(1);
   });
 }

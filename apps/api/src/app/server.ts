@@ -2,8 +2,10 @@ import { serve, type ServerType } from '@hono/node-server';
 import type pg from 'pg';
 import { createApp } from './create-app.js';
 import { loadConfig, type AppConfig } from './config.js';
-import { closeDatabasePool, createDatabasePool, redactDatabaseUrl } from '../db/client.js';
-import { RUNTIME_ACL_MIGRATION_VERSION, RUNTIME_CRUD_TABLES, runMigrations } from '../db/migrate.js';
+import { closeDatabasePool, createDatabasePool } from '../db/client.js';
+import { logSystemEvent } from './observability.js';
+import { RUNTIME_ACL_MIGRATION_VERSION, runMigrations } from '../db/migrate.js';
+import { findMissingRuntimeTablePrivilege } from '../db/runtime-privileges.js';
 import { createChatEngine } from '../modules/llm/chat-bootstrap.js';
 import type { ProviderTransport } from '../modules/llm/providers/gemini/gemini-provider.js';
 import type { LLMEngine } from '../modules/llm/engine.js';
@@ -44,27 +46,21 @@ export async function startServer(options: StartServerOptions = {}): Promise<{
   if (!pool && config.databaseUrl) {
     if (!options.skipMigrations && config.migrationMode !== 'external') {
       const migrationUrl = config.migrationDatabaseUrl ?? config.databaseUrl;
-      console.log(`[giga-api] Initializing migration connection: ${redactDatabaseUrl(migrationUrl)}`);
       const migrationPool = createDatabasePool({ connectionString: migrationUrl });
       try {
-        const applied = await runMigrations(migrationPool);
-        if (applied.length > 0) {
-          console.log(`[giga-api] Database migrations applied: ${applied.join(', ')}`);
-        }
+        await runMigrations(migrationPool);
       } catch (err) {
-        console.error('[giga-api] Database migration error on startup:', err);
+        logSystemEvent('migration_failed', 'error');
         throw err;
       } finally {
         await closeDatabasePool(migrationPool);
       }
     }
 
-    console.log(`[giga-api] Initializing API connection: ${redactDatabaseUrl(config.databaseUrl)}`);
     pool = createDatabasePool({ connectionString: config.databaseUrl });
   }
 
   if (!lifecycleFinalizationPool && pool && config.agentLifecycleFinalizerDatabaseUrl) {
-    console.log(`[giga-api] Initializing provider-authoritative lifecycle connection: ${redactDatabaseUrl(config.agentLifecycleFinalizerDatabaseUrl)}`);
     lifecycleFinalizationPool = createDatabasePool({ connectionString: config.agentLifecycleFinalizerDatabaseUrl });
     ownsLifecycleFinalizationPool = true;
   }
@@ -112,16 +108,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<{
       }
 
       // 4. Fail-closed check: runtime privileges on application tables
-      const appTableCheck = await pool.query<{ table_name: string; privilege: string }>(
-        `SELECT t.table_name, p.privilege
-         FROM unnest($1::text[]) AS t(table_name)
-         CROSS JOIN (VALUES ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE')) AS p(privilege)
-         WHERE has_table_privilege(current_user, to_regclass(format('public.%I', t.table_name)), p.privilege)
-               IS DISTINCT FROM TRUE
-         LIMIT 1`,
-        [RUNTIME_CRUD_TABLES],
-      );
-      const missingPrivilege = appTableCheck.rows[0];
+      const missingPrivilege = await findMissingRuntimeTablePrivilege(pool);
       if (missingPrivilege) {
         throw new Error(`Database startup validation failed: runtime role lacks ${missingPrivilege.privilege} on public.${missingPrivilege.table_name}.`);
       }
@@ -208,9 +195,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<{
       fetch: app.fetch,
       port,
     },
-    (info) => {
-      console.log(`[giga-api] Server listening on http://localhost:${info.port}`);
-    }
+    () => logSystemEvent('server_listening', 'info')
   );
 
   return { server, pool, lifecycleFinalizationPool, port };

@@ -5,6 +5,7 @@ import { createAuthMiddleware } from '../auth/auth-middleware.js';
 import { ValidationError } from '../auth/auth-validation.js';
 import { validateUuid } from '../conversations/conversations-validation.js';
 import type { ChatRuntime } from './chat-runtime.js';
+import { logChatStream } from '../../app/observability.js';
 
 export function createChatRoutes(runtime: ChatRuntime, auth: AuthService): Hono {
   const router = new Hono();
@@ -26,10 +27,30 @@ export function createChatRoutes(runtime: ChatRuntime, auth: AuthService): Hono 
     const writer = transform.writable.getWriter();
     const encoder = new TextEncoder();
     const ownerId = c.get('user').id;
+    const started = performance.now();
+    let outcome: Parameters<typeof logChatStream>[0] = 'failed';
+    let disconnected = false;
     // writer.write rejects on downstream cancellation; backpressure is bounded in the coordinator.
     void runtime.run(ownerId, admission.generation, async ({ event, data }) => {
-      await writer.write(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
-    }, c.req.raw.signal).finally(async () => {
+      try {
+        await writer.write(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+      } catch (error) {
+        disconnected = true;
+        throw error;
+      }
+      if (event === 'message.completed') outcome = 'completed';
+      else if (event === 'message.stopped') outcome = 'stopped';
+      else if (event === 'stream.error' || event === 'message.failed') {
+        const failure = data.error;
+        const code = failure && typeof failure === 'object' && 'code' in failure && typeof failure.code === 'string'
+          ? failure.code : '';
+        outcome = code === 'GENERATION_TIMEOUT' || code === 'UPSTREAM_TIMEOUT' ? 'timeout'
+          : ['BYOK_PROVIDER_ERROR', 'BYOK_CREDENTIAL_INVALID', 'UPSTREAM_ERROR'].includes(code) ? 'provider_error' : 'failed';
+      }
+    }, c.req.raw.signal).catch(() => {
+      outcome = 'failed';
+    }).finally(async () => {
+      logChatStream(disconnected || c.req.raw.signal.aborted ? 'disconnected' : outcome, started);
       try { await writer.close(); } catch { /* downstream disconnected */ }
     });
     return new Response(transform.readable, { headers: {
