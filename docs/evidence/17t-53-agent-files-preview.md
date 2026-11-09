@@ -47,10 +47,10 @@ Executed locally:
 | `node .agents/scripts/validate-skills.mjs` | PASS |
 | `git diff --check` | PASS |
 
-GitHub Actions have not yet been checked because the implementation has not been pushed in this evidence revision. Final PR and CI references will be added after delivery. The repository has no frontend lint script.
+The implementation commit `eacac20394a3c3329a5cecf83157bb1000c65e5a` is on [Draft PR #52](https://github.com/17thedevv/Giga/pull/52), targeting `main`. GitHub Actions passed on that commit: [Frontend CI run 83](https://github.com/17thedevv/Giga/actions/runs/42579008013) and [Validate Git Workflow run 267](https://github.com/17thedevv/Giga/actions/runs/42579111137). The PR is open and Draft; independent review is pending. The repository has no frontend lint script.
 
 ## Dependencies and limitations
 
 The Real files API, persistence, and server-side file authorization depend on Linear 17T-74. No backend or shared contract code is changed here. The Real UI is a truthful unsupported state until 17T-74 publishes a reviewed endpoint contract and implementation. Local tests do not prove deployed Real API behavior, cloud persistence, or production security.
 
-Evidence commit and GitHub Actions status: pending final commit and Draft PR creation.
+Implementation commit SHA: `eacac20394a3c3329a5cecf83157bb1000c65e5a`. The final branch HEAD is reported with the delivery status; this document records the tested application commit and linked CI runs.
