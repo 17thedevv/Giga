@@ -31,3 +31,11 @@ Thumbs.db
 .terraform/
 *.tfstate
 *.tfstate.*
+
+# Local deployment backups / evidence / certificates
+backups/
+artifacts/
+*.dump
+infra/docker/tls/
+infra/docker/nginx/allowed-hosts.conf
+*.nginx.conf

@@ -1,0 +1,121 @@
+name: Local Docker Compose smoke
+
+on:
+  pull_request:
+    paths:
+      - 'Dockerfile'
+      - '.dockerignore'
+      - 'compose.yaml'
+      - '.env.example'
+      - 'infra/docker/**'
+      - 'apps/api/**'
+      - 'apps/web/**'
+      - 'packages/contracts/**'
+      - '.github/workflows/docker-smoke.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'Dockerfile'
+      - '.dockerignore'
+      - 'compose.yaml'
+      - '.env.example'
+      - 'infra/docker/**'
+      - 'apps/api/**'
+      - 'apps/web/**'
+      - 'packages/contracts/**'
+      - '.github/workflows/docker-smoke.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-smoke-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compose-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      COMPOSE_PROJECT_NAME: giga-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+      GIGA_DOCKER_SMOKE: '1'
+    steps:
+      - name: Checkout exact proposed revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Set up Node.js 22 for dependency-free smoke harness
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Verify local container and browser prerequisites
+        run: |
+          docker version
+          docker compose version
+          google-chrome --version
+          git rev-parse HEAD
+      - name: Verify fail-closed infrastructure configuration
+        run: node --test infra/docker/tests/config.test.mjs
+      - name: Generate disposable local configuration and validate Compose
+        run: |
+          node infra/docker/configure.mjs --local
+          docker compose config --quiet
+      - name: Clean multi-stage image build
+        run: docker compose build --pull --no-cache
+      - name: Start real PostgreSQL, API and Nginx containers
+        run: docker compose up -d --wait --wait-timeout 120
+      - name: Exercise real auth, roles, persistence, restore, browser and fixture SSE
+        run: node infra/docker/tests/smoke.mjs
+      - name: Switch the existing database volume to the HTTPS profile
+        run: |
+          mkdir -p artifacts/private-tls
+          chmod 755 artifacts/private-tls
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+            -subj /CN=localhost -addext subjectAltName=DNS:localhost \
+            -keyout artifacts/private-tls/privkey.pem -out artifacts/private-tls/fullchain.pem
+          # Disposable CI key only: UID 101 must read this bind-mounted file.
+          chmod 644 artifacts/private-tls/privkey.pem artifacts/private-tls/fullchain.pem
+          node infra/docker/configure.mjs --origin=https://localhost --tls-dir="$PWD/artifacts/private-tls" --from=.env --output=.env.https
+          docker compose --env-file .env.https config --quiet
+          docker compose stop
+          docker compose --env-file .env.https up -d --wait --wait-timeout 120
+          test "$(docker compose --env-file .env.https exec -T postgres psql -U giga_admin -d giga -XAtc "SELECT count(*) FROM conversations WHERE title = 'Persistent Docker fixture'")" = 1
+          node infra/docker/tests/https-smoke.mjs
+      - name: Show redacted diagnostics on failure
+        if: failure()
+        run: node infra/docker/tests/diagnostics.mjs
+      - name: Record redacted acceptance summary
+        if: always()
+        run: |
+          if test -f artifacts/docker-smoke/summary.md; then
+            cat artifacts/docker-smoke/summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf 'Container smoke did not reach its evidence writer. Inspect the failed build/start step.\n' >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if test -f artifacts/docker-smoke/summary-https.md; then
+            cat artifacts/docker-smoke/summary-https.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Preserve redacted evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-smoke-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            artifacts/docker-smoke/report.json
+            artifacts/docker-smoke/summary.md
+            artifacts/docker-smoke/report-https.json
+            artifacts/docker-smoke/summary-https.md
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Remove only this job's disposable containers and volume
+        if: always()
+        run: |
+          GIGA_CLEANUP_STATUS=0
+          if test -f .env.https; then
+            docker compose --env-file .env.https down --volumes --remove-orphans || GIGA_CLEANUP_STATUS=$?
+          elif test -f .env; then
+            docker compose down --volumes --remove-orphans || GIGA_CLEANUP_STATUS=$?
+          fi
+          exit "$GIGA_CLEANUP_STATUS"

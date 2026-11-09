@@ -1,12 +1,20 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import { newDb, DataType } from 'pg-mem';
 import type pg from 'pg';
 import { MIGRATIONS, runMigrations, getAppliedMigrationVersions } from '../src/db/migrate.js';
 import { redactDatabaseUrl, pingDatabase } from '../src/db/client.js';
 
 describe('Database Migrations and Utilities', () => {
+  it('keeps migration 017 SQL in sync with the runtime registry', async () => {
+    const migration = MIGRATIONS.find(entry => entry.version === 17);
+    assert.ok(migration);
+    const sql = await readFile(new URL('../src/db/migrations/017_runtime_privileges.sql', import.meta.url), 'utf8');
+    assert.equal(migration.sql.trim().replaceAll('\r\n', '\n'), sql.trim().replaceAll('\r\n', '\n'));
+  });
+
   it('runs migrations deterministically and idempotently', async () => {
     const db = newDb({ noAstCoverageCheck: true });
     db.public.registerFunction({ name: 'octet_length', args: [DataType.text], returns: DataType.integer,
