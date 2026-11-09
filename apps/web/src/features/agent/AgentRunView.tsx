@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useRouter } from '../../app/router.js';
 import { useApiMode } from '../../app/context/ApiModeContext.js';
 import { AgentRealRunView } from './AgentRealViews.js';
@@ -8,6 +8,8 @@ import {
   workspaceFixtureStore,
   type AgentRunDetail,
 } from './workspace-fixtures.js';
+import { getDemoWorkspaceSnapshot } from './agent-file-fixtures.js';
+import { AgentFileExplorer } from './AgentFileExplorer.js';
 import { Badge } from '../../components/Badge.js';
 import { Button } from '../../components/Button.js';
 import { Alert } from '../../components/Alert.js';
@@ -30,7 +32,7 @@ const DemoAgentRunView: React.FC = () => {
   const [run, setRun] = useState<AgentRunDetail | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'plan' | 'timeline' | 'files' | 'verification' | 'artifacts'>('plan');
+  const [activeTab, setActiveTab] = useState<'plan' | 'timeline' | 'files' | 'changes' | 'verification' | 'artifacts'>('plan');
   const [expandedDiffs, setExpandedDiffs] = useState<Record<string, boolean>>({});
 
   // Real Mode Capabilities for Action Buttons
@@ -39,6 +41,7 @@ const DemoAgentRunView: React.FC = () => {
 
   // Request Fencing Ref for Run Loading
   const activeRunRequestIdRef = useRef<number>(0);
+  const demoSnapshot = useMemo(() => run ? getDemoWorkspaceSnapshot(run.workspaceId) : null, [run?.workspaceId]);
 
   const loadRunData = useCallback(() => {
     if (!runId) {
@@ -522,6 +525,25 @@ const DemoAgentRunView: React.FC = () => {
               cursor: 'pointer',
               whiteSpace: 'nowrap',
             }}
+            data-testid="tab-files"
+          >
+            Files (Demo)
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab('changes')}
+            style={{
+              padding: '10px 16px',
+              border: 'none',
+              borderBottom: `2px solid ${activeTab === 'changes' ? 'var(--giga-primary, #3B82F6)' : 'transparent'}`,
+              backgroundColor: 'transparent',
+              color: activeTab === 'changes' ? 'var(--giga-text, #F8FAFC)' : 'var(--giga-text-secondary, #94A3B8)',
+              fontSize: '13px',
+              fontWeight: 600,
+              cursor: 'pointer',
+              whiteSpace: 'nowrap',
+            }}
             data-testid="tab-changes"
           >
             Workspace Changes ({run.fileChanges.length})
@@ -695,8 +717,12 @@ const DemoAgentRunView: React.FC = () => {
           </div>
         )}
 
-        {/* Tab Content 3: Workspace Changes (Sandbox Files) */}
-        {activeTab === 'files' && (
+        {activeTab === 'files' && demoSnapshot && (
+          <AgentFileExplorer key={demoSnapshot.workspaceId} snapshot={demoSnapshot} />
+        )}
+
+        {/* Tab Content: Workspace Changes is change metadata, not a persisted snapshot. */}
+        {activeTab === 'changes' && (
           <div
             className="g-card"
             style={{
