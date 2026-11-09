@@ -1,4 +1,5 @@
 import { startServer } from './app/server.js';
+import { logSystemEvent } from './app/observability.js';
 
 export { createApp } from './app/create-app.js';
 export { loadConfig, parsePort, DEFAULT_PORT } from './app/config.js';
@@ -9,8 +10,7 @@ export { UserRepository } from './db/repositories/user-repository.js';
 export { SessionRepository } from './db/repositories/session-repository.js';
 export { AuthService } from './modules/auth/auth-service.js';
 
-startServer().catch((error) => {
-  const message = error instanceof Error ? error.message : String(error);
-  console.error(`[giga-api] Startup failed: ${message}`);
+startServer().catch(() => {
+  logSystemEvent('startup_failed', 'error');
   process.exit(1);
 });

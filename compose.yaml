@@ -1,7 +1,16 @@
 # HTTPS rehearsal/deployment topology. configure.mjs --local selects the HTTP override.
 name: giga-local
+x-log-policy: &log-policy
+  driver: json-file
+  options:
+    max-size: '10m'
+    max-file: '3'
 services:
   postgres:
+    logging: *log-policy
+    # API logs expose sanitized categories. Suppress PostgreSQL query/error
+    # details that could otherwise contain user values.
+    command: [postgres, -c, 'log_min_messages=fatal', -c, 'log_error_verbosity=terse', -c, 'log_min_error_statement=panic']
     image: postgres:16-bookworm@sha256:e8a07d2c7579b038938cdba6c539e580e5001caf9ea203d397b5cc83e76bd938
     environment:
       POSTGRES_USER: giga_admin
@@ -31,6 +40,7 @@ services:
     security_opt: [no-new-privileges:true]
 
   migrate:
+    logging: *log-policy
     image: giga-api:${IMAGE_TAG:-local}
     build:
       context: .
@@ -56,6 +66,7 @@ services:
     cpus: 1.0
 
   api:
+    logging: *log-policy
     image: giga-api:${IMAGE_TAG:-local}
     build:
       context: .
@@ -85,7 +96,7 @@ services:
         condition: service_completed_successfully
     networks: [edge, data]
     healthcheck:
-      test: [CMD, node, -e, "fetch('http://127.0.0.1:3000/health',{signal:AbortSignal.timeout(2000)}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3001/ready',{signal:AbortSignal.timeout(2500)}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 10s
       timeout: 3s
       retries: 12
@@ -101,6 +112,7 @@ services:
     cpus: 1.0
 
   nginx:
+    logging: *log-policy
     image: nginx:stable-alpine@sha256:0e52bd054126cdc040b1276c0af347aeb02a41b9cfe305d6094767ac30e97949
     entrypoint: []
     command: [nginx, -g, 'daemon off;']

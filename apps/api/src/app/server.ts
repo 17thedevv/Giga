@@ -2,7 +2,8 @@ import { serve, type ServerType } from '@hono/node-server';
 import type pg from 'pg';
 import { createApp } from './create-app.js';
 import { loadConfig, type AppConfig } from './config.js';
-import { closeDatabasePool, createDatabasePool, redactDatabaseUrl } from '../db/client.js';
+import { closeDatabasePool, createDatabasePool } from '../db/client.js';
+import { logSystemEvent } from './observability.js';
 import { RUNTIME_ACL_MIGRATION_VERSION, RUNTIME_CRUD_TABLES, runMigrations } from '../db/migrate.js';
 import { createChatEngine } from '../modules/llm/chat-bootstrap.js';
 import type { ProviderTransport } from '../modules/llm/providers/gemini/gemini-provider.js';
@@ -44,27 +45,21 @@ export async function startServer(options: StartServerOptions = {}): Promise<{
   if (!pool && config.databaseUrl) {
     if (!options.skipMigrations && config.migrationMode !== 'external') {
       const migrationUrl = config.migrationDatabaseUrl ?? config.databaseUrl;
-      console.log(`[giga-api] Initializing migration connection: ${redactDatabaseUrl(migrationUrl)}`);
       const migrationPool = createDatabasePool({ connectionString: migrationUrl });
       try {
-        const applied = await runMigrations(migrationPool);
-        if (applied.length > 0) {
-          console.log(`[giga-api] Database migrations applied: ${applied.join(', ')}`);
-        }
+        await runMigrations(migrationPool);
       } catch (err) {
-        console.error('[giga-api] Database migration error on startup:', err);
+        logSystemEvent('migration_failed', 'error');
         throw err;
       } finally {
         await closeDatabasePool(migrationPool);
       }
     }
 
-    console.log(`[giga-api] Initializing API connection: ${redactDatabaseUrl(config.databaseUrl)}`);
     pool = createDatabasePool({ connectionString: config.databaseUrl });
   }
 
   if (!lifecycleFinalizationPool && pool && config.agentLifecycleFinalizerDatabaseUrl) {
-    console.log(`[giga-api] Initializing provider-authoritative lifecycle connection: ${redactDatabaseUrl(config.agentLifecycleFinalizerDatabaseUrl)}`);
     lifecycleFinalizationPool = createDatabasePool({ connectionString: config.agentLifecycleFinalizerDatabaseUrl });
     ownsLifecycleFinalizationPool = true;
   }
@@ -208,9 +203,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<{
       fetch: app.fetch,
       port,
     },
-    (info) => {
-      console.log(`[giga-api] Server listening on http://localhost:${info.port}`);
-    }
+    () => logSystemEvent('server_listening', 'info')
   );
 
   return { server, pool, lifecycleFinalizationPool, port };

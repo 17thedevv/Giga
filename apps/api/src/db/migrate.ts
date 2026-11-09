@@ -1,4 +1,5 @@
 import type pg from 'pg';
+import { logSystemEvent } from '../app/observability.js';
 
 export interface Migration {
   readonly version: number;
@@ -1450,7 +1451,7 @@ export async function runMigrations(
         );
         await client.query('COMMIT');
         appliedNow.push(migration.name);
-        console.log(`[giga-db] Applied migration: ${migration.name} (version ${migration.version})`);
+        logSystemEvent('migration_applied', 'info', migration.version);
       } catch (migrationError) {
         await client.query('ROLLBACK');
         throw new Error(

@@ -1,14 +1,13 @@
-import { createDatabasePool, redactDatabaseUrl, closeDatabasePool } from './client.js';
+import { createDatabasePool, closeDatabasePool } from './client.js';
 import { runMigrations } from './migrate.js';
 import { loadConfig } from '../app/config.js';
+import { logSystemEvent } from '../app/observability.js';
 
 async function main(): Promise<void> {
   const config = loadConfig();
   const migrationUrl = config.migrationDatabaseUrl ?? config.databaseUrl;
-  console.log(`[giga-db] Connecting to database: ${redactDatabaseUrl(migrationUrl)}`);
-
   if (!migrationUrl) {
-    console.error('[giga-db] Error: DATABASE_URL or MIGRATION_DATABASE_URL environment variable is not configured.');
+    logSystemEvent('migration_failed', 'error');
     process.exit(1);
   }
 
@@ -21,16 +20,15 @@ async function main(): Promise<void> {
     } else {
       console.log(`[giga-db] Successfully applied ${applied.length} migration(s).`);
     }
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.error(`[giga-db] Migration execution failed: ${message}`);
-    process.exit(1);
+  } catch {
+    logSystemEvent('migration_failed', 'error');
+    process.exitCode = 1;
   } finally {
     await closeDatabasePool(pool);
   }
 }
 
-main().catch((err) => {
-  console.error('[giga-db] Fatal migration error:', err);
-  process.exit(1);
+main().catch(() => {
+  logSystemEvent('migration_failed', 'error');
+  process.exitCode = 1;
 });

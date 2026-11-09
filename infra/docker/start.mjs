@@ -1,4 +1,5 @@
 import { pathToFileURL } from 'node:url';
+import { once } from 'node:events';
 
 /** Infrastructure-only guard; the application's production role checks still run. */
 export function configureEnvironment(env = process.env) {
@@ -36,19 +37,29 @@ export async function start(options = {}) {
   configureEnvironment();
   const { loadConfig } = await import('../../apps/api/dist/app/config.js');
   const { startServer } = await import('../../apps/api/dist/app/server.js');
+  const { startOperationsListener } = await import('../../apps/api/dist/app/operations.js');
+  const { logSystemEvent } = await import('../../apps/api/dist/app/observability.js');
   const config = loadConfig(); // Reject provider/config errors before connecting.
   const running = await startServer({ ...options, config });
+  const operations = startOperationsListener(running.pool, Boolean(config.chat));
+  if (!operations.listening) await once(operations, 'listening');
+  operations.on('error', () => {
+    logSystemEvent('operations_listener_failed', 'error');
+    process.exit(1);
+  });
   let closing = false;
   const shutdown = () => {
     if (closing) return;
     closing = true;
     const deadline = setTimeout(() => process.exit(1), 25000);
     deadline.unref();
-    running.server.close(async () => {
+    const close = server => new Promise(resolve => server.close(resolve));
+    void Promise.allSettled([close(running.server), close(operations)]).then(async () => {
       await Promise.allSettled([running.pool?.end(), running.lifecycleFinalizationPool?.end()]);
       process.exit(0);
     });
     running.server.closeIdleConnections?.();
+    operations.closeIdleConnections?.();
   };
   process.once('SIGTERM', shutdown);
   process.once('SIGINT', shutdown);
