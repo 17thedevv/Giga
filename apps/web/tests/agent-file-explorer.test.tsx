@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import capabilitiesFixture from '../../../packages/contracts/fixtures/agent.json';
-import { AgentFileExplorer, AgentRealFilesPanel } from '../src/features/agent/AgentFileExplorer.js';
+import { AgentFileExplorer, AgentRealFilesPanel, AgentSourcePreview } from '../src/features/agent/AgentFileExplorer.js';
 import { DEMO_WORKSPACE_SNAPSHOT_FIXTURES } from '../src/features/agent/agent-file-fixtures.js';
 import {
   languageForAgentFile,
+  MAX_AGENT_PREVIEW_BYTES,
+  MAX_AGENT_PREVIEW_LINES,
   type DemoWorkspaceSnapshot,
 } from '../src/features/agent/agent-file-model.js';
 import type { AgentCapabilities } from '../src/lib/api/agent-contract.js';
@@ -217,6 +219,62 @@ describe('Demo Agent file explorer and source preview', () => {
     render(<AgentFileExplorer snapshot={makeSnapshot('workspace-space', 'example.ts', content)} />);
     fireEvent.click(screen.getByTestId('file-example.ts'));
     expect(screen.getByTestId('source-code-viewer').textContent).toContain(content);
+  });
+
+  it('renders normal multiline TypeScript with correct bounded line numbering', () => {
+    const content = 'type Greeting = { text: string };\n\n  const greeting: Greeting = { text: \'你好\' };';
+    render(<AgentFileExplorer snapshot={makeSnapshot('workspace-line-count', 'src/greeting.ts', content)} />);
+    expand('src');
+    fireEvent.click(screen.getByTestId('file-src/greeting.ts'));
+    const lineNumbers = screen.getByTestId('source-code-viewer').querySelectorAll('ol li');
+    expect(Array.from(lineNumbers, (item) => item.textContent)).toEqual(['1', '2', '3']);
+    expect(screen.getByTestId('source-code-viewer').textContent).toContain(content);
+  });
+
+  it('supports exactly the maximum rendered line count', () => {
+    const content = 'x\n'.repeat(MAX_AGENT_PREVIEW_LINES - 1) + 'last';
+    render(<AgentFileExplorer snapshot={makeSnapshot('workspace-max-lines', 'src/maximum.ts', content)} />);
+    expand('src');
+    fireEvent.click(screen.getByTestId('file-src/maximum.ts'));
+    const lineNumbers = screen.getByTestId('source-code-viewer').querySelectorAll('ol li');
+    expect(lineNumbers).toHaveLength(MAX_AGENT_PREVIEW_LINES);
+    expect(lineNumbers.item(MAX_AGENT_PREVIEW_LINES - 1)?.textContent).toBe(String(MAX_AGENT_PREVIEW_LINES));
+  });
+
+  it('shows an accessible too-many-lines placeholder at maximum plus one', () => {
+    const content = 'x\n'.repeat(MAX_AGENT_PREVIEW_LINES) + 'last';
+    render(<AgentFileExplorer snapshot={makeSnapshot('workspace-over-lines', 'src/over-limit.ts', content)} />);
+    expand('src');
+    fireEvent.click(screen.getByTestId('file-src/over-limit.ts'));
+    expect(screen.getByTestId('preview-too-many-lines').textContent).toBe('This file contains too many lines for the read-only preview.');
+    expect(screen.queryByTestId('source-code-viewer')).toBeNull();
+  });
+
+  it('does not render excessive line-number DOM for newline-dense content below 64 KiB', () => {
+    const content = '\n'.repeat(60_000);
+    expect(new TextEncoder().encode(content).byteLength).toBeLessThan(MAX_AGENT_PREVIEW_BYTES);
+    const { container } = render(<AgentSourcePreview file={{
+      path: 'src/newline-dense.ts',
+      kind: 'file',
+      sizeBytes: 60_000,
+      preview: { kind: 'text', content },
+    }} />);
+    expect(screen.getByTestId('preview-too-many-lines').textContent).toContain('too many lines');
+    expect(container.querySelectorAll('.g-agent-source-code li')).toHaveLength(0);
+    expect(container.querySelectorAll('li').length).toBeLessThan(1000);
+  });
+
+  it('handles mixed CRLF, LF and CR line endings without changing source text', () => {
+    const content = 'first\r\nsecond\nthird\rfourth';
+    render(<AgentSourcePreview file={{
+      path: 'src/mixed-endings.ts',
+      kind: 'file',
+      sizeBytes: new TextEncoder().encode(content).byteLength,
+      preview: { kind: 'text', content },
+    }} />);
+    const viewer = screen.getByTestId('source-code-viewer');
+    expect(Array.from(viewer.querySelectorAll('ol li'), (item) => item.textContent)).toEqual(['1', '2', '3', '4']);
+    expect(viewer.querySelector('code')?.textContent).toBe(content);
   });
 
   it('renders HTML source as text and creates no active HTML or external resource nodes', () => {

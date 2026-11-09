@@ -86,7 +86,9 @@ export const DEMO_WORKSPACE_SNAPSHOT_FIXTURES: Readonly<Record<string, DemoWorks
 
 /** Returns labeled sample content only; unknown Demo workspaces get an empty sample. */
 export function getDemoWorkspaceSnapshot(workspaceId: string): DemoWorkspaceSnapshot {
-  const known = DEMO_WORKSPACE_SNAPSHOT_FIXTURES[workspaceId];
+  const known = Object.prototype.hasOwnProperty.call(DEMO_WORKSPACE_SNAPSHOT_FIXTURES, workspaceId)
+    ? DEMO_WORKSPACE_SNAPSHOT_FIXTURES[workspaceId]
+    : undefined;
   if (known) return known;
   const safeId = /^[A-Za-z0-9._:-]{1,128}$/.test(workspaceId) ? workspaceId : 'demo-empty-workspace';
   return {

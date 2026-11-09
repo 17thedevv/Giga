@@ -1,12 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildAgentFileTree,
+  countAgentPreviewLines,
   MAX_AGENT_FILE_PATH_DEPTH,
   MAX_AGENT_FILE_PATH_LENGTH,
   MAX_AGENT_PREVIEW_BYTES,
+  MAX_AGENT_PREVIEW_LINES,
   projectDemoWorkspaceSnapshot,
   validateWorkspaceRelativePath,
 } from '../src/features/agent/agent-file-model.js';
+import { DEMO_WORKSPACE_SNAPSHOT_FIXTURES, getDemoWorkspaceSnapshot } from '../src/features/agent/agent-file-fixtures.js';
 
 function snapshot(entries: unknown[], extra: Record<string, unknown> = {}) {
   return {
@@ -161,6 +164,35 @@ describe('Agent Demo file snapshot model', () => {
     }
   });
 
+  it('counts LF, CRLF and CR as logical lines and stops at the configured bound', () => {
+    expect(countAgentPreviewLines('alpha\r\nbeta\ngamma\rdelta')).toBe(4);
+    expect(countAgentPreviewLines('one\ntwo\nthree')).toBe(3);
+    expect(countAgentPreviewLines('\n'.repeat(MAX_AGENT_PREVIEW_LINES + 50))).toBe(MAX_AGENT_PREVIEW_LINES + 1);
+  });
+
+  it('keeps text at the maximum line count and projects maximum plus one as a placeholder', () => {
+    const atLimit = 'line\n'.repeat(MAX_AGENT_PREVIEW_LINES - 1) + 'last';
+    const overLimit = `${atLimit}\nextra`;
+    const accepted = project(snapshot([textFile('src/at-limit.ts', atLimit)]));
+    const rejected = project(snapshot([textFile('src/over-limit.ts', overLimit)]));
+
+    expect(accepted.ok).toBe(true);
+    if (accepted.ok) expect(accepted.snapshot.entries[0]).toMatchObject({ kind: 'file', preview: { kind: 'text' } });
+    expect(rejected.ok).toBe(true);
+    if (rejected.ok) expect(rejected.snapshot.entries[0]).toMatchObject({ kind: 'file', preview: { kind: 'too-many-lines' } });
+  });
+
+  it('projects newline-dense source under the byte limit without retaining its text', () => {
+    const content = '\n'.repeat(60_000);
+    expect(new TextEncoder().encode(content).byteLength).toBeLessThan(MAX_AGENT_PREVIEW_BYTES);
+    const result = project(snapshot([textFile('src/newlines.ts', content)]));
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.snapshot.entries[0]).toMatchObject({ kind: 'file', sizeBytes: 60_000, preview: { kind: 'too-many-lines' } });
+      expect(JSON.stringify(result.snapshot)).not.toContain(content);
+    }
+  });
+
   it('keeps duplicate basenames under different paths as separate identities', () => {
     const result = project(snapshot([textFile('src/components/Button.tsx', 'component'), textFile('src/pages/Button.tsx', 'page')]));
     expect(result.ok).toBe(true);
@@ -196,5 +228,22 @@ describe('Agent Demo file snapshot model', () => {
   it('uses a bounded finite entry count', () => {
     const entries = Array.from({ length: 2001 }, (_, index) => ({ path: `folder-${index}`, kind: 'folder' }));
     expect(project(snapshot(entries)).ok).toBe(false);
+  });
+
+  it('returns only own known Demo fixture IDs and empty snapshots for prototype or unknown keys', () => {
+    const known = DEMO_WORKSPACE_SNAPSHOT_FIXTURES['ws-react-task-manager']!;
+    expect(getDemoWorkspaceSnapshot('ws-react-task-manager')).toBe(known);
+
+    for (const workspaceId of ['unknown-workspace', 'constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+      const result = getDemoWorkspaceSnapshot(workspaceId);
+      expect(result).not.toBe(Object.prototype);
+      expect(result.entries).toEqual([]);
+      expect(result.provenance).toBe('demo-fixture');
+      expect(result.snapshotId).toBe('demo-empty-sample-r1');
+    }
+
+    const malformed = getDemoWorkspaceSnapshot('../outside');
+    expect(malformed.entries).toEqual([]);
+    expect(malformed.workspaceId).toBe('demo-empty-workspace');
   });
 });

@@ -5,12 +5,14 @@ export const MAX_AGENT_FILE_PATH_DEPTH = 32;
 export const MAX_AGENT_FILE_SEGMENT_LENGTH = 255;
 export const MAX_AGENT_SNAPSHOT_ENTRIES = 2000;
 export const MAX_AGENT_PREVIEW_BYTES = 64 * 1024;
+/** Caps both rendered line-number elements and source lines retained in a preview. */
+export const MAX_AGENT_PREVIEW_LINES = 2000;
 export const MAX_AGENT_SNAPSHOT_PREVIEW_BYTES = 512 * 1024;
 const MAX_AGENT_FILE_SIZE_BYTES = 100_000_000_000;
 
 export type AgentFilePreview =
   | { readonly kind: 'text'; readonly content: string }
-  | { readonly kind: 'binary' | 'too-large' | 'unsupported' | 'unavailable' | 'error' };
+  | { readonly kind: 'binary' | 'too-large' | 'too-many-lines' | 'unsupported' | 'unavailable' | 'error' };
 
 export interface AgentSnapshotFile {
   readonly path: string;
@@ -89,6 +91,26 @@ export function languageForAgentFile(path: string): string | null {
   return LANGUAGES[name.slice(dot + 1).toLowerCase()] ?? null;
 }
 
+/**
+ * Counts logical source lines, treating CRLF as one delimiter. Stops at the
+ * first line beyond `maximum`, so untrusted newline-dense content is scanned
+ * only until it is known to exceed the rendering budget.
+ */
+export function countAgentPreviewLines(content: string, maximum = MAX_AGENT_PREVIEW_LINES): number {
+  let lines = 1;
+  for (let index = 0; index < content.length; index++) {
+    const code = content.charCodeAt(index);
+    if (code === 13) {
+      lines++;
+      if (content.charCodeAt(index + 1) === 10) index++;
+    } else if (code === 10) {
+      lines++;
+    }
+    if (lines > maximum) return maximum + 1;
+  }
+  return lines;
+}
+
 function safeSize(value: unknown): number | null | undefined {
   if (value === undefined) return undefined;
   if (value === null) return null;
@@ -102,6 +124,7 @@ function previewWithoutContent(value: Record<string, unknown>): AgentFilePreview
   switch (value.kind) {
     case 'binary':
     case 'too-large':
+    case 'too-many-lines':
     case 'unsupported':
     case 'unavailable':
     case 'error':
@@ -175,6 +198,8 @@ export function projectDemoWorkspaceSnapshot(value: unknown): SnapshotProjection
           return { ok: false, reason: 'invalid_snapshot' };
         } else if (languageForAgentFile(path) === null) {
           preview = { kind: 'unsupported' };
+        } else if (countAgentPreviewLines(rawContent) > MAX_AGENT_PREVIEW_LINES) {
+          preview = { kind: 'too-many-lines' };
         } else if (retainedPreviewBytes + contentBytes > MAX_AGENT_SNAPSHOT_PREVIEW_BYTES) {
           preview = { kind: 'too-large' };
         } else {

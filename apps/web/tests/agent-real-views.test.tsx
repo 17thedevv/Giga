@@ -4,6 +4,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import fixture from '../../../packages/contracts/fixtures/agent.json';
 import { AgentLauncherView } from '../src/features/agent/AgentLauncherView.js';
 import { AgentRunView } from '../src/features/agent/AgentRunView.js';
+import * as agentFileFixtures from '../src/features/agent/agent-file-fixtures.js';
 import { ApiModeProvider, useApiMode } from '../src/app/context/ApiModeContext.js';
 import { ThemeProvider } from '../src/app/context/ThemeContext.js';
 import { AuthProvider } from '../src/app/context/AuthContext.js';
@@ -1379,6 +1380,7 @@ describe('Real Agent workspace and run integration', () => {
   it('keeps file browsing unavailable in Real run detail when the API capability is disabled', async () => {
     vi.spyOn(realApiClient, 'getAgentRun').mockResolvedValue({ run: failedRun });
     vi.spyOn(realApiClient, 'getAgentCapabilities').mockResolvedValue(capabilities);
+    const getDemoWorkspaceSnapshot = vi.spyOn(agentFileFixtures, 'getDemoWorkspaceSnapshot');
 
     renderReal(<AgentRunView />, '/agent/runs/' + failedRun.id);
 
@@ -1386,5 +1388,6 @@ describe('Real Agent workspace and run integration', () => {
     expect(await screen.findByTestId('real-files-unsupported')).toBeDefined();
     expect(screen.queryByTestId('agent-file-explorer')).toBeNull();
     expect(screen.queryByText(/React Task Manager/)).toBeNull();
+    expect(getDemoWorkspaceSnapshot).not.toHaveBeenCalled();
   });
 });

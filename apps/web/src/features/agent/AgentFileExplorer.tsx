@@ -1,8 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   buildAgentFileTree,
+  countAgentPreviewLines,
   languageForAgentFile,
   MAX_AGENT_PREVIEW_BYTES,
+  MAX_AGENT_PREVIEW_LINES,
   projectDemoWorkspaceSnapshot,
   safeAgentFileDisplayText,
   type AgentFilePreview,
@@ -52,79 +54,70 @@ function placeholderFor(preview: AgentFilePreview): string | null {
     case 'text': return null;
     case 'binary': return 'This file is binary. A text preview is not available.';
     case 'too-large': return 'This file is too large for a safe in-browser preview.';
+    case 'too-many-lines': return 'This file contains too many lines for the read-only preview.';
     case 'unsupported': return 'This file type is not supported by the source preview.';
     case 'unavailable': return 'File content is unavailable in this snapshot.';
     case 'error': return 'The source preview could not be loaded.';
   }
 }
 
-export const AgentSourcePreview: React.FC<{ file: AgentSnapshotFile | null }> = ({ file }) => {
-  if (!file) {
-    return (
-      <section className="g-agent-source-preview" aria-labelledby="agent-source-preview-heading" data-testid="agent-source-preview">
-        <header className="g-agent-source-preview__header">
-          <div><h3 id="agent-source-preview-heading">Source preview</h3><p>Select a file to inspect its read-only Demo source.</p></div>
-        </header>
-        <p className="g-agent-file-status" role="status">No file selected.</p>
-      </section>
-    );
+type SourcePreviewState =
+  | { readonly kind: 'none' | 'empty' }
+  | { readonly kind: 'placeholder'; readonly message: string; readonly testId: string }
+  | { readonly kind: 'text'; readonly content: string; readonly lineCount: number };
+
+function buildSourcePreviewState(file: AgentSnapshotFile | null): SourcePreviewState {
+  if (!file) return { kind: 'none' };
+  if (file.preview.kind !== 'text') {
+    return { kind: 'placeholder', message: placeholderFor(file.preview) ?? 'Preview unavailable.', testId: `preview-${file.preview.kind}` };
   }
 
-  const language = languageForAgentFile(file.path);
-  const fileName = safeAgentFileDisplayText(file.path.slice(file.path.lastIndexOf('/') + 1));
-  const displayPath = safeAgentFileDisplayText(file.path);
-  const message = placeholderFor(file.preview);
-  if (file.preview.kind !== 'text' || message) {
-    return (
-      <section className="g-agent-source-preview" aria-labelledby="agent-source-preview-heading" data-testid="agent-source-preview">
-        <header className="g-agent-source-preview__header">
-          <div><h3 id="agent-source-preview-heading">{fileName}</h3><p aria-label="Selected file path">{displayPath}</p></div>
-          <dl><div><dt>Type</dt><dd>{language ?? 'Unknown file type'}</dd></div><div><dt>Size</dt><dd>{displaySize(file.sizeBytes)}</dd></div></dl>
-        </header>
-        <p className="g-agent-file-status" role="status" data-testid={`preview-${file.preview.kind}`}>{message}</p>
-      </section>
-    );
+  const rawContent = file.preview.content;
+  // `length` is a cheap lower bound on UTF-8 bytes; avoid encoding obviously oversized input.
+  if (rawContent.length > MAX_AGENT_PREVIEW_BYTES || new TextEncoder().encode(rawContent).byteLength > MAX_AGENT_PREVIEW_BYTES) {
+    return { kind: 'placeholder', message: 'This file is too large for a safe in-browser preview.', testId: 'preview-too-large' };
   }
 
-  const content = safeAgentFileDisplayText(file.preview.content);
-  if (new TextEncoder().encode(content).byteLength > MAX_AGENT_PREVIEW_BYTES) {
-    return (
-      <section className="g-agent-source-preview" aria-labelledby="agent-source-preview-heading" data-testid="agent-source-preview">
-        <header className="g-agent-source-preview__header">
-          <div><h3 id="agent-source-preview-heading">{fileName}</h3><p aria-label="Selected file path">{displayPath}</p></div>
-          <dl><div><dt>Type</dt><dd>{language ?? 'Unknown file type'}</dd></div><div><dt>Size</dt><dd>{displaySize(file.sizeBytes)}</dd></div></dl>
-        </header>
-        <p className="g-agent-file-status" role="status" data-testid="preview-too-large">This file is too large for a safe in-browser preview.</p>
-      </section>
-    );
+  const lineCount = countAgentPreviewLines(rawContent);
+  if (lineCount > MAX_AGENT_PREVIEW_LINES) {
+    return {
+      kind: 'placeholder',
+      message: 'This file contains too many lines for the read-only preview.',
+      testId: 'preview-too-many-lines',
+    };
   }
 
-  if (!content.length) {
-    return (
-      <section className="g-agent-source-preview" aria-labelledby="agent-source-preview-heading" data-testid="agent-source-preview">
-        <header className="g-agent-source-preview__header">
-          <div><h3 id="agent-source-preview-heading">{fileName}</h3><p aria-label="Selected file path">{displayPath}</p></div>
-          <dl><div><dt>Type</dt><dd>{language}</dd></div><div><dt>Size</dt><dd>{displaySize(file.sizeBytes)}</dd></div></dl>
-        </header>
-        <p className="g-agent-file-status" role="status" data-testid="preview-empty">This text file is empty.</p>
-      </section>
-    );
-  }
+  const content = safeAgentFileDisplayText(rawContent);
+  return content.length ? { kind: 'text', content, lineCount } : { kind: 'empty' };
+}
 
-  const lineCount = content.split(/\r\n|\n|\r/).length;
+export const AgentSourcePreview: React.FC<{ file: AgentSnapshotFile | null }> = React.memo(({ file }) => {
+  const previewState = useMemo(() => buildSourcePreviewState(file), [file]);
+  const language = file ? languageForAgentFile(file.path) ?? 'Plain text' : null;
+  const fileName = file ? safeAgentFileDisplayText(file.path.slice(file.path.lastIndexOf('/') + 1)) : null;
+  const displayPath = file ? safeAgentFileDisplayText(file.path) : null;
+
   return (
     <section className="g-agent-source-preview" aria-labelledby="agent-source-preview-heading" data-testid="agent-source-preview">
       <header className="g-agent-source-preview__header">
-        <div><h3 id="agent-source-preview-heading">{fileName}</h3><p aria-label="Selected file path">{displayPath}</p></div>
-        <dl><div><dt>Type</dt><dd>{language}</dd></div><div><dt>Size</dt><dd>{displaySize(file.sizeBytes)}</dd></div></dl>
+        <div>
+          <h3 id="agent-source-preview-heading">{fileName ?? 'Source preview'}</h3>
+          {file ? <p aria-label="Selected file path">{displayPath}</p> : <p>Select a file to inspect its read-only Demo source.</p>}
+        </div>
+        {file && <dl><div><dt>Type</dt><dd>{language}</dd></div><div><dt>Size</dt><dd>{displaySize(file.sizeBytes)}</dd></div></dl>}
       </header>
-      <div className="g-agent-source-code" aria-label={`${language} source code`} data-testid="source-code-viewer">
-        <ol aria-hidden="true">{Array.from({ length: lineCount }, (_, index) => <li key={index}>{index + 1}</li>)}</ol>
-        <pre><code>{content}</code></pre>
-      </div>
+      {previewState.kind === 'none' && <p className="g-agent-file-status" role="status">No file selected.</p>}
+      {previewState.kind === 'placeholder' && <p className="g-agent-file-status" role="status" data-testid={previewState.testId}>{previewState.message}</p>}
+      {previewState.kind === 'empty' && <p className="g-agent-file-status" role="status" data-testid="preview-empty">This text file is empty.</p>}
+      {previewState.kind === 'text' && (
+        <div className="g-agent-source-code" aria-label={`${language} source code`} data-testid="source-code-viewer">
+          <ol aria-hidden="true">{Array.from({ length: previewState.lineCount }, (_, index) => <li key={index}>{index + 1}</li>)}</ol>
+          <pre><code>{previewState.content}</code></pre>
+        </div>
+      )}
     </section>
   );
-};
+});
 
 export const AgentFileExplorer: React.FC<{ snapshot: DemoWorkspaceSnapshot }> = ({ snapshot }) => {
   const identity = `${snapshot.workspaceId}\u0000${snapshot.snapshotId}`;
