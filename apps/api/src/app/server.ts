@@ -3,7 +3,7 @@ import type pg from 'pg';
 import { createApp } from './create-app.js';
 import { loadConfig, type AppConfig } from './config.js';
 import { closeDatabasePool, createDatabasePool, redactDatabaseUrl } from '../db/client.js';
-import { runMigrations } from '../db/migrate.js';
+import { RUNTIME_ACL_MIGRATION_VERSION, RUNTIME_CRUD_TABLES, runMigrations } from '../db/migrate.js';
 import { createChatEngine } from '../modules/llm/chat-bootstrap.js';
 import type { ProviderTransport } from '../modules/llm/providers/gemini/gemini-provider.js';
 import type { LLMEngine } from '../modules/llm/engine.js';
@@ -81,12 +81,13 @@ export async function startServer(options: StartServerOptions = {}): Promise<{
         throw new Error('Database startup validation failed: public.schema_migrations table does not exist.');
       }
 
-      // 2. Fail-closed check: required migration version 16 must be applied
+      // 2. Both migration entry points must apply the runtime ACL migration before serving.
       const versionCheck = await pool.query<{ version: number }>(
-        'SELECT version FROM public.schema_migrations WHERE version = 16'
+        'SELECT version FROM public.schema_migrations WHERE version = $1',
+        [RUNTIME_ACL_MIGRATION_VERSION],
       );
       if (!versionCheck.rows.length) {
-        throw new Error('Database startup validation failed: required migration version 16 is not applied.');
+        throw new Error(`Database startup validation failed: required migration version ${RUNTIME_ACL_MIGRATION_VERSION} is not applied.`);
       }
 
       // 3. Fail-closed check: runtime privileges on schema_migrations and public schema
@@ -111,11 +112,18 @@ export async function startServer(options: StartServerOptions = {}): Promise<{
       }
 
       // 4. Fail-closed check: runtime privileges on application tables
-      const appTableCheck = await pool.query<{ can_crud_users: boolean }>(
-        "SELECT has_table_privilege(current_user, 'public.users', 'SELECT,INSERT,UPDATE,DELETE') AS can_crud_users"
+      const appTableCheck = await pool.query<{ table_name: string; privilege: string }>(
+        `SELECT t.table_name, p.privilege
+         FROM unnest($1::text[]) AS t(table_name)
+         CROSS JOIN (VALUES ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE')) AS p(privilege)
+         WHERE has_table_privilege(current_user, to_regclass(format('public.%I', t.table_name)), p.privilege)
+               IS DISTINCT FROM TRUE
+         LIMIT 1`,
+        [RUNTIME_CRUD_TABLES],
       );
-      if (!appTableCheck.rows[0]?.can_crud_users) {
-        throw new Error('Database startup validation failed: runtime role lacks required CRUD permissions on application tables.');
+      const missingPrivilege = appTableCheck.rows[0];
+      if (missingPrivilege) {
+        throw new Error(`Database startup validation failed: runtime role lacks ${missingPrivilege.privilege} on public.${missingPrivilege.table_name}.`);
       }
 
       // 5. Fail-closed check: sequence privileges (runtime must never possess UPDATE on public sequences)

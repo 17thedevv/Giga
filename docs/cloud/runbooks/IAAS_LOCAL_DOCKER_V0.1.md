@@ -79,14 +79,13 @@ curl --fail http://localhost:8080/health
 The generator creates ignored root `.env` with distinct randomly generated
 database credentials and the local-only Compose selection. It refuses to replace
 an existing configuration; preserve that file with its data volume. The file
-contains `COMPOSE_PATH_SEPARATOR=|` and
-`COMPOSE_FILE=compose.yaml|infra/docker/compose.local.yaml`, so subsequent
+sets `COMPOSE_PATH_SEPARATOR` to `|` and
+`COMPOSE_FILE` to `compose.yaml|infra/docker/compose.local.yaml`, so subsequent
 `docker compose up -d --build` starts the complete configured stack without
-extra flags. It also writes the ignored
-`infra/docker/nginx/allowed-hosts.conf` from the configured origin hostname.
+extra flags. Each env file points to its own ignored `*.nginx.conf` allowlist
+through `NGINX_HOSTS_FILE`.
 Both ingress profiles reject unknown `Host` values before proxying or redirecting.
-If changing the origin, stop the stack and generate a matching fresh `.env` and
-allowlist together. `.env.example` contains placeholders for manual review only; its
+`.env.example` contains placeholders for manual review only. Its
 placeholder values must not be used as credentials. Do not run a credential-
 revealing `docker compose config` or publish `docker inspect` environment output.
 
@@ -119,6 +118,28 @@ docker compose -f infra/docker/docker-compose.dev.yml up -d
 
 That file publishes PostgreSQL for local tools and has intentionally different
 credentials and storage; it is not the deployment profile.
+
+### Change the origin of an existing stack
+
+Use `--from` with the env file paired with the current PostgreSQL volume.
+It copies all five existing PostgreSQL credentials and other env settings,
+then sets the new origin, Compose profile and allowlist in a new env file.
+The example switches the default `giga-local` project to HTTPS. If the stack
+already uses another project name, use that name in every command.
+
+```bash
+node infra/docker/configure.mjs --origin=https://giga.example --tls-dir=/absolute/private/tls --from=.env --output=.env.https
+docker compose -p giga-local --env-file .env.https config --quiet
+docker compose -p giga-local --env-file .env.https stop
+docker compose -p giga-local --env-file .env.https up -d --build --wait
+curl --fail https://giga.example/health
+```
+
+Use the new env file for subsequent Compose, backup and restore commands.
+The original file still points to the original profile. To use a legacy HTTP
+env created before `NGINX_HOSTS_FILE` was introduced, first run
+`node infra/docker/configure.mjs --local --from=.env --output=.env.local-current`
+and use `.env.local-current` with the existing project name.
 
 ## Database permissions and migration lifecycle
 
@@ -155,15 +176,18 @@ must remain separate.
    process.
 4. **Externally-migrated mode with fail-closed validation:** The API runs with
    `MIGRATION_MODE: external`. On boot, API startup validates that
-   `schema_migrations` exists, required migration version 16 is applied, the
+   `schema_migrations` exists, required migration version 17 is applied, the
    runtime login has read-only access to migration history, has no `CREATE`
-   privilege on schema `public`, and has CRUD access to application tables. Missing
+   privilege on schema `public`, and has each required CRUD privilege on the
+   ordinary application tables. Missing
    schema, migrations, or excessive privileges cause immediate fail-closed exit.
 5. **Least-privilege future-table policy:** Default table privileges for
    `giga_migration` are revoked (`ALTER DEFAULT PRIVILEGES FOR ROLE giga_migration IN SCHEMA public REVOKE ALL ON TABLES FROM giga_api_runtime`).
    Future tables created by migrations or administrative routines do not grant
    CRUD to `giga_api_runtime` unless explicitly authorized. Application tables
-   receive explicit grants. Sequences retain `USAGE, SELECT`.
+   receive explicit grants. Sequences retain `USAGE, SELECT`. Migration 017
+   applies these ACLs to fresh databases and upgrades from 016 through both
+   Compose's migration job and the API's default auto-migrate startup.
 
 Changing a password in `.env` does **not** change a role password in an existing
 volume. A mismatch must fail startup. For a used volume, follow a separately
@@ -269,7 +293,7 @@ docker compose up -d --no-deps --wait nginx
 curl --fail http://localhost:8080/health
 ```
 
-The API startup runs forward migrations; switching images does not reverse a
+The Compose migration service runs forward migrations. Switching images does not reverse a
 migration. Do not edit `schema_migrations`, run unreviewed down SQL or restore
 over the serving database. Review migration compatibility before each release:
 test the older image against a disposable restored copy of the newer schema,
@@ -283,7 +307,7 @@ The proxy-only command uses `--no-deps` so it cannot select a different API imag
 
 ## Verification and acceptance checklist
 
-The current exact-SHA container rehearsal passed on 2026-11-02: commit
+An earlier container rehearsal passed on 2026-11-02 at commit
 `2cf199975100c4cde96ad704ea9fb5e43c59394e`, Docker 28.0.4, Compose 2.38.2,
 Node 22.23.4, PostgreSQL 16.15, on an Ubuntu 24.04 GitHub runner. Four guard
 tests, 14 HTTP/container checks, and five local-TLS checks passed, including
@@ -292,6 +316,12 @@ calls. The browser runner also stops Chrome's Linux process group and retries
 temporary profile cleanup. See the [run](https://github.com/17thedevv/Giga/actions/runs/41409878121),
 [redacted artifact](https://github.com/17thedevv/Giga/actions/runs/41409878121/artifacts/13124649078)
 and the [acceptance/evidence record](../../evidence/17T-92-local-iaas.md).
+For current results use the checks on the PR's proposed revision. The Docker
+workflow exercises production auto-migrate on an empty database and on a
+database at migration 016 with existing data and legacy grants. It also
+revokes each CRUD permission independently, expects startup rejection, then
+reuses the HTTP volume with the HTTPS configuration and checks preserved data.
+
 The first HTTP smoke used Chrome against loopback HTTP. HTTPS auth/cookie checks
 used a Node HTTP client with only the ephemeral localhost certificate trusted;
 public HTTPS was not tested. The Windows host itself has no Docker/WSL engine.

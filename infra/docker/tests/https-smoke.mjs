@@ -10,7 +10,7 @@ import { join } from 'node:path';
 
 assert.equal(process.env.GIGA_DOCKER_SMOKE, '1', 'HTTPS rehearsal requires explicit disposable smoke authorization');
 assert.match(process.env.COMPOSE_PROJECT_NAME ?? '', /^giga-smoke-[a-z0-9-]+$/, 'HTTPS rehearsal requires an isolated smoke project');
-const project = process.env.COMPOSE_PROJECT_NAME + '-https';
+const project = process.env.COMPOSE_PROJECT_NAME;
 const compose = ['compose', '--env-file', '.env.https', '-p', project, '-f', 'compose.yaml'];
 const certificate = await readFile('artifacts/private-tls/fullchain.pem');
 const privateValues = (await readFile('.env.https', 'utf8')).split(/\r?\n/)
@@ -140,7 +140,7 @@ try {
   const testedCommit = local('git', ['rev-parse', 'HEAD']);
   const containers = local('docker', [...compose, 'ps', '-q']).split(/\s+/).filter(id => /^[a-f0-9]{12,64}$/.test(id));
   const resourceSnapshot = containers.length ? local('docker', ['stats', '--no-stream', '--format', '{{.Name}} CPU={{.CPUPerc}} memory={{.MemUsage}} pids={{.PIDs}}', ...containers]) : 'unavailable';
-  const report = { testedCommit, timestamp: new Date().toISOString(), environment: 'separate disposable Compose HTTPS profile on loopback ports 80/443', certificate: 'ephemeral self-signed localhost certificate explicitly trusted by test requests only', liveProviderCalls: 0, checks, resourceSnapshot };
+  const report = { testedCommit, timestamp: new Date().toISOString(), environment: 'disposable Compose volume reused in the HTTPS profile on loopback ports 80/443', certificate: 'ephemeral self-signed localhost certificate explicitly trusted by test requests only', liveProviderCalls: 0, checks, resourceSnapshot };
   await writeFile(join(reportDir, 'report-https.json'), JSON.stringify(report, null, 2) + '\n');
   await writeFile(join(reportDir, 'summary-https.md'), '# Local HTTPS rehearsal\n\nTested commit: ' + testedCommit + '\n\nEphemeral self-signed localhost certificate; request-specific CA trust; real production cookie profile. Zero live provider calls.\n\n' + checks.map(item => '- ' + item.outcome + ': ' + item.name).join('\n') + '\n\nResource snapshot:\n\n' + resourceSnapshot + '\n');
 }

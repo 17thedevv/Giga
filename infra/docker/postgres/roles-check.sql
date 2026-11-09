@@ -19,8 +19,8 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'Role verification is limited to the local Giga Compose database and disposable restores';
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version = 16) THEN
-    RAISE EXCEPTION 'Migration 016 is not applied';
+  IF NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version = 17) THEN
+    RAISE EXCEPTION 'Migration 017 is not applied';
   END IF;
   FOREACH login IN ARRAY ARRAY['giga_migration', 'giga_runtime', 'giga_lifecycle', 'giga_quota'] LOOP
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = login AND rolcanlogin

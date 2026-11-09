@@ -6,6 +6,7 @@
 **/coverage
 **/.env
 **/.env.*
+**/*.nginx.conf
 **/*.log
 **/*.pem
 **/*.key

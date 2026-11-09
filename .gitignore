@@ -38,3 +38,4 @@ artifacts/
 *.dump
 infra/docker/tls/
 infra/docker/nginx/allowed-hosts.conf
+*.nginx.conf

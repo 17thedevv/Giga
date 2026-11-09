@@ -111,7 +111,12 @@ services:
     volumes:
       - ./infra/docker/nginx/https.conf:/etc/nginx/nginx.conf:ro
       - ./infra/docker/nginx/common.conf:/etc/nginx/giga-common.conf:ro
-      - ./infra/docker/nginx/allowed-hosts.conf:/etc/nginx/giga-allowed-hosts.conf:ro
+      - type: bind
+        source: ${NGINX_HOSTS_FILE:?Generate a per-config Nginx allowlist with configure.mjs}
+        target: /etc/nginx/giga-allowed-hosts.conf
+        read_only: true
+        bind:
+          create_host_path: false
       - ${TLS_CERT_DIR:?Configure TLS certificate directory}:/etc/nginx/tls:ro
     networks: [edge]
     depends_on:

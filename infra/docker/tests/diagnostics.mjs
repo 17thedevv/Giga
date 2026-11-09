@@ -7,7 +7,7 @@ for (const file of ['.env', '.env.https']) {
   let env;
   try { env = readFileSync(file, 'utf8'); } catch { continue; }
   const secrets = env.split(/\r?\n/).filter(line => /^(DB_PASSWORD_|GEMINI_API_KEY|CREDENTIAL_ENCRYPTION_KEY)/.test(line)).map(line => line.slice(line.indexOf('=') + 1)).filter(Boolean);
-  const result = spawnSync('docker', ['compose', '--env-file', file, '-p', project + (file.endsWith('https') ? '-https' : ''), '-f', 'compose.yaml', 'logs', '--no-color', '--tail=60'], { encoding: 'utf8', timeout: 15000 });
+  const result = spawnSync('docker', ['compose', '--env-file', file, '-p', project, 'logs', '--no-color', '--tail=60'], { encoding: 'utf8', timeout: 15000 });
   let output = (result.stdout ?? '') + (result.stderr ?? '');
   for (const secret of secrets) output = output.split(secret).join('[REDACTED]');
   output = output.replace(/postgres(?:ql)?:\/\/[^\s]+/gi, '[REDACTED_DATABASE_URL]');

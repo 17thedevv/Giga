@@ -30,47 +30,6 @@ export async function runMigrationJob() {
     } else {
       console.log('[giga-migrate] Database schema is up to date; zero pending migrations.');
     }
-
-    // Post-migration security hardening:
-    // 1. schema_migrations must be read-only for runtime (AgentRepository checks migration 013 at runtime).
-    await migrationPool.query('REVOKE ALL ON TABLE public.schema_migrations FROM giga_api_runtime');
-    await migrationPool.query('GRANT SELECT ON TABLE public.schema_migrations TO giga_api_runtime');
-
-    // 2. Restrict future-table default privileges (P2): replace fail-open default grants with least privilege.
-    await migrationPool.query('ALTER DEFAULT PRIVILEGES FOR ROLE giga_migration IN SCHEMA public REVOKE ALL ON TABLES FROM giga_api_runtime');
-
-    // 3. Ensure explicit CRUD access on existing application tables for giga_api_runtime.
-    const applicationTables = [
-      'users',
-      'sessions',
-      'conversations',
-      'messages',
-      'user_preferences',
-      'skill_definitions',
-      'skill_versions',
-      'skill_installations',
-      'chat_generations',
-      'chat_operation_keys',
-      'chat_turn_selections',
-      'user_provider_credentials',
-      'chat_credential_preferences',
-      'agent_workspaces',
-      'agent_runs',
-      'agent_run_events',
-      'agent_run_steps',
-      'agent_messages',
-    ];
-    for (const table of applicationTables) {
-      await migrationPool.query(`GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.${table} TO giga_api_runtime`);
-    }
-    // 4. Ensure sequence least privilege (P2): revoke excessive UPDATE/setval and grant USAGE, SELECT only.
-    // Repairs databases where historical migration 015 had granted ALL privileges on sequences.
-    await migrationPool.query('REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM giga_api_runtime');
-    await migrationPool.query('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO giga_api_runtime');
-    await migrationPool.query('ALTER DEFAULT PRIVILEGES FOR ROLE giga_migration IN SCHEMA public REVOKE ALL ON SEQUENCES FROM giga_api_runtime');
-    await migrationPool.query('ALTER DEFAULT PRIVILEGES FOR ROLE giga_migration IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO giga_api_runtime');
-
-    console.log('[giga-migrate] Database migrations and least-privilege security hardening complete.');
   } finally {
     await closeDatabasePool(migrationPool);
   }

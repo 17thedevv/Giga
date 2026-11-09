@@ -17,7 +17,8 @@ export function migrationsSupportedByTestDatabase(
   // pg-mem cannot model PostgreSQL roles, column privileges, SECURITY DEFINER
   // procedures or the DO blocks in migration 015. Migration 016's fencing
   // constraints are exercised in memory with its role grants stripped below.
-  return isMemory ? migrations.filter((migration) => migration.version !== 15) : migrations;
+  // Migration 017 also requires real PostgreSQL for ACL changes.
+  return isMemory ? migrations.filter((migration) => ![15, 17].includes(migration.version)) : migrations;
 }
 
 export interface TestDbSafetyCheckResult {

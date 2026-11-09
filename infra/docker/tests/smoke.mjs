@@ -7,6 +7,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { parseEnv } from 'node:util';
 import { browserSmoke } from './browser.mjs';
 
 const project = process.env.COMPOSE_PROJECT_NAME ?? '';
@@ -18,7 +19,8 @@ const fixture = [...compose, '-f', 'infra/docker/tests/compose.fixture.yaml'];
 const checks = [];
 const reportDir = 'artifacts/docker-smoke';
 const temporary = await mkdtemp(join(tmpdir(), 'giga-docker-smoke-'));
-const privateValues = (await readFile('.env', 'utf8')).split(/\r?\n/)
+const envText = await readFile('.env', 'utf8');
+const privateValues = envText.split(/\r?\n/)
   .filter(line => /^[A-Z_]*(?:PASSWORD|KEY|TOKEN|SECRET)[A-Z_]*=/.test(line))
   .map(line => line.slice(line.indexOf('=') + 1).replace(/^["']|["']$/g, '')).filter(value => value.length >= 8);
 let fixtureActive = false;
@@ -82,7 +84,7 @@ async function health() {
   throw new Error('Health did not recover');
 }
 function sql(query, login = 'giga_admin', passwordKey = 'DB_PASSWORD_ADMIN', database = 'giga') {
-  assert.match(database, /^giga(?:_restore_test_[a-f0-9]{32})?$/);
+  assert.match(database, /^giga(?:_(?:restore_test|auto_fresh|auto_upgrade)_[a-f0-9]{32})?$/);
   assert.ok(['giga_admin', 'giga_migration', 'giga_runtime', 'giga_lifecycle', 'giga_quota'].includes(login));
   assert.ok(['DB_PASSWORD_ADMIN', 'DB_PASSWORD_MIGRATION', 'DB_PASSWORD_API', 'DB_PASSWORD_LIFECYCLE', 'DB_PASSWORD_QUOTA'].includes(passwordKey));
   return docker([...compose, 'exec', '-T', 'postgres', 'sh', '-c',
@@ -275,65 +277,20 @@ try {
     sql(await readFile('infra/docker/postgres/roles-check.sql', 'utf8'));
     await health();
   });
-  await check('sequence least privilege and post-migration hardening against historical grants', async () => {
-    try {
-      // 1. Simulate historical database state where a sequence had ALL privileges granted to runtime
-      sql('CREATE SEQUENCE public.p2_historical_seq START 10;', 'giga_migration', 'DB_PASSWORD_MIGRATION');
-      sql('GRANT ALL PRIVILEGES ON SEQUENCE public.p2_historical_seq TO giga_api_runtime;', 'giga_migration', 'DB_PASSWORD_MIGRATION');
-      assert.equal(
-        sql("SELECT has_sequence_privilege('giga_runtime', 'public.p2_historical_seq', 'UPDATE');"),
-        't',
-        'Historical grant conferred UPDATE on sequence'
-      );
-
-      // 2. Post-migration hardening repairs existing database sequences
-      const migrateRun = run('docker', [...compose, 'run', '--rm', '--no-deps', 'migrate']);
-      assert.equal(migrateRun.status, 0, 'Migration hardening runner succeeds');
-
-      // 3. Verify UPDATE is revoked while USAGE and SELECT remain
-      assert.equal(
-        sql("SELECT has_sequence_privilege('giga_runtime', 'public.p2_historical_seq', 'UPDATE');"),
-        'f',
-        'Hardening must revoke UPDATE privilege on existing sequences'
-      );
-      assert.equal(
-        sql("SELECT has_sequence_privilege('giga_runtime', 'public.p2_historical_seq', 'USAGE');"),
-        't',
-        'Hardening must preserve USAGE privilege on existing sequences'
-      );
-      assert.equal(
-        sql("SELECT has_sequence_privilege('giga_runtime', 'public.p2_historical_seq', 'SELECT');"),
-        't',
-        'Hardening must preserve SELECT privilege on existing sequences'
-      );
-
-      // 4. Runtime cannot setval() on the sequence
-      assert.throws(() => {
-        sql("SELECT setval('public.p2_historical_seq', 999);", 'giga_runtime', 'DB_PASSWORD_API');
-      }, /permission denied/i);
-
-      // 5. Runtime CAN nextval() and currval() within an active session
-      assert.equal(
-        sql("SELECT nextval('public.p2_historical_seq') || '|' || currval('public.p2_historical_seq');", 'giga_runtime', 'DB_PASSWORD_API'),
-        '10|10'
-      );
-
-      // 6. New sequences created by migration role do not inherit UPDATE default privilege
-      sql('CREATE SEQUENCE public.p2_future_seq START 1;', 'giga_migration', 'DB_PASSWORD_MIGRATION');
-      assert.equal(
-        sql("SELECT has_sequence_privilege('giga_runtime', 'public.p2_future_seq', 'UPDATE');"),
-        'f',
-        'New sequences must not receive default UPDATE privilege'
-      );
-      assert.equal(
-        sql("SELECT has_sequence_privilege('giga_runtime', 'public.p2_future_seq', 'USAGE');"),
-        't',
-        'New sequences receive default USAGE privilege'
-      );
-    } finally {
-      sql('DROP SEQUENCE IF EXISTS public.p2_historical_seq, public.p2_future_seq CASCADE;', 'giga_migration', 'DB_PASSWORD_MIGRATION');
+  await check('production auto startup applies ACL migration on fresh databases and upgrades from 016', async () => {
+    const databases = ['fresh', 'upgrade'].map(kind => 'giga_auto_' + kind + '_' + randomUUID().replaceAll('-', ''));
+    for (const database of databases) {
+      sql(`CREATE DATABASE ${database} OWNER giga_migration TEMPLATE template0;`);
+      sql('REVOKE ALL ON SCHEMA public FROM PUBLIC; GRANT USAGE, CREATE ON SCHEMA public TO giga_agent_lifecycle_owner;',
+        'giga_admin', 'DB_PASSWORD_ADMIN', database);
     }
-    await health();
+    const output = docker([
+      ...compose, 'run', '--rm', '--no-deps', '-e', 'DB_PASSWORD_API',
+      '-v', './infra/docker/tests/migration-smoke.mjs:/app/infra/docker/tests/migration-smoke.mjs:ro',
+      'migrate', 'node', 'infra/docker/tests/migration-smoke.mjs', ...databases,
+    ], { env: { ...process.env, DB_PASSWORD_API: parseEnv(envText).DB_PASSWORD_API } });
+    assert.match(output, /PASS auto fresh, 016 upgrade, and per-privilege startup guards/);
+    return { paths: ['fresh database', 'upgrade from 016 with legacy ACLs and existing data'], deniedGrants: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'] };
   });
   await check('real browser login, protected deep link, reload and logout', async () => {
     return browserSmoke({ base, email, password, conversationId });
