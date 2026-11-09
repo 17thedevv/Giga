@@ -1375,4 +1375,16 @@ describe('Real Agent workspace and run integration', () => {
     expect(await screen.findByText('All workspace run')).toBeDefined();
     expect(screen.queryByText('After refresh')).toBeNull();
   });
+
+  it('keeps file browsing unavailable in Real run detail when the API capability is disabled', async () => {
+    vi.spyOn(realApiClient, 'getAgentRun').mockResolvedValue({ run: failedRun });
+    vi.spyOn(realApiClient, 'getAgentCapabilities').mockResolvedValue(capabilities);
+
+    renderReal(<AgentRunView />, '/agent/runs/' + failedRun.id);
+
+    expect(await screen.findByTestId('agent-run-view')).toBeDefined();
+    expect(await screen.findByTestId('real-files-unsupported')).toBeDefined();
+    expect(screen.queryByTestId('agent-file-explorer')).toBeNull();
+    expect(screen.queryByText(/React Task Manager/)).toBeNull();
+  });
 });
