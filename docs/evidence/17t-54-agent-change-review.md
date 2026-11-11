@@ -72,3 +72,56 @@ Draft PR #54 is open at https://github.com/17thedevv/Giga/pull/54. The two GitHu
 - Real-mode change review requires 17T-74 to define and implement an authenticated, workspace/run-scoped DTO and endpoint, then frontend integration and backend authorization review.
 - Browser screenshots, mobile visual QA, and authenticated Real API tests were not available in this session.
 - Independent API/DTO and UX review remain open.
+
+## Review remediation — 5856366350
+
+**Finding review:** [PR review #5856366350](https://github.com/17thedevv/Giga/pull/54#pullrequestreview-5856366350) · **Implementation commit / reviewed code HEAD:** `1bdd74ab9f819a5b2f04d3b598e303b8ce1736ef`.
+
+### DIFF-STATE-01 — Created/deleted side contradictions
+
+The prior projector rejected additions in deleted files and deletions in created files, but still allowed context rows or nonempty hunks on a side the status said did not exist. This let the viewer claim a created file had no before revision while showing old-side content, including in a partial preview.
+
+`parsePreview()` now enforces status invariants for both complete and partial samples at the projection boundary:
+
+- `created` requires the canonical empty old range (`oldStart: 0`, `oldCount: 0`) and accepts only additions plus a no-final-newline marker for the `after` side.
+- `deleted` requires the canonical empty new range (`newStart: 0`, `newCount: 0`) and accepts only deletions plus a no-final-newline marker for the `before` side.
+- Contradictory context/addition/deletion rows, noncanonical absent-side ranges, and markers naming a missing side reject the entire change set. Invalid patches do not reach the viewer or clipboard; they are not silently converted to partial content.
+- Modified files continue to accept context, additions, deletions, multiple hunks, and valid before/after/both no-newline markers.
+
+### DIFF-HUNK-02 — Complete multi-hunk gap consistency
+
+Previously only hunk start ordering was checked, so a complete patch could omit a change between hunks and still be called complete and copied as a patch.
+
+The parser normalizes nonempty one-based ranges and zero-count boundary ranges, rejects overlapping/decreasing ranges, and for each adjacent pair of `complete` hunks requires the omitted unchanged-line span to match on the old and new sides. Starts and counts are bounded to 10 million before boundary/gap arithmetic. This permits line shifts accounted for by represented additions/deletions, and permits unchanged source outside the hunks. `partial` excerpts still allow unequal omitted spans but remain explicitly partial and copy only as a labeled excerpt. A rejected complete patch is rejected atomically and has no copyable projection.
+
+### DIFF-STATUS-03 — Strict status validation
+
+The summary status check previously used `String(item.status)`, which accepted arrays such as `['created']`, then projected the original array through a type cast. The projector now uses an exact runtime type guard: only the strings `created`, `modified`, and `deleted` are accepted. No unchecked cast or coercive status conversion remains. Arrays, objects, `null`, `undefined`, numbers, booleans, case variants, and whitespace variants reject before rendering or copy.
+
+### Regression coverage
+
+`apps/web/tests/agent-diff-model.test.ts` adds deterministic cases for created/deleted context and opposite-side content, nonzero absent-side ranges, partial contradictions, no-newline markers on missing sides, valid created/deleted/modified patches, exact status acceptance/rejection, equal and unequal complete gaps, insertion/deletion line shifts, zero-count hunk boundaries, overlap/decreasing ranges, partial unequal gaps, and complete-vs-excerpt copy labels.
+
+`apps/web/tests/agent-diff-viewer.test.tsx` verifies that created/deleted unified and split rows render only on existing sides, and that shifted multi-hunk line numbers agree in both layouts. `apps/web/tests/agent-change-review.test.tsx` verifies malformed status and contradictory partial patches show an invalid-state message without source content or copy controls. The prior 466 tests remain; the full suite now has 476 passing tests.
+
+### Verification for the fix commit
+
+| Command | Result |
+| --- | --- |
+| `npm ci --prefix apps/web` | PASS; 0 vulnerabilities; upstream `whatwg-encoding` deprecation warning |
+| `npm run typecheck --prefix apps/web` | PASS |
+| Focused diff tests (`agent-diff-model`, `agent-diff-viewer`, `agent-change-review`) | PASS; 3 files, 54 tests |
+| `npm test --prefix apps/web -- --reporter=dot` | PASS; 26 files, 476 tests |
+| `npm run build --prefix apps/web` | PASS; 84 modules; JS 482.37 kB / 130.51 kB gzip; CSS 39.09 kB |
+| `npm run test:production-security --prefix apps/web` | PASS; scanned 1 JavaScript asset |
+| `npm audit --prefix apps/web --audit-level=moderate` | PASS; 0 vulnerabilities |
+| `node --test .agents/scripts/validate-git-workflow.test.mjs` | PASS; 6 tests |
+| `node .agents/scripts/validate-skills.mjs` | PASS |
+| `node .agents/scripts/validate-git-workflow.mjs` | PASS for branch, PR title/body, base `7cacaaaa61cb7ee2542ad2d12b6a275a0f8d811c`, and implementation HEAD above |
+| `git diff --check` | PASS |
+| GitHub Frontend CI | PASS on implementation commit above; [run #90](https://github.com/17thedevv/Giga/actions/runs/42997282511) |
+| GitHub Validate Git Workflow | PASS on implementation commit above; [run #279](https://github.com/17thedevv/Giga/actions/runs/42997282548) |
+
+The full suite continues to emit unrelated React `act()` warnings from Chat/Auth/BYOK tests; all tests pass. Browser/mobile screenshots remain unavailable because this environment has no browser runner/executable. No deployed Real API integration is claimed. Real diff support remains dependent on 17T-74.
+
+The evidence-only follow-up commit changes no application code; its exact PR head and GitHub checks are verified in the PR and delivery handoff. PR #54 remains Draft and Linear 17T-54 remains In Review. No backend, contract, database, deployment, or merge change was made.
