@@ -57,13 +57,14 @@ Environment: Windows PowerShell, Node/npm from the repository environment. Comma
 | Frontend lint | Not configured in `apps/web/package.json` |
 | Browser/E2E and screenshots | Not run: this checkout has no configured browser runner or browser automation connection. Responsive CSS and interaction behavior have component-level coverage only. |
 | Deployed Real API | Not tested or claimed; the Real diff route is not implemented. |
-| GitHub Actions on final HEAD | Pending push / PR creation; do not treat local checks as CI evidence. |
+| GitHub Validate Git Workflow | PASS on `09ebe92d95e5695f2b3222448bbdfe3d28c1d33e`; [run #276](https://github.com/17thedevv/Giga/actions/runs/42981846015) |
+| GitHub Frontend CI | PASS on `09ebe92d95e5695f2b3222448bbdfe3d28c1d33e`; [run #88](https://github.com/17thedevv/Giga/actions/runs/42981846166) |
 
 The suite emits existing React `act()` warnings in unrelated Chat/BYOK tests; all 466 tests passed. No production deployment was performed.
 
 ## Review and delivery
 
-Draft PR creation and final CI are pending. Intended independent reviewer: Trà. Keep the PR Draft until review. Do not merge or deploy. Linear 17T-54 should remain In Review after the Draft PR and evidence are linked.
+Draft PR #54 is open at https://github.com/17thedevv/Giga/pull/54. The two GitHub Actions runs above passed on the PR head when this evidence update was prepared. A following documentation-only commit will trigger CI again; verify that exact final head before handoff. Intended independent reviewer: Trà. Keep the PR Draft until review. Do not merge or deploy. Linear 17T-54 should remain In Review after the Draft PR and evidence are linked.
 
 ## Limitations and follow-up
 
