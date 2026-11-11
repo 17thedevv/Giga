@@ -5,6 +5,7 @@ import fixture from '../../../packages/contracts/fixtures/agent.json';
 import { AgentLauncherView } from '../src/features/agent/AgentLauncherView.js';
 import { AgentRunView } from '../src/features/agent/AgentRunView.js';
 import * as agentFileFixtures from '../src/features/agent/agent-file-fixtures.js';
+import * as agentDiffFixtures from '../src/features/agent/agent-diff-fixtures.js';
 import { ApiModeProvider, useApiMode } from '../src/app/context/ApiModeContext.js';
 import { ThemeProvider } from '../src/app/context/ThemeContext.js';
 import { AuthProvider } from '../src/app/context/AuthContext.js';
@@ -1386,8 +1387,33 @@ describe('Real Agent workspace and run integration', () => {
 
     expect(await screen.findByTestId('agent-run-view')).toBeDefined();
     expect(await screen.findByTestId('real-files-unsupported')).toBeDefined();
+    expect(await screen.findByTestId('real-change-review-unavailable')).toBeDefined();
+    expect(screen.getByTestId('real-change-review-unavailable').textContent).toContain('No Demo patches are used for Real runs');
     expect(screen.queryByTestId('agent-file-explorer')).toBeNull();
+    expect(screen.queryByTestId('file-diff-viewer')).toBeNull();
     expect(screen.queryByText(/React Task Manager/)).toBeNull();
     expect(getDemoWorkspaceSnapshot).not.toHaveBeenCalled();
+  });
+
+  it('does not enable Real diff review from sandboxFiles metadata without a reviewed diff route', async () => {
+    const capsWithFiles = {
+      ...capabilities,
+      capabilities: { ...capabilities.capabilities, sandboxFiles: { available: true as const } },
+    };
+    vi.spyOn(realApiClient, 'getAgentRun').mockResolvedValue({ run: failedRun });
+    vi.spyOn(realApiClient, 'getAgentWorkspace').mockResolvedValue({ workspace });
+    vi.spyOn(realApiClient, 'getAgentCapabilities').mockResolvedValue(capsWithFiles);
+    const getDemoWorkspaceSnapshot = vi.spyOn(agentFileFixtures, 'getDemoWorkspaceSnapshot');
+    const getDemoAgentDiffFixtures = vi.spyOn(agentDiffFixtures, 'getDemoAgentDiffFixtures');
+
+    renderReal(<AgentRunView />, '/agent/runs/' + failedRun.id);
+
+    expect(await screen.findByTestId('real-change-review-unavailable')).toBeDefined();
+    expect(await screen.findByTestId('real-files-route-pending')).toBeDefined();
+    expect(screen.queryByTestId('file-diff-viewer')).toBeNull();
+    expect(screen.queryByTestId('agent-file-explorer')).toBeNull();
+    expect(getDemoWorkspaceSnapshot).not.toHaveBeenCalled();
+    expect(getDemoAgentDiffFixtures).not.toHaveBeenCalled();
+    expect(screen.getByTestId('real-change-review-unavailable').textContent).toContain('No Demo patches are used for Real runs');
   });
 });

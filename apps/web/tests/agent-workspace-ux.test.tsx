@@ -275,10 +275,10 @@ describe('Workspace-First GigaAgent UX (17T-40)', () => {
       await waitFor(() => {
         expect(screen.getByTestId('workspace-changes-section')).toBeDefined();
       });
-      expect(screen.getByText('src/App.tsx')).toBeDefined();
-      expect(screen.getByText('src/styles.css')).toBeDefined();
-      expect(screen.getByText('src/components/TaskList.tsx')).toBeDefined();
-      expect(screen.getByText('package.json')).toBeDefined();
+      expect(screen.getByTestId('file-item-src/App.tsx')).toBeDefined();
+      expect(screen.getByTestId('file-item-src/styles.css')).toBeDefined();
+      expect(screen.getByTestId('file-item-src/components/TaskList.tsx')).toBeDefined();
+      expect(screen.getByTestId('file-item-package.json')).toBeDefined();
 
       // Click on a file to view diff
       const appFileCard = screen.getByTestId('file-item-src/App.tsx');
@@ -390,8 +390,8 @@ describe('Workspace-First GigaAgent UX (17T-40)', () => {
       // Changes tab preserves partial work
       fireEvent.click(screen.getByTestId('tab-changes'));
       await waitFor(() => {
-        expect(screen.getByText('prisma/schema.prisma')).toBeDefined();
-        expect(screen.getByText('src/lib/db.ts')).toBeDefined();
+        expect(screen.getByTestId('file-item-prisma/schema.prisma')).toBeDefined();
+        expect(screen.getByTestId('file-item-src/lib/db.ts')).toBeDefined();
       });
 
       // Verification shows failed check
