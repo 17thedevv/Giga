@@ -262,6 +262,13 @@ const GOLDEN_REACT_RUN: AgentRunDetail = {
       deletions: 1,
       diffPreview: '@@ -12,4 +12,9 @@\n   "scripts": {\n+    "test": "vitest run"\n   }',
     },
+    { path: 'src/components/index.ts', status: 'created', additions: 3, deletions: 0 },
+    { path: 'src/utils/index.ts', status: 'modified', additions: 2, deletions: 1 },
+    { path: 'docs/Release notes à lire.md', status: 'created', additions: 2, deletions: 0 },
+    { path: 'docs/old setup guide.md', status: 'deleted', additions: 0, deletions: 3 },
+    { path: 'assets/logo.png', status: 'modified' },
+    { path: 'src/large-preview.ts', status: 'modified' },
+    { path: 'src/without-patch.ts', status: 'created', additions: 1, deletions: 0 },
   ],
   verifications: [
     { name: 'TypeScript Typecheck', outcome: 'passed', summary: 'tsc --noEmit: 0 type errors found.' },

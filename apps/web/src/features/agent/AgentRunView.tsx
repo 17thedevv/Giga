@@ -10,6 +10,8 @@ import {
 } from './workspace-fixtures.js';
 import { getDemoWorkspaceSnapshot } from './agent-file-fixtures.js';
 import { AgentFileExplorer } from './AgentFileExplorer.js';
+import { AgentChangeReview } from './AgentChangeReview.js';
+import { getDemoAgentDiffFixtures } from './agent-diff-fixtures.js';
 import { Badge } from '../../components/Badge.js';
 import { Button } from '../../components/Button.js';
 import { Alert } from '../../components/Alert.js';
@@ -20,8 +22,6 @@ import {
   SpinnerIcon,
   ShieldIcon,
   DownloadIcon,
-  ChevronDownIcon,
-  ChevronRightIcon,
 } from '../../components/Icons.js';
 
 const DemoAgentRunView: React.FC = () => {
@@ -33,7 +33,6 @@ const DemoAgentRunView: React.FC = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'plan' | 'timeline' | 'files' | 'changes' | 'verification' | 'artifacts'>('plan');
-  const [expandedDiffs, setExpandedDiffs] = useState<Record<string, boolean>>({});
 
   // Real Mode Capabilities for Action Buttons
   const [canCancel, setCanCancel] = useState<boolean>(true);
@@ -164,10 +163,6 @@ const DemoAgentRunView: React.FC = () => {
     if (updated) {
       setRun({ ...updated });
     }
-  };
-
-  const toggleDiff = (path: string) => {
-    setExpandedDiffs((prev) => ({ ...prev, [path]: !prev[path] }));
   };
 
   if (isLoading) {
@@ -721,126 +716,12 @@ const DemoAgentRunView: React.FC = () => {
           <AgentFileExplorer key={demoSnapshot.workspaceId} snapshot={demoSnapshot} />
         )}
 
-        {/* Tab Content: Workspace Changes is change metadata, not a persisted snapshot. */}
         {activeTab === 'changes' && (
-          <div
-            className="g-card"
-            style={{
-              backgroundColor: 'var(--giga-surface, #111C2D)',
-              border: '1px solid var(--giga-border, #1E293B)',
-              borderRadius: 'var(--giga-radius-lg, 12px)',
-              padding: '20px',
-            }}
-            data-testid="workspace-changes-section"
-          >
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '14px' }}>
-              <h3 style={{ fontSize: '15px', fontWeight: 600, color: 'var(--giga-text, #F8FAFC)', margin: 0 }}>
-                Sandbox File Changes Summary
-              </h3>
-              <span style={{ fontSize: '12px', color: 'var(--giga-text-secondary, #94A3B8)' }}>
-                {run.fileChanges.length} files modified in sandbox
-              </span>
-            </div>
-
-            <p style={{ fontSize: '12px', color: 'var(--giga-text-secondary, #94A3B8)', margin: '0 0 14px', lineHeight: 1.4 }}>
-              Ordinary sandbox file edits occur inside the isolated workspace container. No external GitHub repository or PR is required.
-            </p>
-
-            {run.fileChanges.length === 0 ? (
-              <div style={{ textAlign: 'center', padding: '24px', color: 'var(--giga-text-secondary, #94A3B8)', fontSize: '13px' }} data-testid="empty-changes-message">
-                No sandbox files were created or modified for this run.
-              </div>
-            ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }} data-testid="file-changes-list">
-                {run.fileChanges.map((file) => {
-                  const isExpanded = Boolean(expandedDiffs[file.path]);
-
-                  return (
-                    <div
-                      key={file.path}
-                      style={{
-                        backgroundColor: 'var(--giga-surface-muted, #18263A)',
-                        border: '1px solid var(--giga-border, #1E293B)',
-                        borderRadius: 'var(--giga-radius-md, 8px)',
-                        overflow: 'hidden',
-                        cursor: 'pointer',
-                      }}
-                      onClick={() => toggleDiff(file.path)}
-                      data-testid={`file-item-${file.path}`}
-                    >
-                      <div
-                        style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'space-between',
-                          padding: '10px 14px',
-                          userSelect: 'none',
-                        }}
-                      >
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                          <span style={{ color: 'var(--giga-text-secondary, #94A3B8)' }}>
-                            {isExpanded ? <ChevronDownIcon size={14} /> : <ChevronRightIcon size={14} />}
-                          </span>
-                          <span
-                            style={{
-                              fontSize: '11px',
-                              fontWeight: 700,
-                              textTransform: 'uppercase',
-                              padding: '2px 6px',
-                              borderRadius: '4px',
-                              backgroundColor:
-                                file.status === 'created'
-                                  ? 'rgba(22, 163, 74, 0.15)'
-                                  : file.status === 'deleted'
-                                  ? 'rgba(220, 38, 38, 0.15)'
-                                  : 'rgba(59, 130, 246, 0.15)',
-                              color:
-                                file.status === 'created'
-                                  ? 'var(--giga-success, #16A34A)'
-                                  : file.status === 'deleted'
-                                  ? 'var(--giga-danger, #EF4444)'
-                                  : 'var(--giga-primary, #3B82F6)',
-                            }}
-                          >
-                            {file.status}
-                          </span>
-                          <span style={{ fontSize: '13px', fontWeight: 600, color: 'var(--giga-text, #F8FAFC)', fontFamily: 'monospace' }}>
-                            {file.path}
-                          </span>
-                        </div>
-
-                        {file.additions !== undefined && (
-                          <div style={{ fontSize: '12px', fontFamily: 'monospace' }}>
-                            <span style={{ color: 'var(--giga-success, #16A34A)' }}>+{file.additions}</span>{' '}
-                            <span style={{ color: 'var(--giga-danger, #EF4444)' }}>-{file.deletions || 0}</span>
-                          </div>
-                        )}
-                      </div>
-
-                      {/* Diff Preview */}
-                      {isExpanded && file.diffPreview && (
-                        <div
-                          style={{
-                            padding: '10px 14px',
-                            borderTop: '1px solid var(--giga-border, #1E293B)',
-                            backgroundColor: '#070D18',
-                            fontSize: '12px',
-                            fontFamily: 'monospace',
-                            color: 'var(--giga-text-secondary, #CBD5E1)',
-                            whiteSpace: 'pre-wrap',
-                            overflowX: 'auto',
-                          }}
-                          data-testid="file-diff-viewer"
-                        >
-                          {file.diffPreview}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
+          <AgentChangeReview
+            key={`${run.workspaceId}:${run.id}`}
+            fileChanges={run.fileChanges}
+            fixtureValue={run.isDemo ? getDemoAgentDiffFixtures(run.id) : undefined}
+          />
         )}
 
         {/* Tab Content 4: Verification Evidence */}

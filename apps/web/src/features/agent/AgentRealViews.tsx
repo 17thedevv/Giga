@@ -19,6 +19,7 @@ import { Textarea } from '../../components/Textarea.js';
 import { AgentMessageThread } from './AgentMessageThread.js';
 import { AgentRunTimeline } from './AgentRunTimeline.js';
 import { AgentRealFilesPanel } from './AgentFileExplorer.js';
+import { AgentRealChangeReviewPanel } from './AgentChangeReview.js';
 
 const modes: readonly { value: AgentMode; title: string; detail: string }[] = [
   { value: 'ask', title: 'Ask', detail: 'Answer a question without changing workspace files.' },
@@ -825,6 +826,7 @@ export const AgentRealRunView: React.FC = () => {
           )}
         </section>
         <AgentRealFilesPanel key={run.workspaceId} workspaceId={run.workspaceId} />
+        <AgentRealChangeReviewPanel key={`change-review-${run.workspaceId}-${run.id}`} />
         <AgentRunTimeline key={`timeline-${run.id}`} run={run} onRefreshRun={refreshRunAuthoritatively} />
         <AgentMessageThread
           key={run.id}
