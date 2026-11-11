@@ -77,6 +77,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value));
 }
 
+function isAgentChangeStatus(value: unknown): value is AgentChangeStatus {
+  return value === 'created' || value === 'modified' || value === 'deleted';
+}
+
+/** Unified diff zero-count ranges name a boundary; non-empty ranges start on a one-based line. */
+function hunkRangeStartBoundary(start: number, count: number): number {
+  return count === 0 ? start : start - 1;
+}
+
 function safeCount(value: unknown): number | null | undefined {
   if (value === undefined) return undefined;
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= SAFE_COUNT
@@ -98,11 +107,11 @@ function projectSummaries(value: unknown): SafeSummary[] | null {
     if (!isRecord(item)) return null;
     const pathResult = validateWorkspaceRelativePath(item.path);
     if (!pathResult.ok || sanitizeUntrustedText(item.path as string) !== item.path || seen.has(item.path as string) ||
-        !['created', 'modified', 'deleted'].includes(String(item.status))) return null;
+        !isAgentChangeStatus(item.status)) return null;
     const additions = safeCount(item.additions);
     const deletions = safeCount(item.deletions);
     if (additions === null || deletions === null) return null;
-    const status = item.status as AgentChangeStatus;
+    const status = item.status;
     if ((status === 'created' && deletions !== undefined && deletions !== 0) ||
         (status === 'deleted' && additions !== undefined && additions !== 0)) return null;
     seen.add(item.path as string);
@@ -184,8 +193,8 @@ function parsePreview(
   let computedAdditions = 0;
   let computedDeletions = 0;
   let byteLength = 0;
-  let priorOldEnd = -1;
-  let priorNewEnd = -1;
+  let priorOldEndBoundary = -1;
+  let priorNewEndBoundary = -1;
 
   for (let hunkIndex = 0; hunkIndex < value.hunks.length; hunkIndex++) {
     const rawHunk = value.hunks[hunkIndex];
@@ -199,7 +208,18 @@ function parsePreview(
         declaredNewCount === undefined || declaredNewCount === null ||
         (declaredOldCount > 0 && oldStart === 0) ||
         (declaredNewCount > 0 && newStart === 0) ||
-        oldStart < priorOldEnd || newStart < priorNewEnd) return null;
+        (status === 'created' && (oldStart !== 0 || declaredOldCount !== 0)) ||
+        (status === 'deleted' && (newStart !== 0 || declaredNewCount !== 0))) return null;
+
+    const oldRangeStartBoundary = hunkRangeStartBoundary(oldStart, declaredOldCount);
+    const newRangeStartBoundary = hunkRangeStartBoundary(newStart, declaredNewCount);
+    if (oldRangeStartBoundary < priorOldEndBoundary || newRangeStartBoundary < priorNewEndBoundary) return null;
+    if (value.kind === 'complete' && hunkIndex > 0) {
+      // safeCount bounds each operand to 10M; these boundary and gap operations stay well within safe integers.
+      const omittedOldLines = oldRangeStartBoundary - priorOldEndBoundary;
+      const omittedNewLines = newRangeStartBoundary - priorNewEndBoundary;
+      if (omittedOldLines !== omittedNewLines) return null;
+    }
 
     let oldLine = oldStart;
     let newLine = newStart;
@@ -209,16 +229,23 @@ function parsePreview(
     for (let lineIndex = 0; lineIndex < rawHunk.lines.length; lineIndex++) {
       const rawLine = rawHunk.lines[lineIndex];
       if (!isRecord(rawLine) || typeof rawLine.kind !== 'string') return null;
+      if ((status === 'created' && rawLine.kind !== 'addition' && rawLine.kind !== 'no-newline') ||
+          (status === 'deleted' && rawLine.kind !== 'deletion' && rawLine.kind !== 'no-newline')) return null;
       if (rawLine.kind === 'no-newline') {
         const appliesTo = rawLine.appliesTo;
         const validSide = appliesTo === 'before' || appliesTo === 'after' || appliesTo === 'both';
+        const sideExistsForStatus = status === 'created'
+          ? appliesTo === 'after'
+          : status === 'deleted'
+            ? appliesTo === 'before'
+            : true;
         const previousSupportsSide = appliesTo === 'before'
           ? lastContentKind === 'deletion' || lastContentKind === 'context'
           : appliesTo === 'after'
             ? lastContentKind === 'addition' || lastContentKind === 'context'
             : lastContentKind === 'context';
         const isFinalMarker = hunkIndex === value.hunks.length - 1 && lineIndex === rawHunk.lines.length - 1;
-        if (!validSide || !previousSupportsSide || !isFinalMarker || sawMarker) return null;
+        if (!validSide || !sideExistsForStatus || !previousSupportsSide || !isFinalMarker || sawMarker) return null;
         lines.push({
           key: `${path}\u0000${hunkIndex}\u0000${lineIndex}`,
           kind: 'no-newline',
@@ -257,8 +284,8 @@ function parsePreview(
     const oldCount = oldLine - oldStart;
     const newCount = newLine - newStart;
     if (oldCount !== declaredOldCount || newCount !== declaredNewCount) return null;
-    priorOldEnd = oldStart + oldCount;
-    priorNewEnd = newStart + newCount;
+    priorOldEndBoundary = oldRangeStartBoundary + oldCount;
+    priorNewEndBoundary = newRangeStartBoundary + newCount;
     hunks.push({
       key: `${path}\u0000${hunkIndex}`,
       oldStart,

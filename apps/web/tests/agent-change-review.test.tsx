@@ -81,6 +81,38 @@ describe('Agent change review integration', () => {
     expect(screen.queryByTestId('file-diff-viewer')).toBeNull();
   });
 
+  it('rejects coercible statuses and contradictory created patches before rendering copy controls', () => {
+    const { rerender } = render(<AgentChangeReview fileChanges={[
+      { path: 'src/fake.ts', status: ['created'], additions: 1, deletions: 0 },
+    ]} />);
+    expect(screen.getByTestId('invalid-changes-message')).toBeDefined();
+    expect(screen.queryByTestId('copy-diff-btn')).toBeNull();
+    expect(screen.queryByTestId('file-diff-viewer')).toBeNull();
+
+    rerender(<AgentChangeReview
+      fileChanges={[{ path: 'src/contradictory.ts', status: 'created', additions: 1, deletions: 0 }]}
+      fixtureValue={{
+        provenance: 'demo-fixture',
+        files: [{
+          path: 'src/contradictory.ts',
+          status: 'created',
+          beforeRevision: 'No before file (Demo)',
+          afterRevision: 'Demo revision B',
+          preview: { kind: 'partial', hunks: [{
+            oldStart: 0,
+            oldCount: 0,
+            newStart: 1,
+            newCount: 1,
+            lines: [{ kind: 'context', text: 'impossible before content' }],
+          }] },
+        }],
+      }}
+    />);
+    expect(screen.getByTestId('invalid-changes-message')).toBeDefined();
+    expect(screen.queryByTestId('copy-diff-btn')).toBeNull();
+    expect(screen.queryByText('impossible before content')).toBeNull();
+  });
+
   it('uses an own fixture registry lookup and never resolves inherited prototype properties', () => {
     expect(getDemoAgentDiffFixtures('run-golden-react')).toBeDefined();
     expect(getDemoAgentDiffFixtures('constructor')).toBeUndefined();

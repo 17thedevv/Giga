@@ -91,6 +91,53 @@ describe('AgentDiffViewer', () => {
     expect(screen.getByText(/No after file \(Demo\)/)).toBeDefined();
   });
 
+  it('keeps created and deleted status consistent in unified and side-by-side rows', () => {
+    const created = makeFile('src/new.ts', 'created', [hunk(0, 0, 1, 1, [
+      { kind: 'addition', text: 'new only' },
+    ])], 1, 0);
+    const createdView = render(<AgentDiffViewer file={created} />);
+    expect(createdView.container.querySelector('.g-agent-diff-row.is-addition .g-agent-diff-row__number')?.textContent).toBe('');
+    expect(createdView.container.querySelector('.g-agent-diff-row.is-addition .g-agent-diff-row__number + .g-agent-diff-row__number')?.textContent).toBe('1');
+    fireEvent.click(screen.getByTestId('diff-view-split'));
+    const createdCells = createdView.container.querySelectorAll('.g-agent-diff-split-row .g-agent-diff-row__cell');
+    expect(createdCells[0]?.classList.contains('is-empty')).toBe(true);
+    expect(createdCells[0]?.textContent).not.toContain('new only');
+    expect(createdCells[1]?.textContent).toContain('new only');
+    createdView.unmount();
+
+    const deleted = makeFile('src/old.ts', 'deleted', [hunk(1, 1, 0, 0, [
+      { kind: 'deletion', text: 'old only' },
+    ])], 0, 1);
+    const deletedView = render(<AgentDiffViewer file={deleted} />);
+    expect(deletedView.container.querySelector('.g-agent-diff-row.is-deletion .g-agent-diff-row__number')?.textContent).toBe('1');
+    expect(deletedView.container.querySelector('.g-agent-diff-row.is-deletion .g-agent-diff-row__number + .g-agent-diff-row__number')?.textContent).toBe('');
+    fireEvent.click(screen.getByTestId('diff-view-split'));
+    const deletedCells = deletedView.container.querySelectorAll('.g-agent-diff-split-row .g-agent-diff-row__cell');
+    expect(deletedCells[0]?.textContent).toContain('old only');
+    expect(deletedCells[1]?.classList.contains('is-empty')).toBe(true);
+    expect(deletedCells[1]?.textContent).not.toContain('old only');
+  });
+
+  it('preserves shifted multi-hunk line numbers in unified and split views', () => {
+    const file = makeFile('src/shifted.ts', 'modified', [
+      hunk(1, 1, 1, 2, [
+        { kind: 'context', text: 'before' },
+        { kind: 'addition', text: 'inserted' },
+      ]),
+      hunk(5, 1, 6, 1, [{ kind: 'context', text: 'later' }]),
+    ], 1, 0);
+    const { container } = render(<AgentDiffViewer file={file} />);
+    const unifiedLater = container.querySelector('[data-testid="diff-hunk-1"] .g-agent-diff-row');
+    expect(unifiedLater?.getAttribute('aria-label')).toContain('old line 5, new line 6');
+
+    fireEvent.click(screen.getByTestId('diff-view-split'));
+    const splitCells = container.querySelectorAll('[data-testid="diff-hunk-1"] .g-agent-diff-row__cell');
+    expect(splitCells[0]?.querySelector('.g-agent-diff-row__number')?.textContent).toBe('5');
+    expect(splitCells[1]?.querySelector('.g-agent-diff-row__number')?.textContent).toBe('6');
+    expect(splitCells[0]?.textContent).toContain('later');
+    expect(splitCells[1]?.textContent).toContain('later');
+  });
+
   it('folds unchanged context without putting the hidden rows into the DOM and can expand/collapse it', () => {
     const lines = Array.from({ length: 12 }, (_, index) => ({ kind: 'context', text: `line-${index + 1}` }));
     const file = makeFile('src/context.ts', 'modified', [hunk(1, 12, 1, 12, lines)], 0, 0);

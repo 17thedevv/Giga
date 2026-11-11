@@ -72,6 +72,112 @@ describe('Agent structured diff projection', () => {
     expect(deleted.afterRevision).toBe('Demo revision B');
   });
 
+  it('enforces created and deleted side invariants for complete and partial patches', () => {
+    const invalidPatches: Array<{ name: string; status: 'created' | 'deleted'; preview: unknown }> = [
+      {
+        name: 'created context line', status: 'created',
+        preview: { kind: 'complete', hunks: [hunk(0, 0, 1, 1, [{ kind: 'context', text: 'old' }])] },
+      },
+      {
+        name: 'created deletion line', status: 'created',
+        preview: { kind: 'complete', hunks: [hunk(0, 0, 1, 1, [{ kind: 'deletion', text: 'old' }])] },
+      },
+      {
+        name: 'created nonzero old range', status: 'created',
+        preview: { kind: 'complete', hunks: [hunk(1, 1, 2, 1, [{ kind: 'addition', text: 'new' }])] },
+      },
+      {
+        name: 'created partial with old-side context', status: 'created',
+        preview: { kind: 'partial', hunks: [hunk(0, 0, 1, 1, [{ kind: 'context', text: 'old' }])] },
+      },
+      {
+        name: 'created no-newline marker on the missing before side', status: 'created',
+        preview: { kind: 'complete', hunks: [hunk(0, 0, 1, 1, [
+          { kind: 'addition', text: 'new' }, { kind: 'no-newline', appliesTo: 'before' },
+        ])] },
+      },
+      {
+        name: 'deleted context line', status: 'deleted',
+        preview: { kind: 'complete', hunks: [hunk(1, 1, 0, 0, [{ kind: 'context', text: 'old' }])] },
+      },
+      {
+        name: 'deleted addition line', status: 'deleted',
+        preview: { kind: 'complete', hunks: [hunk(1, 1, 0, 0, [{ kind: 'addition', text: 'new' }])] },
+      },
+      {
+        name: 'deleted nonzero new range', status: 'deleted',
+        preview: { kind: 'complete', hunks: [hunk(1, 1, 1, 1, [{ kind: 'deletion', text: 'old' }])] },
+      },
+      {
+        name: 'deleted partial with new-side content', status: 'deleted',
+        preview: { kind: 'partial', hunks: [hunk(1, 1, 0, 0, [{ kind: 'addition', text: 'new' }])] },
+      },
+      {
+        name: 'deleted no-newline marker on the missing after side', status: 'deleted',
+        preview: { kind: 'complete', hunks: [hunk(1, 1, 0, 0, [
+          { kind: 'deletion', text: 'old' }, { kind: 'no-newline', appliesTo: 'after' },
+        ])] },
+      },
+    ];
+
+    for (const [index, invalid] of invalidPatches.entries()) {
+      const result = projectDemoAgentChanges(
+        summarize(`src/invalid-${index}.ts`, invalid.status),
+        fixture(`src/invalid-${index}.ts`, invalid.status, invalid.preview),
+      );
+      expect(result, invalid.name).toEqual({ ok: false, reason: 'invalid-change-set' });
+      expect(result.ok ? result.files.map(buildCopyableAgentDiff) : [], invalid.name).toEqual([]);
+    }
+  });
+
+  it('accepts valid created, deleted, and modified content only on available sides', () => {
+    const created = fileFrom(summarize('src/new.ts', 'created', 1, 0), fixture('src/new.ts', 'created', {
+      kind: 'complete', hunks: [hunk(0, 0, 1, 1, [
+        { kind: 'addition', text: 'new file' },
+        { kind: 'no-newline', appliesTo: 'after' },
+      ])],
+    }));
+    expect(created.preview.kind).toBe('complete');
+    expect(buildCopyableAgentDiff(created)?.text).toContain('--- /dev/null');
+
+    const deleted = fileFrom(summarize('src/old.ts', 'deleted', 0, 1), fixture('src/old.ts', 'deleted', {
+      kind: 'complete', hunks: [hunk(1, 1, 0, 0, [
+        { kind: 'deletion', text: 'old file' },
+        { kind: 'no-newline', appliesTo: 'before' },
+      ])],
+    }));
+    expect(deleted.preview.kind).toBe('complete');
+    expect(buildCopyableAgentDiff(deleted)?.text).toContain('+++ /dev/null');
+
+    const modified = fileFrom(summarize('src/changed.ts', 'modified', 1, 1), fixture('src/changed.ts', 'modified', {
+      kind: 'complete', hunks: [hunk(1, 2, 1, 2, [
+        { kind: 'context', text: 'head' },
+        { kind: 'deletion', text: 'old' },
+        { kind: 'addition', text: 'new' },
+      ])],
+    }));
+    expect(modified.preview.kind).toBe('complete');
+    expect(modified.preview.kind === 'complete' && modified.preview.hunks[0]?.lines.map((line) => [line.oldLine, line.newLine]))
+      .toEqual([[1, 1], [2, null], [null, 2]]);
+  });
+
+  it('requires exact string statuses and never projects coercible values', () => {
+    const invalidStatuses: unknown[] = [
+      ['created'], ['deleted'], ['modified'], {}, null, undefined, 123, true, 'CREATED', 'created ',
+    ];
+    for (const [index, status] of invalidStatuses.entries()) {
+      const result = projectDemoAgentChanges([{ path: `src/invalid-status-${index}.ts`, status }]);
+      expect(result, `status ${JSON.stringify(status)}`).toEqual({ ok: false, reason: 'invalid-change-set' });
+      expect(result.ok ? result.files.map(buildCopyableAgentDiff) : []).toEqual([]);
+    }
+
+    for (const status of ['created', 'modified', 'deleted'] as const) {
+      const result = projectDemoAgentChanges([{ path: `src/${status}.ts`, status }]);
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.files[0]?.status).toBe(status);
+    }
+  });
+
   it('validates multiple hunks and assigns monotonically correct old and new line numbers', () => {
     const file = fileFrom(summarize('src/multi.ts', 'modified', 2, 1), fixture('src/multi.ts', 'modified', {
       kind: 'complete', hunks: [
@@ -89,6 +195,118 @@ describe('Agent structured diff projection', () => {
     expect(file.preview.hunks.map((part) => [part.oldStart, part.oldCount, part.newStart, part.newCount])).toEqual([[2, 2, 2, 3], [12, 1, 13, 1]]);
     expect(file.preview.hunks[0]?.lines.map((line) => [line.oldLine, line.newLine])).toEqual([[2, 2], [3, null], [null, 3], [null, 4]]);
     expect(file.preview.hunks[1]?.lines[0]).toMatchObject({ oldLine: 12, newLine: 13 });
+  });
+
+  it('accepts complete multi-hunk patches with matching omitted spans and represented shifts', () => {
+    const additions = fileFrom(summarize('src/add-shift.ts', 'modified', 1, 0), fixture('src/add-shift.ts', 'modified', {
+      kind: 'complete', hunks: [
+        hunk(1, 1, 1, 2, [
+          { kind: 'context', text: 'before addition' },
+          { kind: 'addition', text: 'inserted' },
+        ]),
+        hunk(5, 1, 6, 1, [{ kind: 'context', text: 'after addition' }]),
+      ],
+    }));
+    expect(additions.preview.kind).toBe('complete');
+    if (additions.preview.kind === 'complete') {
+      expect(additions.preview.hunks[1]?.lines[0]).toMatchObject({ oldLine: 5, newLine: 6 });
+    }
+
+    const deletions = fileFrom(summarize('src/delete-shift.ts', 'modified', 0, 1), fixture('src/delete-shift.ts', 'modified', {
+      kind: 'complete', hunks: [
+        hunk(1, 2, 1, 1, [
+          { kind: 'deletion', text: 'removed' },
+          { kind: 'context', text: 'kept' },
+        ]),
+        hunk(6, 1, 5, 1, [{ kind: 'context', text: 'after deletion' }]),
+      ],
+    }));
+    expect(deletions.preview.kind).toBe('complete');
+    if (deletions.preview.kind === 'complete') {
+      expect(deletions.preview.hunks[1]?.lines[0]).toMatchObject({ oldLine: 6, newLine: 5 });
+    }
+
+    const equalGaps = fileFrom(summarize('src/equal-gaps.ts', 'modified', 0, 0), fixture('src/equal-gaps.ts', 'modified', {
+      kind: 'complete', hunks: [
+        hunk(2, 1, 2, 1, [{ kind: 'context', text: 'first' }]),
+        hunk(5, 1, 5, 1, [{ kind: 'context', text: 'later' }]),
+      ],
+    }));
+    expect(equalGaps.preview.kind).toBe('complete');
+
+    const zeroCountInsertion = fileFrom(summarize('src/insert-boundary.ts', 'modified', 1, 0), fixture('src/insert-boundary.ts', 'modified', {
+      kind: 'complete', hunks: [
+        hunk(4, 0, 5, 1, [{ kind: 'addition', text: 'inserted between ranges' }]),
+        hunk(10, 1, 11, 1, [{ kind: 'context', text: 'later' }]),
+      ],
+    }));
+    expect(zeroCountInsertion.preview.kind).toBe('complete');
+
+    const zeroCountDeletion = fileFrom(summarize('src/delete-boundary.ts', 'modified', 0, 1), fixture('src/delete-boundary.ts', 'modified', {
+      kind: 'complete', hunks: [
+        hunk(5, 1, 4, 0, [{ kind: 'deletion', text: 'removed between ranges' }]),
+        hunk(10, 1, 9, 1, [{ kind: 'context', text: 'later' }]),
+      ],
+    }));
+    expect(zeroCountDeletion.preview.kind).toBe('complete');
+  });
+
+  it('rejects complete patches with unequal, overlapping, or decreasing hunk ranges without making them copyable', () => {
+    const invalidHunks = [
+      [
+        hunk(1, 1, 1, 2, [{ kind: 'context', text: 'first' }, { kind: 'addition', text: 'new' }]),
+        hunk(5, 1, 7, 1, [{ kind: 'context', text: 'later' }]),
+      ],
+      [
+        hunk(1, 2, 1, 2, [{ kind: 'context', text: 'first' }, { kind: 'context', text: 'second' }]),
+        hunk(2, 1, 2, 1, [{ kind: 'context', text: 'overlap' }]),
+      ],
+      [
+        hunk(10, 1, 10, 1, [{ kind: 'context', text: 'first' }]),
+        hunk(2, 1, 2, 1, [{ kind: 'context', text: 'decreasing' }]),
+      ],
+    ];
+
+    for (const [index, hunks] of invalidHunks.entries()) {
+      const result = projectDemoAgentChanges(
+        summarize(`src/inconsistent-${index}.ts`, 'modified'),
+        fixture(`src/inconsistent-${index}.ts`, 'modified', { kind: 'complete', hunks }),
+      );
+      expect(result).toEqual({ ok: false, reason: 'invalid-change-set' });
+      expect(result.ok ? result.files.map(buildCopyableAgentDiff) : []).toEqual([]);
+    }
+  });
+
+  it('keeps unequal omitted spans on legitimate partial excerpts explicitly partial', () => {
+    const partial = fileFrom(summarize('src/partial-gaps.ts', 'modified', 1, 0), fixture('src/partial-gaps.ts', 'modified', {
+      kind: 'partial', hunks: [
+        hunk(1, 1, 1, 2, [
+          { kind: 'context', text: 'before change' },
+          { kind: 'addition', text: 'omitted change' },
+        ]),
+        hunk(5, 1, 7, 1, [{ kind: 'context', text: 'after change' }]),
+      ],
+    }));
+    expect(partial.preview.kind).toBe('partial');
+    expect(buildCopyableAgentDiff(partial)?.kind).toBe('excerpt');
+    expect(buildCopyableAgentDiff(partial)?.text).toContain('not a complete or applicable patch');
+  });
+
+  it('copies valid complete multi-hunk patches with complete provenance and valid shifted coordinates', () => {
+    const file = fileFrom(summarize('src/multi-copy.ts', 'modified', 1, 0), fixture('src/multi-copy.ts', 'modified', {
+      kind: 'complete', hunks: [
+        hunk(1, 1, 1, 2, [
+          { kind: 'context', text: 'before' },
+          { kind: 'addition', text: 'inserted' },
+        ]),
+        hunk(5, 1, 6, 1, [{ kind: 'context', text: 'after' }]),
+      ],
+    }));
+    const copied = buildCopyableAgentDiff(file);
+    expect(copied?.kind).toBe('patch');
+    expect(copied?.text).toContain('Demo sample patch');
+    expect(copied?.text).not.toContain('Partial Demo excerpt');
+    expect(copied?.text).toContain('@@ -5,1 +6,1 @@');
   });
 
   it('keeps identical basenames in distinct directories as separate file identities', () => {
